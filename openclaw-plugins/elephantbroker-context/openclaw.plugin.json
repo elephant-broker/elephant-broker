@@ -1,0 +1,17 @@
+{
+  "id": "elephantbroker-context",
+  "kind": "context-engine",
+  "name": "ElephantBroker ContextEngine",
+  "version": "0.1.0",
+  "description": "ElephantBroker ContextEngine Plugin — assembly, compaction, subagent lifecycle",
+  "entry": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": { "type": "string", "description": "ElephantBroker runtime URL" },
+      "gatewayId": { "type": "string", "description": "Gateway instance ID" },
+      "gatewayShortName": { "type": "string", "description": "Short display name" },
+      "profileName": { "type": "string", "description": "Profile preset (coding, research, managerial, worker, personal_assistant)" }
+    }
+  }
+}

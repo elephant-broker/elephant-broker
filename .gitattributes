@@ -1,0 +1,6 @@
+CLAUDE.md filter=git-crypt diff=git-crypt
+local/** filter=git-crypt diff=git-crypt
+
+.gitattributes !filter !diff
+.gitignore !filter !diff
+.gitmodules !filter !diff

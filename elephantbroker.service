@@ -1,0 +1,15 @@
+[Unit]
+Description=ElephantBroker Cognitive Runtime
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=dbadmin
+WorkingDirectory=/var/lib/elephantbroker
+EnvironmentFile=/etc/elephantbroker/env
+ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+# ElephantBroker default configuration — FULL tier (memory + context).
+# Literal defaults — environment variables override at runtime.
+# See: EB_GATEWAY_ID, EB_ORG_ID, EB_TEAM_ID, EB_NEO4J_URI, etc.
+
+gateway:
+  gateway_id: "local"
+  org_id: ""
+  team_id: ""
+  agent_authority_level: 0
+
+cognee:
+  neo4j_uri: "bolt://localhost:7687"
+  neo4j_user: "neo4j"
+  neo4j_password: "elephant_dev"  # dev/test default — override via EB_NEO4J_PASSWORD in production
+  qdrant_url: "http://localhost:6333"
+  embedding_endpoint: "http://localhost:8811/v1"
+
+llm:
+  # IMPORTANT: Cognee requires the "openai/" prefix — it strips it internally
+  # and sends "gemini/gemini-2.5-pro" to the LiteLLM proxy.
+  model: "openai/gemini/gemini-2.5-pro"
+  endpoint: "http://localhost:8811/v1"
+
+infra:
+  redis_url: "redis://localhost:6379"
+  # Supported: debug, verbose, info, warning, error, critical
+  # "verbose" shows per-item assembly decisions without full DEBUG payloads
+  log_level: "info"
+
+profile_cache:
+  ttl_seconds: 300
+
+audit:
+  org_overrides_db_path: "data/org_overrides.db"
+  authority_rules_db_path: "data/authority_rules.db"

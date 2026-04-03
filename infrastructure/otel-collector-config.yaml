@@ -1,0 +1,31 @@
+# OTEL Collector configuration for ElephantBroker (Phase 9)
+# Receives OTLP traces and logs, routes to Jaeger (traces) and ClickHouse (logs)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: otel
+    username: default
+    password: ""
+    ttl: 72h
+    logs_table_name: otel_logs
+    create_schema: true
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/jaeger]
+    logs:
+      receivers: [otlp]
+      exporters: [clickhouse]

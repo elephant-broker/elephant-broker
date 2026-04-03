@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.env
+.ruff_cache/
+node_modules/
+.DS_Store
+*.egg
+.mypy_cache/
+data/*.db
+.claude/scheduled_tasks.lock
+
+# LaTeX build artifacts
+texput.log
+*.missfont.log
+missfont.log
+*-eps-converted-to.pdf
+local/pr-heartbeats/

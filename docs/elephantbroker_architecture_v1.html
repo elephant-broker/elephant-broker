@@ -1,0 +1,1482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ElephantBroker Architecture — v1</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0c10;
+  --surface: #12151c;
+  --surface-2: #181c26;
+  --surface-3: #1e2330;
+  --border: #2a3040;
+  --border-accent: #3a4560;
+  --text: #d4dae6;
+  --text-dim: #8892a8;
+  --text-bright: #f0f4ff;
+  --accent: #5b8def;
+  --accent-2: #7c5cfc;
+  --accent-3: #e85d75;
+  --accent-4: #3ecf8e;
+  --accent-5: #f0b429;
+  --accent-glow: rgba(91,141,239,0.12);
+  --code-bg: #0d1017;
+  --serif: 'DM Serif Display', Georgia, serif;
+  --sans: 'Source Sans 3', -apple-system, sans-serif;
+  --mono: 'IBM Plex Mono', 'Fira Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16.5px;
+  line-height: 1.72;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── NAV ── */
+.nav {
+  position: fixed; top: 0; left: 0; width: 280px; height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto; z-index: 100;
+  padding: 28px 0;
+}
+.nav-logo {
+  padding: 0 24px 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.nav-logo h2 {
+  font-family: var(--serif);
+  color: var(--accent);
+  font-size: 20px;
+  letter-spacing: -0.3px;
+}
+.nav-logo span {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  display: block;
+  margin-top: 2px;
+}
+.nav a {
+  display: block;
+  padding: 7px 24px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: all 0.15s;
+  border-left: 2px solid transparent;
+}
+.nav a:hover {
+  color: var(--text-bright);
+  background: var(--accent-glow);
+  border-left-color: var(--accent);
+}
+.nav .nav-section {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  padding: 18px 24px 6px;
+  opacity: 0.7;
+}
+
+/* ── MAIN ── */
+.main {
+  margin-left: 280px;
+  max-width: 920px;
+  padding: 48px 56px 120px;
+}
+
+/* ── HERO ── */
+.hero {
+  margin-bottom: 64px;
+  padding-bottom: 48px;
+  border-bottom: 1px solid var(--border);
+}
+.hero h1 {
+  font-family: var(--serif);
+  font-size: 42px;
+  color: var(--text-bright);
+  line-height: 1.18;
+  margin-bottom: 12px;
+  letter-spacing: -0.5px;
+}
+.hero .subtitle {
+  font-size: 19px;
+  color: var(--text-dim);
+  font-weight: 300;
+  margin-bottom: 20px;
+}
+.hero .meta {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.hero .meta span { margin-right: 24px; }
+
+/* ── SECTIONS ── */
+section { margin-bottom: 56px; }
+section h2 {
+  font-family: var(--serif);
+  font-size: 28px;
+  color: var(--text-bright);
+  margin-bottom: 20px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: -0.3px;
+}
+section h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 28px 0 10px;
+}
+section h4 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent-5);
+  margin: 20px 0 8px;
+  font-family: var(--mono);
+}
+
+p { margin-bottom: 14px; }
+
+/* ── CALLOUTS ── */
+.callout {
+  background: var(--surface-2);
+  border-left: 3px solid var(--accent);
+  padding: 16px 20px;
+  margin: 20px 0;
+  border-radius: 0 6px 6px 0;
+  font-size: 15px;
+}
+.callout.warn { border-left-color: var(--accent-5); }
+.callout.green { border-left-color: var(--accent-4); }
+.callout.red { border-left-color: var(--accent-3); }
+.callout strong { color: var(--text-bright); }
+
+/* ── CODE ── */
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+  margin: 16px 0;
+}
+code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+pre code { background: none; padding: 0; color: inherit; }
+
+/* ── TABLES ── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 20px 0;
+  font-size: 14px;
+}
+th {
+  background: var(--surface-2);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 2px solid var(--border-accent);
+}
+td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+tr:hover td { background: var(--accent-glow); }
+td code { font-size: 12px; }
+
+/* ── LISTS ── */
+ul, ol {
+  margin: 10px 0 14px 24px;
+}
+li {
+  margin-bottom: 5px;
+}
+li::marker { color: var(--accent); }
+
+/* ── DIAGRAM CONTAINER ── */
+.diagram-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 32px;
+  margin: 28px 0;
+  overflow-x: auto;
+}
+.diagram-wrap .diagram-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  margin-bottom: 20px;
+}
+
+/* ── SVG DIAGRAMS ── */
+.arch-svg { width: 100%; height: auto; }
+.arch-svg text {
+  font-family: 'Source Sans 3', sans-serif;
+}
+
+/* ── PHASE CARDS ── */
+.phase-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 20px 0;
+}
+.phase-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 18px 20px;
+  transition: border-color 0.2s;
+}
+.phase-card:hover { border-color: var(--accent); }
+.phase-card .phase-num {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+.phase-card .phase-title {
+  font-weight: 600;
+  color: var(--text-bright);
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+.phase-card p {
+  font-size: 13.5px;
+  color: var(--text-dim);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── TAG CHIPS ── */
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.tag.py { border-color: #3572A5; color: #6da1d4; }
+.tag.ts { border-color: #3178c6; color: #5a9fd4; }
+.tag.cognee { border-color: #3ecf8e; color: #3ecf8e; }
+
+/* ── STATUS BADGE ── */
+.status-done {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(62,207,142,0.15);
+  color: var(--accent-4);
+  border: 1px solid rgba(62,207,142,0.3);
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+/* ── FORMULA ── */
+.formula {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 20px;
+  margin: 16px 0;
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--accent);
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+
+/* ── RESPONSIVE ── */
+@media (max-width: 1100px) {
+  .nav { display: none; }
+  .main { margin-left: 0; padding: 32px 24px 80px; }
+  .phase-grid { grid-template-columns: 1fr; }
+}
+
+/* ── PRINT ── */
+@media print {
+  .nav { display: none; }
+  .main { margin-left: 0; max-width: 100%; }
+  body { background: #fff; color: #111; font-size: 11pt; }
+  section h2 { color: #111; border-color: #ccc; }
+  .callout { border-color: #999; background: #f5f5f5; }
+  pre { background: #f0f0f0; border-color: #ccc; }
+  .diagram-wrap { background: #fafafa; border-color: #ccc; }
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ NAV ═══════════════ -->
+<nav class="nav">
+  <div class="nav-logo">
+    <h2>ElephantBroker</h2>
+    <span>Cognitive Runtime v1</span>
+  </div>
+  <div class="nav-section">Overview</div>
+  <a href="#exec">Executive Summary</a>
+  <a href="#contributions">Contributions</a>
+  <a href="#principles">Design Principles</a>
+  <a href="#arch-diagram">Architecture Diagram</a>
+  <div class="nav-section">Foundation</div>
+  <a href="#lang-split">Language Split</a>
+  <a href="#identity">Identity Model</a>
+  <a href="#runtime-modules">Runtime Modules</a>
+  <a href="#actors">Actor Model</a>
+  <div class="nav-section">Data Model</div>
+  <a href="#memory-taxonomy">Memory Taxonomy</a>
+  <a href="#scopes">Scope System</a>
+  <a href="#schemas">Data Schemas &amp; DataPoints</a>
+  <div class="nav-section">Engines</div>
+  <a href="#retrieval">Five-Source Retrieval</a>
+  <a href="#reranking">Four-Stage Reranking</a>
+  <a href="#working-set">Working Set Manager</a>
+  <a href="#scoring">11-Dimension Scoring</a>
+  <a href="#context-lifecycle">Context Lifecycle</a>
+  <div class="nav-section">Safety &amp; Trust</div>
+  <a href="#guards">Guard Pipeline</a>
+  <a href="#firewall">AI Firewall</a>
+  <a href="#verification">Evidence Verification</a>
+  <a href="#trace">Traceability</a>
+  <div class="nav-section">Intelligence</div>
+  <a href="#compaction">Compaction</a>
+  <a href="#consolidation">Consolidation Pipeline</a>
+  <a href="#procedures">Procedural Memory</a>
+  <a href="#subagents">Subagent Packets</a>
+  <div class="nav-section">Configuration</div>
+  <a href="#profiles">Profiles &amp; Scoring</a>
+  <a href="#tiers">Business Tiers</a>
+  <a href="#cognee">Cognee Integration</a>
+</nav>
+
+<!-- ═══════════════ MAIN ═══════════════ -->
+<div class="main">
+
+<!-- ── HERO ── -->
+<header class="hero">
+  <h1>ElephantBroker: A Knowledge-Grounded Cognitive Runtime for Trustworthy AI Agents</h1>
+  <div class="subtitle">Unified Architecture for Memory Plugin + ContextEngine Plugin on Cognee</div>
+  <div class="meta">
+    <span>Authors: Cristian Lupascu, Alexandru Lupascu</span>
+    <span>Revision: v1</span>
+    <span>Date: 2026-04-03</span>
+    <span>Paper: arXiv:2603.25097</span>
+  </div>
+</header>
+
+<!-- ═══════════════ 1. EXECUTIVE SUMMARY ═══════════════ -->
+<section id="exec">
+<h2>1. Executive Summary</h2>
+
+<p>Current agent memory systems exhibit three fundamental shortcomings: (1) no relational structure beyond flat vector stores, (2) no provenance or trustworthiness tracking on stored memories, and (3) retrieval disconnected from the agent's current goals.</p>
+
+<p><strong>ElephantBroker</strong> is a <strong>single Cognitive Runtime</strong> that addresses all three through a unified architecture with:</p>
+
+<ul>
+  <li>A <strong>Memory Plugin</strong> as the durable knowledge, actor, procedure, evidence, and consolidation surface</li>
+  <li>A <strong>ContextEngine Plugin</strong> as the working-set, assembly, compaction, guard, and subagent surface</li>
+  <li>A shared <strong>Cognee-backed knowledge plane</strong> underneath both &mdash; Python-native, leveraging Cognee's DataPoint model, graph + vector search, and custom task pipelines</li>
+  <li>A shared <strong>policy/profile layer</strong> governing retrieval, assembly, compaction, verification, and red-line enforcement</li>
+  <li>An <strong>AI Firewall</strong> that transforms advisory guard verdicts into physically enforceable tool-call interception across three defense layers</li>
+</ul>
+
+<p>This design gives three things at once:</p>
+<ol>
+  <li><strong>Standalone viability</strong> &mdash; The Memory Plugin can be sold and used alone</li>
+  <li><strong>Composable context intelligence</strong> &mdash; The ContextEngine can run alone with reduced durability</li>
+  <li><strong>Best-in-class full system behavior</strong> &mdash; Memory + Context together behave like one coherent operating system for agents</li>
+</ol>
+
+<div class="callout green">
+  <strong>The cognitive loop:</strong> store &rarr; retrieve &rarr; score &rarr; compose &rarr; protect &rarr; enforce &rarr; learn. Every step is goal-aware, evidence-grounded, profile-tuned, and gateway-isolated.
+</div>
+</section>
+
+<!-- ═══════════════ 2. CONTRIBUTIONS ═══════════════ -->
+<section id="contributions">
+<h2>2. Principal Contributions</h2>
+
+<p>ElephantBroker makes eight principal contributions to the agent memory and context management problem:</p>
+
+<ol>
+  <li><strong>Hybrid five-source retrieval pipeline</strong> &mdash; concurrent structural graph queries, lexical matching, semantic vector search, ego-net graph expansion, and artifact retrieval, merged with configurable per-source weights and actor-level isolation policies</li>
+  <li><strong>Eleven-dimension competitive scoring engine</strong> &mdash; evaluates candidates on turn relevance, session/global goal relevance, recency, successful use, confidence with verification multipliers, evidence strength, novelty, redundancy penalty, contradiction penalty, and token cost penalty. Budget-constrained greedy selection with a (1 &minus; 1/e) submodularity guarantee</li>
+  <li><strong>Four-state evidence verification model</strong> &mdash; UNVERIFIED &rarr; SELF-SUPPORTED &rarr; TOOL-SUPPORTED &rarr; SUPERVISOR-VERIFIED (plus REJECTED from any state). Verification status feeds graded confidence multipliers into scoring</li>
+  <li><strong>Five-stage context lifecycle</strong> &mdash; bootstrap, ingest, assemble, compact, afterTurn. Manages profile resolution, four-block assembly across two prompt surfaces, two-stage compaction, six-signal successful-use detection, and subagent spawn/end hooks</li>
+  <li><strong>Six-layer cheap-first guard pipeline</strong> &mdash; autonomy domain classification, static rule matching, semantic matching, structural validation, forced constraint reinjection, and optional LLM escalation</li>
+  <li><strong>Nine-stage consolidation engine</strong> &mdash; cluster near-duplicates, canonicalize, strengthen useful facts, decay unused, prune bad auto-recall, promote episodic to semantic, refine procedures from patterns, identify verification gaps, recompute salience priors. Seven of nine stages require zero LLM calls</li>
+  <li><strong>AI Firewall</strong> &mdash; transforms advisory guard verdicts into physically enforceable tool-call interception across three defense layers (agent hook, proxy guardrails, SDK hooks), with six-tier cost-ordered safety scanning and knowledge base contamination prevention</li>
+  <li><strong>Authority-based multi-organization identity model</strong> &mdash; numeric permission hierarchy with four tiers, eleven configurable authority rules with matching-exempt semantics, organizations and teams as first-class graph nodes</li>
+</ol>
+</section>
+
+<!-- ═══════════════ 3. DESIGN PRINCIPLES ═══════════════ -->
+<section id="principles">
+<h2>3. Design Principles</h2>
+
+<h3>3.1 One runtime, two plugin surfaces</h3>
+<p>The plugins are product surfaces, not independent brains. They share schema, IDs, cache keys, policy resolution, profile behavior, actor registry, stats, evidence references, goal model, and working-set semantics. The runtime is written in <strong>Python</strong>; only thin plugin adapters exposed to host frameworks live in TypeScript.</p>
+
+<h3>3.2 Working memory is first-class</h3>
+<p>The system distinguishes clearly between chat history, durable memory, working set, and prompt payload. The prompt is an output artifact, not the source of truth.</p>
+
+<h3>3.3 Goals are first-class</h3>
+<p>The system tracks global goals, organization goals, session goals, task goals, and subagent goals. Every lifecycle step knows which goal level it serves. Goals shape scoring, compaction, retrieval, guard evaluation, and consolidation.</p>
+
+<h3>3.4 Actors are first-class</h3>
+<p>Do not model the world as "one human user + one assistant." Model human coordinators, peer agents, supervisor agents, worker agents, external humans, and services/tools/system actors. Every memory entry tracks source/target actors, affected goals, scope, and provenance.</p>
+
+<h3>3.5 Claims require evidence</h3>
+<p>Any statement of action, completion, or compliance is optionally backed by evidence references with a four-state verification model. Verification status feeds graded confidence multipliers (0.5, 0.7, 0.9, 1.0) into scoring, creating a structural bias toward trustworthy information.</p>
+
+<h3>3.6 Cheap safety before expensive safety</h3>
+<p>Red-line enforcement starts with autonomy domain classification &rarr; static rule matching &rarr; semantic similarity &rarr; structural validators &rarr; forced reinjection &rarr; LLM escalation. Six layers, each cheaper than the next. Most violations are caught before any LLM call is needed.</p>
+
+<h3>3.7 Compaction is continuous and goal-aware</h3>
+<p>Compaction is not an occasional emergency response. It is a normal lifecycle activity with the current goal in mind. Two-stage: classify (zero LLM) then summarize (one LLM call).</p>
+
+<h3>3.8 Gateway-first isolation</h3>
+<p>Every entity carries a <code>gateway_id</code>. All Redis keys, Neo4j queries, Cognee datasets, Prometheus metrics, and trace events are gateway-scoped. No single-tenant assumptions anywhere in the stack.</p>
+</section>
+
+<!-- ═══════════════ 4. ARCHITECTURE DIAGRAM ═══════════════ -->
+<section id="arch-diagram">
+<h2>4. Four-Layer Architecture</h2>
+
+<p>The system is organized into four layers. Layer A handles agent integration via thin TypeScript plugins. Layer B is the Python cognitive runtime with 17 modules. Layer C is the Cognee SDK knowledge plane. Layer D is the infrastructure plane.</p>
+
+<div class="diagram-wrap">
+<div class="diagram-title">ElephantBroker — Four-Layer System Architecture</div>
+<svg viewBox="0 0 860 1380" xmlns="http://www.w3.org/2000/svg" class="arch-svg" style="font-family: 'Source Sans 3', sans-serif;">
+  <defs>
+    <linearGradient id="gA" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#5b8def" stop-opacity="0.15"/><stop offset="100%" stop-color="#7c5cfc" stop-opacity="0.08"/></linearGradient>
+    <linearGradient id="gB" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#3ecf8e" stop-opacity="0.12"/><stop offset="100%" stop-color="#5b8def" stop-opacity="0.06"/></linearGradient>
+    <linearGradient id="gC" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e85d75" stop-opacity="0.10"/><stop offset="100%" stop-color="#f0b429" stop-opacity="0.06"/></linearGradient>
+    <linearGradient id="gD" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#f0b429" stop-opacity="0.12"/><stop offset="100%" stop-color="#3ecf8e" stop-opacity="0.06"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.3" flood-color="#000"/></filter>
+  </defs>
+
+  <!-- ── LAYER A: Agent Integration (TypeScript Plugins) ── -->
+  <rect x="20" y="16" width="820" height="140" rx="8" fill="url(#gC)" stroke="#e85d75" stroke-opacity="0.4"/>
+  <text x="40" y="42" fill="#e85d75" font-size="11" font-weight="700" letter-spacing="1.5" text-transform="uppercase" font-family="IBM Plex Mono, monospace">LAYER A — Agent Integration (TypeScript / 24 Tools / 8 Lifecycle Hooks)</text>
+
+  <!-- Instance 1 -->
+  <rect x="40" y="56" width="235" height="86" rx="6" fill="#1e2330" stroke="#e85d75" stroke-opacity="0.35" filter="url(#shadow)"/>
+  <text x="58" y="78" fill="#f0f4ff" font-size="13" font-weight="600">OpenClaw Instance #1</text>
+  <text x="58" y="96" fill="#8892a8" font-size="11" font-family="IBM Plex Mono, monospace">Profile: coding</text>
+  <rect x="58" y="106" width="95" height="24" rx="4" fill="#2a3040" stroke="#5b8def" stroke-opacity="0.4"/>
+  <text x="70" y="122" fill="#5b8def" font-size="10" font-family="IBM Plex Mono, monospace">MemoryPlugin</text>
+  <rect x="162" y="106" width="98" height="24" rx="4" fill="#2a3040" stroke="#7c5cfc" stroke-opacity="0.4"/>
+  <text x="170" y="122" fill="#7c5cfc" font-size="10" font-family="IBM Plex Mono, monospace">ContextPlugin</text>
+
+  <!-- Instance 2 -->
+  <rect x="310" y="56" width="235" height="86" rx="6" fill="#1e2330" stroke="#e85d75" stroke-opacity="0.35" filter="url(#shadow)"/>
+  <text x="328" y="78" fill="#f0f4ff" font-size="13" font-weight="600">OpenClaw Instance #2</text>
+  <text x="328" y="96" fill="#8892a8" font-size="11" font-family="IBM Plex Mono, monospace">Profile: managerial</text>
+  <rect x="328" y="106" width="95" height="24" rx="4" fill="#2a3040" stroke="#5b8def" stroke-opacity="0.4"/>
+  <text x="340" y="122" fill="#5b8def" font-size="10" font-family="IBM Plex Mono, monospace">MemoryPlugin</text>
+  <rect x="432" y="106" width="98" height="24" rx="4" fill="#2a3040" stroke="#7c5cfc" stroke-opacity="0.4"/>
+  <text x="440" y="122" fill="#7c5cfc" font-size="10" font-family="IBM Plex Mono, monospace">ContextPlugin</text>
+
+  <!-- Instance 3 -->
+  <rect x="580" y="56" width="235" height="86" rx="6" fill="#1e2330" stroke="#e85d75" stroke-opacity="0.35" filter="url(#shadow)"/>
+  <text x="598" y="78" fill="#f0f4ff" font-size="13" font-weight="600">OpenClaw Instance #3</text>
+  <text x="598" y="96" fill="#8892a8" font-size="11" font-family="IBM Plex Mono, monospace">Profile: worker</text>
+  <rect x="598" y="106" width="95" height="24" rx="4" fill="#2a3040" stroke="#5b8def" stroke-opacity="0.4"/>
+  <text x="610" y="122" fill="#5b8def" font-size="10" font-family="IBM Plex Mono, monospace">MemoryPlugin</text>
+  <rect x="702" y="106" width="98" height="24" rx="4" fill="#2a3040" stroke="#7c5cfc" stroke-opacity="0.4"/>
+  <text x="710" y="122" fill="#7c5cfc" font-size="10" font-family="IBM Plex Mono, monospace">ContextPlugin</text>
+
+  <!-- Arrows down from instances -->
+  <line x1="157" y1="142" x2="157" y2="178" stroke="#8892a8" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowGray)"/>
+  <line x1="427" y1="142" x2="427" y2="178" stroke="#8892a8" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowGray)"/>
+  <line x1="697" y1="142" x2="697" y2="178" stroke="#8892a8" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowGray)"/>
+
+  <defs>
+    <marker id="arrowGray" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8892a8"/></marker>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#5b8def"/></marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3ecf8e"/></marker>
+  </defs>
+
+  <!-- ── LAYER B: ElephantBroker Cognitive Runtime (Python) ── -->
+  <rect x="20" y="178" width="820" height="480" rx="8" fill="url(#gA)" stroke="#5b8def" stroke-opacity="0.4"/>
+  <text x="40" y="204" fill="#5b8def" font-size="11" font-weight="700" letter-spacing="1.5" font-family="IBM Plex Mono, monospace">LAYER B — Cognitive Runtime (Python / 17 Modules / 84 API Endpoints)</text>
+
+  <!-- Row 1: Core registries -->
+  <rect x="40" y="218" width="140" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="56" y="240" fill="#f0f4ff" font-size="12" font-weight="600">ActorRegistry</text>
+  <text x="56" y="256" fill="#8892a8" font-size="10">humans, agents, services</text>
+
+  <rect x="195" y="218" width="140" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="211" y="240" fill="#f0f4ff" font-size="12" font-weight="600">GoalManager</text>
+  <text x="211" y="256" fill="#8892a8" font-size="10">global&rarr;session&rarr;task</text>
+
+  <rect x="350" y="218" width="160" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="366" y="240" fill="#f0f4ff" font-size="12" font-weight="600">ProfileRegistry</text>
+  <text x="366" y="256" fill="#8892a8" font-size="10">5 presets + org overrides</text>
+
+  <rect x="525" y="218" width="145" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="541" y="240" fill="#f0f4ff" font-size="12" font-weight="600">TraceLedger</text>
+  <text x="541" y="256" fill="#8892a8" font-size="10">47 event types, OTEL</text>
+
+  <rect x="685" y="218" width="140" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="697" y="240" fill="#f0f4ff" font-size="12" font-weight="600">StatsEngine</text>
+  <text x="697" y="256" fill="#8892a8" font-size="10">49 Prometheus metrics</text>
+
+  <!-- Row 2: Memory + WS -->
+  <rect x="40" y="286" width="190" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="56" y="308" fill="#f0f4ff" font-size="12" font-weight="600">MemoryStoreFacade</text>
+  <text x="56" y="324" fill="#8892a8" font-size="10">CRUD + dedup + GDPR delete</text>
+
+  <rect x="245" y="286" width="180" height="52" rx="5" fill="#1e2330" stroke="#7c5cfc" stroke-opacity="0.4"/>
+  <text x="261" y="308" fill="#f0f4ff" font-size="12" font-weight="600">WorkingSetManager</text>
+  <text x="261" y="324" fill="#7c5cfc" font-size="10">11-dim scoring + budget</text>
+
+  <rect x="440" y="286" width="175" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="456" y="308" fill="#f0f4ff" font-size="12" font-weight="600">ContextAssembler</text>
+  <text x="456" y="324" fill="#8892a8" font-size="10">4-block / 2-surface</text>
+
+  <rect x="630" y="286" width="195" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="646" y="308" fill="#f0f4ff" font-size="12" font-weight="600">CompactionEngine</text>
+  <text x="646" y="324" fill="#8892a8" font-size="10">classify + LLM-summarize</text>
+
+  <!-- Row 3: Intelligence engines -->
+  <rect x="40" y="354" width="175" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="56" y="376" fill="#f0f4ff" font-size="12" font-weight="600">RetrievalOrchestrator</text>
+  <text x="56" y="392" fill="#8892a8" font-size="10">5-source hybrid merge</text>
+
+  <rect x="230" y="354" width="155" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="246" y="376" fill="#f0f4ff" font-size="12" font-weight="600">RerankOrchestrator</text>
+  <text x="246" y="392" fill="#8892a8" font-size="10">4-stage reranking</text>
+
+  <rect x="400" y="354" width="150" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="416" y="376" fill="#f0f4ff" font-size="12" font-weight="600">ProcedureEngine</text>
+  <text x="416" y="392" fill="#8892a8" font-size="10">workflows + proof gates</text>
+
+  <rect x="565" y="354" width="260" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="581" y="376" fill="#f0f4ff" font-size="12" font-weight="600">EvidenceAndVerificationEngine</text>
+  <text x="581" y="392" fill="#8892a8" font-size="10">4-state claims + proof validation</text>
+
+  <!-- Row 4: Guards + Artifacts + Consolidation -->
+  <rect x="40" y="422" width="230" height="52" rx="5" fill="#1e2330" stroke="#e85d75" stroke-opacity="0.4"/>
+  <text x="56" y="444" fill="#f0f4ff" font-size="12" font-weight="600">RedLineGuardEngine</text>
+  <text x="56" y="460" fill="#e85d75" font-size="10">6-layer cheap-first pipeline</text>
+
+  <rect x="285" y="422" width="175" height="52" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.3"/>
+  <text x="301" y="444" fill="#f0f4ff" font-size="12" font-weight="600">ToolArtifactStore</text>
+  <text x="301" y="460" fill="#8892a8" font-size="10">searchable tool outputs</text>
+
+  <rect x="475" y="422" width="180" height="52" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.4"/>
+  <text x="491" y="444" fill="#f0f4ff" font-size="12" font-weight="600">ConsolidationEngine</text>
+  <text x="491" y="460" fill="#f0b429" font-size="10">"sleep" pipeline: 9-stage</text>
+
+  <rect x="670" y="422" width="155" height="52" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.4"/>
+  <text x="686" y="444" fill="#f0f4ff" font-size="12" font-weight="600">ScoringTuner</text>
+  <text x="686" y="460" fill="#3ecf8e" font-size="10">EMA weight adjustment</text>
+
+  <!-- ── Pipelines sub-section ── -->
+  <rect x="40" y="494" width="785" height="72" rx="5" fill="#12151c" stroke="#5b8def" stroke-opacity="0.2"/>
+  <text x="56" y="516" fill="#5b8def" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">PIPELINES (Cognee Task chains)</text>
+
+  <rect x="56" y="526" width="120" height="26" rx="4" fill="#2a3040" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="68" y="544" fill="#3ecf8e" font-size="10" font-family="IBM Plex Mono, monospace">turn_ingest</text>
+
+  <rect x="186" y="526" width="120" height="26" rx="4" fill="#2a3040" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="196" y="544" fill="#3ecf8e" font-size="10" font-family="IBM Plex Mono, monospace">artifact_ingest</text>
+
+  <rect x="316" y="526" width="130" height="26" rx="4" fill="#2a3040" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="326" y="544" fill="#3ecf8e" font-size="10" font-family="IBM Plex Mono, monospace">procedure_ingest</text>
+
+  <rect x="456" y="526" width="110" height="26" rx="4" fill="#2a3040" stroke="#f0b429" stroke-opacity="0.3"/>
+  <text x="470" y="544" fill="#f0b429" font-size="10" font-family="IBM Plex Mono, monospace">compaction</text>
+
+  <rect x="576" y="526" width="120" height="26" rx="4" fill="#2a3040" stroke="#f0b429" stroke-opacity="0.3"/>
+  <text x="586" y="544" fill="#f0b429" font-size="10" font-family="IBM Plex Mono, monospace">consolidation</text>
+
+  <rect x="706" y="526" width="110" height="26" rx="4" fill="#2a3040" stroke="#e85d75" stroke-opacity="0.3"/>
+  <text x="718" y="544" fill="#e85d75" font-size="10" font-family="IBM Plex Mono, monospace">verification</text>
+
+  <!-- ── Scoring Filters sub-section ── -->
+  <rect x="40" y="582" width="785" height="60" rx="5" fill="#12151c" stroke="#7c5cfc" stroke-opacity="0.2"/>
+  <text x="56" y="604" fill="#7c5cfc" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">WORKING-SET SCORING (11 dimensions, profile-weighted, budget-constrained)</text>
+  <text x="56" y="628" fill="#8892a8" font-size="11">turnRelevance &middot; sessionGoalRelevance &middot; globalGoalRelevance &middot; recency &middot; successfulUsePrior &middot; confidence&times;m<tspan font-size="9" dy="-4">v</tspan><tspan dy="4"> &middot; evidenceStrength &middot; novelty &middot; redundancyPenalty &middot; contradictionPenalty &middot; costPenalty</tspan></text>
+
+  <!-- Arrows down to Cognee -->
+  <line x1="430" y1="658" x2="430" y2="688" stroke="#3ecf8e" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- ── LAYER C: Cognee Knowledge Plane ── -->
+  <rect x="20" y="688" width="820" height="220" rx="8" fill="url(#gB)" stroke="#3ecf8e" stroke-opacity="0.4"/>
+  <text x="40" y="714" fill="#3ecf8e" font-size="11" font-weight="700" letter-spacing="1.5" font-family="IBM Plex Mono, monospace">LAYER C — Cognee Knowledge Plane (Python SDK — cognee v0.5.x)</text>
+
+  <rect x="40" y="728" width="160" height="48" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="56" y="748" fill="#f0f4ff" font-size="12" font-weight="600">Datasets</text>
+  <text x="56" y="764" fill="#8892a8" font-size="10">gateway-scoped naming</text>
+
+  <rect x="215" y="728" width="160" height="48" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="231" y="748" fill="#f0f4ff" font-size="12" font-weight="600">Graph Entities</text>
+  <text x="231" y="764" fill="#8892a8" font-size="10">nodes + 24 edge types</text>
+
+  <rect x="390" y="728" width="160" height="48" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="406" y="748" fill="#f0f4ff" font-size="12" font-weight="600">DataPoints</text>
+  <text x="406" y="764" fill="#8892a8" font-size="10">7 subclasses, auto-embed</text>
+
+  <rect x="565" y="728" width="130" height="48" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="581" y="748" fill="#f0f4ff" font-size="12" font-weight="600">Pipelines</text>
+  <text x="581" y="764" fill="#8892a8" font-size="10">Task + PipelineRunner</text>
+
+  <rect x="710" y="728" width="115" height="48" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.3"/>
+  <text x="726" y="748" fill="#f0f4ff" font-size="12" font-weight="600">Search API</text>
+  <text x="726" y="764" fill="#8892a8" font-size="10">GRAPH_COMPLETION</text>
+
+  <!-- Custom Tasks -->
+  <rect x="40" y="792" width="785" height="48" rx="5" fill="#12151c" stroke="#3ecf8e" stroke-opacity="0.2"/>
+  <text x="56" y="812" fill="#3ecf8e" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">COGNEE OPERATIONS</text>
+  <text x="56" y="828" fill="#8892a8" font-size="11">add_data_points() &middot; cognee.add() &middot; cognee.cognify() &middot; cognee.search(GRAPH_COMPLETION) &middot; cognee.search(CHUNKS) &middot; cognee.search(CHUNKS_LEXICAL)</text>
+
+  <!-- Memory classes bar -->
+  <rect x="40" y="856" width="785" height="38" rx="5" fill="#12151c" stroke="#3ecf8e" stroke-opacity="0.15"/>
+  <text x="56" y="880" fill="#8892a8" font-size="11"><tspan fill="#5b8def">EPISODIC</tspan> &middot; <tspan fill="#5b8def">SEMANTIC</tspan> &middot; <tspan fill="#5b8def">PROCEDURAL</tspan> &middot; <tspan fill="#e85d75">POLICY</tspan> &middot; <tspan fill="#f0b429">WORKING_MEMORY</tspan> &mdash; across 8 scopes: GLOBAL &middot; ORG &middot; TEAM &middot; ACTOR &middot; SESSION &middot; TASK &middot; SUBAGENT &middot; ARTIFACT</text>
+
+  <!-- Arrows down to Infra -->
+  <line x1="430" y1="908" x2="430" y2="938" stroke="#8892a8" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowGray)"/>
+
+  <!-- ── LAYER D: Infrastructure Plane ── -->
+  <rect x="20" y="938" width="820" height="100" rx="8" fill="url(#gD)" stroke="#f0b429" stroke-opacity="0.3"/>
+  <text x="40" y="964" fill="#f0b429" font-size="11" font-weight="700" letter-spacing="1.5" font-family="IBM Plex Mono, monospace">LAYER D — Infrastructure Plane</text>
+
+  <rect x="40" y="980" width="130" height="40" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.25"/>
+  <text x="52" y="1005" fill="#f0f4ff" font-size="11">Qdrant (vectors)</text>
+
+  <rect x="185" y="980" width="130" height="40" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.25"/>
+  <text x="200" y="1005" fill="#f0f4ff" font-size="11">Neo4j (graph)</text>
+
+  <rect x="330" y="980" width="130" height="40" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.25"/>
+  <text x="352" y="1005" fill="#f0f4ff" font-size="11">Redis (cache)</text>
+
+  <rect x="475" y="980" width="130" height="40" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.25"/>
+  <text x="487" y="1005" fill="#f0f4ff" font-size="11">SQLite (audit)</text>
+
+  <rect x="620" y="980" width="100" height="40" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.25"/>
+  <text x="630" y="1005" fill="#f0f4ff" font-size="11">ClickHouse</text>
+
+  <rect x="735" y="980" width="90" height="40" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.25"/>
+  <text x="745" y="1005" fill="#f0f4ff" font-size="11">OTEL / Logs</text>
+
+  <!-- ── ORGANIZATIONAL CONTEXT (bottom) ── -->
+  <rect x="20" y="1068" width="820" height="300" rx="8" fill="url(#gC)" stroke="#e85d75" stroke-opacity="0.25"/>
+  <text x="40" y="1094" fill="#e85d75" font-size="11" font-weight="700" letter-spacing="1.5" font-family="IBM Plex Mono, monospace">ORGANIZATIONAL MODEL — ACTOR GRAPH + GOAL HIERARCHY + AUTHORITY</text>
+
+  <!-- Org -->
+  <rect x="340" y="1110" width="180" height="40" rx="5" fill="#1e2330" stroke="#e85d75" stroke-opacity="0.4"/>
+  <text x="370" y="1135" fill="#f0f4ff" font-size="12" font-weight="600">Organization Actor</text>
+
+  <!-- Lines down -->
+  <line x1="430" y1="1150" x2="200" y2="1180" stroke="#8892a8" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="430" y1="1150" x2="430" y2="1180" stroke="#8892a8" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="430" y1="1150" x2="660" y2="1180" stroke="#8892a8" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Human Coordinator -->
+  <rect x="105" y="1180" width="190" height="36" rx="5" fill="#1e2330" stroke="#5b8def" stroke-opacity="0.4"/>
+  <text x="125" y="1203" fill="#5b8def" font-size="11" font-weight="600">human_coordinator (User)</text>
+
+  <!-- Manager Agent -->
+  <rect x="340" y="1180" width="180" height="36" rx="5" fill="#1e2330" stroke="#7c5cfc" stroke-opacity="0.4"/>
+  <text x="362" y="1203" fill="#7c5cfc" font-size="11" font-weight="600">manager_agent (Mgr)</text>
+
+  <!-- External -->
+  <rect x="575" y="1180" width="170" height="36" rx="5" fill="#1e2330" stroke="#8892a8" stroke-opacity="0.4"/>
+  <text x="595" y="1203" fill="#8892a8" font-size="11" font-weight="600">external_human / API</text>
+
+  <!-- Lines down from Manager -->
+  <line x1="430" y1="1216" x2="270" y2="1250" stroke="#8892a8" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="430" y1="1216" x2="430" y2="1250" stroke="#8892a8" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="430" y1="1216" x2="590" y2="1250" stroke="#8892a8" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Workers -->
+  <rect x="175" y="1250" width="180" height="36" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.4"/>
+  <text x="195" y="1273" fill="#3ecf8e" font-size="11" font-weight="600">worker_agent (Coder)</text>
+
+  <rect x="380" y="1250" width="150" height="36" rx="5" fill="#1e2330" stroke="#3ecf8e" stroke-opacity="0.4"/>
+  <text x="396" y="1273" fill="#3ecf8e" font-size="11" font-weight="600">worker_agent (QA)</text>
+
+  <rect x="555" y="1250" width="180" height="36" rx="5" fill="#1e2330" stroke="#f0b429" stroke-opacity="0.4"/>
+  <text x="575" y="1273" fill="#f0b429" font-size="11" font-weight="600">reviewer_agent (Review)</text>
+
+  <!-- Relationship labels -->
+  <text x="140" y="1170" fill="#5b8def" font-size="9" font-family="IBM Plex Mono, monospace">owns_goal</text>
+  <text x="430" y="1170" fill="#7c5cfc" font-size="9" font-family="IBM Plex Mono, monospace" text-anchor="middle">delegates_to</text>
+  <text x="640" y="1170" fill="#8892a8" font-size="9" font-family="IBM Plex Mono, monospace">collaborates</text>
+  <text x="245" y="1243" fill="#3ecf8e" font-size="9" font-family="IBM Plex Mono, monospace">delegates</text>
+  <text x="430" y="1243" fill="#3ecf8e" font-size="9" font-family="IBM Plex Mono, monospace" text-anchor="middle">supervises</text>
+  <text x="585" y="1243" fill="#f0b429" font-size="9" font-family="IBM Plex Mono, monospace">reviews</text>
+
+  <!-- Goal + Authority labels at bottom -->
+  <rect x="40" y="1306" width="785" height="48" rx="5" fill="#12151c" stroke="#7c5cfc" stroke-opacity="0.15"/>
+  <text x="56" y="1326" fill="#7c5cfc" font-size="11" font-weight="600" font-family="IBM Plex Mono, monospace">GOAL HIERARCHY + AUTHORITY LEVELS</text>
+  <text x="56" y="1344" fill="#8892a8" font-size="11"><tspan fill="#e85d75">global_goal</tspan> &rarr; <tspan fill="#7c5cfc">org_goal</tspan> &rarr; <tspan fill="#5b8def">session_goal</tspan> &rarr; <tspan fill="#3ecf8e">task_goal</tspan> &rarr; <tspan fill="#f0b429">subagent_goal</tspan>  |  Authority: <tspan fill="#8892a8">regular(0-49)</tspan> &lt; <tspan fill="#3ecf8e">lead(50-69)</tspan> &lt; <tspan fill="#5b8def">admin(70-89)</tspan> &lt; <tspan fill="#e85d75">system(90+)</tspan></text>
+
+</svg>
+</div>
+</section>
+
+<!-- ═══════════════ 5. LANGUAGE SPLIT ═══════════════ -->
+<section id="lang-split">
+<h2>5. Language Split: Python Runtime + Thin TS Plugins</h2>
+
+<h3>5.1 What lives in Python (the ElephantBroker runtime)</h3>
+<ul>
+  <li>All 17 runtime modules (ActorRegistry, GoalManager, MemoryStoreFacade, WorkingSetManager, ContextAssembler, CompactionEngine, ProcedureEngine, EvidenceAndVerificationEngine, RedLineGuardEngine, ToolArtifactStore, RetrievalOrchestrator, RerankOrchestrator, StatsEngine, ConsolidationEngine, ProfileRegistry, TraceLedger, ScoringTuner)</li>
+  <li>All Cognee custom tasks and pipelines (turn_ingest, artifact_ingest, procedure_ingest, compaction, consolidation, verification)</li>
+  <li>All 20 Pydantic v2 schemas (single source of truth for data contracts)</li>
+  <li>The 11-dimension scoring framework, per-profile tuning, and EMA feedback loops</li>
+  <li>The FastAPI service layer: 84 endpoints across 16 route groups, plus <code>GatewayIdentityMiddleware</code></li>
+  <li>The <code>ebrun</code> admin CLI for bootstrap, org/team/actor management</li>
+</ul>
+
+<h3>5.2 What lives in TypeScript (thin plugins)</h3>
+<ul>
+  <li><strong>MemoryPlugin</strong> (elephantbroker-memory) &mdash; 24 tools in 6 groups: 5 memory, 5 goals, 4 procedures, 2 artifacts, 2 guards, 6 admin. Communicates via HTTP with W3C trace propagation.</li>
+  <li><strong>ContextEnginePlugin</strong> (elephantbroker-context) &mdash; 7 lifecycle methods: registerContextEngine, dispose, assemble, ingest, compact, afterTurn, ownsCompaction=true. Degraded buffered mode when EB unavailable.</li>
+  <li>8 lifecycle hooks: <code>llm_input</code>, <code>llm_output</code>, <code>session_start</code>, <code>session_end</code>, <code>before_prompt_build</code>, <code>after_turn_completed</code>, <code>on_subagent_ended</code>, <code>prepare_subagent_spawn</code></li>
+  <li>Ed25519 device authentication, WebSocket payload format</li>
+</ul>
+
+<h3>5.3 The boundary contract</h3>
+<p>The Python runtime exposes a REST API on port 8420. The TypeScript plugins are HTTP clients with thin lifecycle wrappers. All intelligence, scoring, storage, and policy logic stays in Python. The plugins never make direct database calls or run scoring logic &mdash; they are pass-through adapters with framework-specific lifecycle mapping. Four identity headers (<code>X-EB-Gateway-Id</code>, <code>X-EB-Org-Id</code>, <code>X-EB-Team-Id</code>, <code>X-EB-Actor-Id</code>) are transmitted on every request.</p>
+
+<div class="tags">
+  <span class="tag py">Python 3.11+</span>
+  <span class="tag py">Pydantic v2</span>
+  <span class="tag cognee">Cognee v0.5.x</span>
+  <span class="tag py">FastAPI (port 8420)</span>
+  <span class="tag py">LiteLLM proxy</span>
+  <span class="tag ts">TypeScript plugins</span>
+  <span class="tag ts">Ed25519 auth</span>
+</div>
+</section>
+
+<!-- ═══════════════ 6. IDENTITY MODEL ═══════════════ -->
+<section id="identity">
+<h2>6. Gateway Identity &amp; Multi-Organization Model</h2>
+
+<h3>6.1 Three-level identity model</h3>
+<p>Identity is organized into three nested levels, each providing a distinct isolation boundary:</p>
+
+<table>
+  <thead><tr><th>Level</th><th>Identifier</th><th>Scope</th><th>Lifetime</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Gateway</strong></td><td><code>EB_GATEWAY_ID</code></td><td>Top-level isolation: Redis keys, Cypher WHERE clauses, dataset prefixes, metrics labels, trace enrichment, log prefixes</td><td>Deployment</td></tr>
+    <tr><td><strong>Agent</strong></td><td><code>agent_key = {gateway_id}:{agentId}</code></td><td>Deterministic UUID v5 from composite key. Registers as ActorRef on first session start</td><td>Agent instance</td></tr>
+    <tr><td><strong>Session</strong></td><td><code>sessionKey</code> (stable) + <code>sessionId</code> (ephemeral UUID)</td><td>Stable sessionKey for routing; ephemeral sessionId changes on /new or /reset</td><td>Session</td></tr>
+  </tbody>
+</table>
+
+<h3>6.2 Gateway isolation enforcement</h3>
+<p><code>GatewayIdentityMiddleware</code> extracts four <code>X-EB-*</code> headers into <code>request.state</code> on every request. All downstream operations are scoped:</p>
+<ul>
+  <li><strong>Redis:</strong> <code>RedisKeyBuilder(gateway_id)</code> &mdash; all keys prefixed <code>eb:{gateway_id}:</code></li>
+  <li><strong>Neo4j:</strong> All Cypher queries include <code>WHERE ... gateway_id = $gateway_id</code> (strict, no IS NULL fallback)</li>
+  <li><strong>Cognee:</strong> All <code>cognee.add()</code> calls use <code>dataset_name=f"{gateway_id}__{base}"</code></li>
+  <li><strong>Metrics:</strong> <code>MetricsContext(gateway_id)</code> &mdash; all Prometheus metrics include <code>gateway_id</code> label</li>
+  <li><strong>Traces:</strong> <code>TraceLedger(gateway_id=...)</code> auto-enriches trace events</li>
+  <li><strong>Logs:</strong> <code>GatewayLoggerAdapter</code> prepends <code>[gateway_id][agent_key]</code></li>
+</ul>
+
+<h3>6.3 Authority model</h3>
+<p>A numeric permission hierarchy with four tiers governs administrative operations:</p>
+<table>
+  <thead><tr><th>Tier</th><th>Level Range</th><th>Capabilities</th></tr></thead>
+  <tbody>
+    <tr><td>Regular actor</td><td>0&ndash;49</td><td>Standard operations, own data CRUD</td></tr>
+    <tr><td>Team lead</td><td>50&ndash;69</td><td>Team management, member operations</td></tr>
+    <tr><td>Org admin</td><td>70&ndash;89</td><td>Organization management, profile overrides</td></tr>
+    <tr><td>System admin</td><td>90+</td><td>Bootstrap, full admin, authority rule management</td></tr>
+  </tbody>
+</table>
+<p>Eleven configurable authority rules with <code>matching_exempt_level</code> semantics (analogous to Unix privilege). Organizations and teams are first-class <code>DataPoint</code> entities in the graph &mdash; not gateway-scoped, enabling multi-gateway visibility.</p>
+
+<h3>6.4 Temporal reasoning</h3>
+<p>Every fact carries three timestamps: <strong>event timestamp</strong> (real-world occurrence), <strong>ingestion timestamp</strong> (first stored), <strong>update timestamp</strong> (last modified). All typed edges carry <code>valid_from</code> and <code>valid_until</code> properties. Supersession edges encode temporal replacement. All timestamps stored as epoch milliseconds.</p>
+</section>
+
+<!-- ═══════════════ 7. RUNTIME MODULES ═══════════════ -->
+<section id="runtime-modules">
+<h2>7. Runtime Modules (17 Core + Adapters)</h2>
+
+<table>
+  <thead>
+    <tr><th>Module</th><th>Responsibility</th><th>Key Operations</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ActorRegistry</code></td><td>Actor CRUD, platform-qualified handles, MEMBER_OF edges, authority chains</td><td>resolve_actor, get_relationships, merge_actors</td></tr>
+    <tr><td><code>GoalManager</code></td><td>Scope-aware goal CRUD with 4-clause Cypher, OWNS_GOAL filtering, blocker tracking</td><td>create_goal, update_status, get_hierarchy</td></tr>
+    <tr><td><code>MemoryStoreFacade</code></td><td>Fact CRUD, dedup at 0.95 cosine similarity, graph edges, GDPR delete with cross-gateway protection</td><td>store, search, forget, update</td></tr>
+    <tr><td><code>WorkingSetManager</code></td><td>11-dimension scoring, budget-constrained greedy selection, (1&minus;1/e) guarantee</td><td>build_working_set, explain</td></tr>
+    <tr><td><code>ContextAssembler</code></td><td>4-block assembly across 2 prompt surfaces, goal state injection, working-set ordering</td><td>assemble, build_system_overlay</td></tr>
+    <tr><td><code>CompactionEngine</code></td><td>Two-stage: rule-classify (PRESERVE/COMPRESS/DROP) + LLM-summarize. Goal-aware.</td><td>compact, classify_messages</td></tr>
+    <tr><td><code>ProcedureEngine</code></td><td>Procedure CRUD, step execution, completion gates, proof requirement validation, Redis persistence</td><td>activate, execute_step, validate_completion</td></tr>
+    <tr><td><code>EvidenceEngine</code></td><td>4-state claim tracking, proof validation, reject() with mandatory reason, verification status</td><td>record_claim, attach_evidence, verify, reject</td></tr>
+    <tr><td><code>RedLineGuardEngine</code></td><td>6-layer cheap-first pipeline, 5 policy presets, 4-source rule registry, near-miss escalation</td><td>preflight_check, refresh, get_events</td></tr>
+    <tr><td><code>ToolArtifactStore</code></td><td>Tool output CRUD, SHA-256 dedup, metadata indexing, summary + pointer model</td><td>store_artifact, search_artifacts</td></tr>
+    <tr><td><code>RetrievalOrchestrator</code></td><td>5-source concurrent retrieval: structural + keyword + semantic + graph + artifacts. Weighted merge.</td><td>retrieve_candidates</td></tr>
+    <tr><td><code>RerankOrchestrator</code></td><td>4-stage: cheap prune &rarr; semantic &rarr; cross-encoder (Qwen3-Reranker-4B) &rarr; near-duplicate merge</td><td>rerank</td></tr>
+    <tr><td><code>StatsEngine</code></td><td>49 Prometheus counters/gauges: retrieved, stored, dedup, guard hits, compaction, consolidation</td><td>inc_*, get_stats</td></tr>
+    <tr><td><code>ConsolidationEngine</code></td><td>9-stage "sleep" pipeline with Redis distributed lock, 3 audit stores, ClickHouse bridge</td><td>run_consolidation, get_report</td></tr>
+    <tr><td><code>ProfileRegistry</code></td><td>Base &rarr; named &rarr; org override inheritance, 5-minute TTL cache, 5 presets</td><td>resolve_profile, get_effective_policy</td></tr>
+    <tr><td><code>TraceLedger</code></td><td>Append-only trace with 47 event types, OTEL export, gateway-enriched, session timeline queries</td><td>append_event, query_trace, get_timeline</td></tr>
+    <tr><td><code>ScoringTuner</code></td><td>Per-gateway weight persistence (SQLite), EMA-smoothed deltas, capped at &plusmn;5% per cycle</td><td>get_weights, apply_tuning_delta</td></tr>
+  </tbody>
+</table>
+
+<h3>Adapters (read/delete/edge only)</h3>
+<table>
+  <thead><tr><th>Adapter</th><th>Responsibility</th></tr></thead>
+  <tbody>
+    <tr><td><code>GraphAdapter</code></td><td>Structural reads: <code>get_entity()</code>, <code>query_cypher()</code>, <code>get_neighbors()</code>, <code>query_subgraph()</code>. Custom edges: <code>add_relation()</code>. GDPR: <code>delete_entity()</code>. No write methods.</td></tr>
+    <tr><td><code>VectorAdapter</code></td><td>Filtered vector search: <code>search_similar()</code> on Cognee-managed collections. GDPR: <code>delete_embedding()</code>. No write methods.</td></tr>
+    <tr><td><code>EmbeddingService</code></td><td>Dedup similarity checks before storage, query embedding for search.</td></tr>
+    <tr><td><code>LLMClient</code></td><td>LiteLLM wrapper with model prefix routing (<code>openai/</code>), token estimation, retry logic.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <strong>Cognee is the knowledge plane.</strong> All DataPoints are stored via <code>add_data_points()</code>. Direct adapter write methods (<code>add_entity()</code>, <code>index_embedding()</code>) have been removed. Adapters handle reads, deletes, edges, and structural queries only.
+</div>
+</section>
+
+<!-- ═══════════════ 8. ACTOR MODEL ═══════════════ -->
+<section id="actors">
+<h2>8. Actor Model</h2>
+
+<h3>8.1 Actor types</h3>
+<p>Twelve actor types spanning human roles, agent roles, and organizational units:</p>
+<p><code>human_coordinator</code> &middot; <code>human_operator</code> &middot; <code>peer_agent</code> &middot; <code>manager_agent</code> &middot; <code>worker_agent</code> &middot; <code>reviewer_agent</code> &middot; <code>supervisor_agent</code> &middot; <code>external_human</code> &middot; <code>external_agent</code> &middot; <code>service_actor</code> &middot; <code>organization_actor</code> &middot; <code>team_actor</code></p>
+
+<h3>8.2 Relationship types</h3>
+<p>Twelve relationship types with trust levels (0&ndash;1) that affect evidence weighting in scoring:</p>
+<p><code>delegates_to</code> &middot; <code>supervises</code> &middot; <code>reports_to</code> &middot; <code>collaborates_with</code> &middot; <code>trusts</code> &middot; <code>blocks</code> &middot; <code>owns_goal</code> &middot; <code>owns_artifact</code> &middot; <code>requested_by</code> &middot; <code>approved_by</code> &middot; <code>verified_by</code> &middot; <code>prohibited_by</code></p>
+
+<h3>8.3 Cross-reference rules</h3>
+<p>When a memory is created, it attaches: source actor, target actor(s), affected goal(s), scope, memory class, and provenance. This enables queries like "what instructions did coordinator A give worker B about project X?" or "which facts are preferences of human H versus constraints imposed by supervisor S?"</p>
+</section>
+
+<!-- ═══════════════ 9. MEMORY TAXONOMY ═══════════════ -->
+<section id="memory-taxonomy">
+<h2>9. Memory Taxonomy</h2>
+
+<p>Five memory classes with distinct lifecycle properties:</p>
+
+<table>
+  <thead>
+    <tr><th>Class</th><th>Typical Content</th><th>Decay</th><th>Promotable</th><th>Compaction</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>EPISODIC</strong></td><td>Events, decisions, session-bounded discoveries</td><td>Yes (aggressive)</td><td>SEMANTIC (3+ sessions)</td><td>Summarizable</td></tr>
+    <tr><td><strong>SEMANTIC</strong></td><td>Durable knowledge, preferences, stable project facts</td><td>Slow</td><td>Terminal</td><td>Mergeable</td></tr>
+    <tr><td><strong>PROCEDURAL</strong></td><td>Workflows, SOPs, checklists, escalation paths</td><td>None</td><td>Terminal</td><td>Preserve</td></tr>
+    <tr><td><strong>POLICY</strong></td><td>Non-negotiable constraints, red-line rules, approval requirements</td><td>None</td><td>Terminal</td><td>Always inject</td></tr>
+    <tr><td><strong>WORKING_MEMORY</strong></td><td>Transient context, compact state, active issues</td><td>Session-only</td><td>&mdash;</td><td>Drop at session end</td></tr>
+  </tbody>
+</table>
+
+<h3>9.1 Fact categories</h3>
+<p>Twelve built-in categories for structured classification: <code>identity</code> &middot; <code>preference</code> &middot; <code>event</code> &middot; <code>decision</code> &middot; <code>system</code> &middot; <code>relationship</code> &middot; <code>trait</code> &middot; <code>project</code> &middot; <code>general</code> &middot; <code>constraint</code> &middot; <code>procedure_ref</code> &middot; <code>verification</code></p>
+</section>
+
+<!-- ═══════════════ 10. SCOPE SYSTEM ═══════════════ -->
+<section id="scopes">
+<h2>10. Scope System</h2>
+
+<p>Eight scope values control visibility, decay cadence, and promotion paths:</p>
+
+<table>
+  <thead><tr><th>Scope</th><th>Visibility</th><th>Decay Cadence</th><th>Promotion Target</th></tr></thead>
+  <tbody>
+    <tr><td><code>GLOBAL</code></td><td>All gateways in org</td><td>Monthly</td><td>Terminal</td></tr>
+    <tr><td><code>ORGANIZATION</code></td><td>Matching org_id</td><td>Weekly</td><td>GLOBAL</td></tr>
+    <tr><td><code>TEAM</code></td><td>Matching team_id</td><td>Weekly</td><td>ORGANIZATION</td></tr>
+    <tr><td><code>ACTOR</code></td><td>Owner actor only</td><td>Daily</td><td>TEAM</td></tr>
+    <tr><td><code>SESSION</code></td><td>Current session</td><td>Hourly</td><td>ACTOR</td></tr>
+    <tr><td><code>TASK</code></td><td>Current task</td><td>Hourly</td><td>SESSION</td></tr>
+    <tr><td><code>SUBAGENT</code></td><td>Child session</td><td>Hourly</td><td>SESSION</td></tr>
+    <tr><td><code>ARTIFACT</code></td><td>Tool output ref</td><td>Daily</td><td>ACTOR</td></tr>
+  </tbody>
+</table>
+
+<h3>Isolation model</h3>
+<p>Two axes control retrieval filtering. <strong>Isolation level:</strong> <code>NONE</code> (no filtering), <code>LOOSE</code> (post-filter by scope), <code>STRICT</code> (pre-filter, direct vector with payload constraints). <strong>Isolation scope:</strong> <code>GLOBAL</code>, <code>SESSION_KEY</code>, <code>ACTOR</code>, <code>SUBAGENT_INHERIT</code>.</p>
+</section>
+
+<!-- ═══════════════ 11. DATA SCHEMAS & DATAPOINTS ═══════════════ -->
+<section id="schemas">
+<h2>11. Data Schemas &amp; DataPoint Subclasses</h2>
+
+<h3>11.1 Property graph</h3>
+<p>Formally defined as <strong>G = (N, E, &phi;)</strong> where N = nodes (facts, actors, goals, procedures, claims, evidence, artifacts), E = typed directed edges (authorship, supersession, contradiction, goal-serving, ownership, parent-child), &phi; = incidence function. Paired with a vector index V for dense embeddings.</p>
+
+<h3>11.2 DataPoint subclasses</h3>
+<p>Seven entity types mapping Pydantic schemas to graph-vector storage via Cognee's <code>add_data_points()</code>:</p>
+
+<table>
+  <thead><tr><th>Entity Type</th><th>Schema Source</th><th>Indexed Fields</th><th>Vector Collection</th></tr></thead>
+  <tbody>
+    <tr><td><code>FactDataPoint</code></td><td>FactAssertion</td><td>text</td><td>FactDataPoint_text</td></tr>
+    <tr><td><code>ActorDataPoint</code></td><td>ActorRef</td><td>display_name</td><td>ActorDataPoint_display_name</td></tr>
+    <tr><td><code>GoalDataPoint</code></td><td>GoalState</td><td>title, description</td><td>GoalDataPoint_title</td></tr>
+    <tr><td><code>ProcedureDataPoint</code></td><td>ProcedureDefinition</td><td>name, description</td><td>ProcedureDataPoint_name</td></tr>
+    <tr><td><code>ArtifactDataPoint</code></td><td>ToolArtifact</td><td>summary</td><td>ArtifactDataPoint_summary</td></tr>
+    <tr><td><code>OrganizationDataPoint</code></td><td>Organization</td><td>name</td><td>OrganizationDataPoint_name</td></tr>
+    <tr><td><code>TeamDataPoint</code></td><td>Team</td><td>name</td><td>TeamDataPoint_name</td></tr>
+  </tbody>
+</table>
+
+<p>All DataPoints carry <code>gateway_id: str</code> &mdash; set before <code>add_data_points()</code>. Organization and Team DataPoints are <strong>not</strong> gateway-scoped (multi-gateway visibility). Graph edges (24 relationship types): CREATED_BY, MENTIONED_BY, SUPPORTS, CONTRADICTS, SUPERSEDES, RELATED_TO, OWNS_GOAL, BLOCKS_GOAL, ACHIEVED_BY, MENTIONED_IN_ARTIFACT, MEMBER_OF, BELONGS_TO, and more.</p>
+
+<h3>11.3 Core schemas (Pydantic v2)</h3>
+
+<pre><code># schemas/base.py
+class Scope(str, Enum):
+    GLOBAL = "global"
+    ORGANIZATION = "organization"
+    TEAM = "team"
+    ACTOR = "actor"
+    SESSION = "session"
+    TASK = "task"
+    SUBAGENT = "subagent"
+    ARTIFACT = "artifact"
+
+class MemoryClass(str, Enum):
+    EPISODIC = "episodic"
+    SEMANTIC = "semantic"
+    PROCEDURAL = "procedural"
+    POLICY = "policy"
+    WORKING_MEMORY = "working_memory"</code></pre>
+
+<pre><code># schemas/fact.py
+class FactAssertion(BaseModel):
+    id: str
+    text: str
+    category: FactCategory          # 12 built-in categories
+    scope: Scope
+    memory_class: MemoryClass
+    source_actor_id: Optional[str] = None
+    target_actor_ids: list[str] = []
+    goal_ids: list[str] = []
+    goal_relevance_tags: list[str] = []
+    confidence: float = 1.0
+    session_key: Optional[str] = None
+    gateway_id: str = ""
+    provenance_refs: list[str] = []
+    token_size: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    last_used_at: Optional[datetime] = None
+    use_count: int = 0
+    successful_use_count: int = 0</code></pre>
+
+<pre><code># schemas/working_set.py
+class ScoringWeights(BaseModel):
+    turn_relevance: float = 1.0
+    session_goal_relevance: float = 1.0
+    global_goal_relevance: float = 0.5
+    recency: float = 0.8
+    successful_use_prior: float = 0.6
+    confidence: float = 0.4
+    evidence_strength: float = 0.3
+    novelty: float = 0.5
+    redundancy_penalty: float = -0.7
+    contradiction_penalty: float = -1.0
+    cost_penalty: float = -0.3</code></pre>
+</section>
+
+<!-- ═══════════════ 12. FIVE-SOURCE RETRIEVAL ═══════════════ -->
+<section id="retrieval">
+<h2>12. Hybrid Five-Source Retrieval</h2>
+
+<p>The retrieval pipeline is formalized as:</p>
+
+<div class="formula">f(&alpha;) = &sigma;(&rho;(&phi;(&alpha;)))</div>
+
+<p>where &alpha; = query string, &phi; = multi-source search (recall), &rho; = four-stage reranker (precision), &sigma; = eleven-dimension scoring + budget selection (value optimization).</p>
+
+<h3>12.1 Five sources dispatched concurrently</h3>
+
+<table>
+  <thead><tr><th>Source</th><th>Method</th><th>Default Weight</th><th>Depends On</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Structural</strong></td><td>Neo4j Cypher: session_key, actor, memory_class, scope filters</td><td>w<sub>struct</sub> = 0.4</td><td>Nothing</td></tr>
+    <tr><td><strong>Keyword</strong></td><td>Cognee <code>CHUNKS_LEXICAL</code> (BM25-like)</td><td>w<sub>kw</sub> = 0.3</td><td><code>cognee.cognify()</code></td></tr>
+    <tr><td><strong>Semantic</strong></td><td>Cognee <code>CHUNKS</code> or direct vector with payload filters under STRICT isolation</td><td>w<sub>sem</sub> = 0.5</td><td><code>cognee.cognify()</code></td></tr>
+    <tr><td><strong>Graph expansion</strong></td><td>Cognee <code>GRAPH_COMPLETION</code> &mdash; ego-net traversal to configurable depth</td><td>w<sub>graph</sub> = 0.2</td><td><code>add_data_points()</code> vectors; richer after <code>cognify()</code></td></tr>
+    <tr><td><strong>Artifact</strong></td><td>Vector search over dedicated artifact collections</td><td>w<sub>art</sub> = 0.5</td><td>Artifact ingest</td></tr>
+  </tbody>
+</table>
+
+<h3>12.2 Merge strategy</h3>
+<p>Multiply raw score by source weight, deduplicate by fact ID retaining maximum weighted score, sort descending, cap at configurable maximum. Each source has enable/disable, fetch_k, and weight &mdash; tunable per profile via <code>RetrievalPolicy</code>.</p>
+
+<h3>12.3 Graceful degradation</h3>
+<p>Five-level hierarchy: source-level skip, method-level degradation, pipeline-level degradation, operation-level degradation, edge-level degradation. No single backend failure blocks the pipeline. Under STRICT isolation, semantic source falls back to direct vector search with payload filters.</p>
+
+<h3>12.4 Graph modes by profile</h3>
+<p><code>LOCAL</code> &mdash; execution, coding, narrow task continuation. <code>HYBRID</code> &mdash; general default. <code>GLOBAL</code> &mdash; research, strategy, cross-project synthesis. Graph depth: 1 (coding), 2 (managerial, personal), 3 (research).</p>
+</section>
+
+<!-- ═══════════════ 13. FOUR-STAGE RERANKING ═══════════════ -->
+<section id="reranking">
+<h2>13. Four-Stage Reranking</h2>
+
+<table>
+  <thead><tr><th>Stage</th><th>Method</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td><strong>1. Cheap prune</strong></td><td>50% token overlap + 50% original retrieval score. Caps candidate set at configurable maximum.</td><td>Microseconds</td></tr>
+    <tr><td><strong>2. Semantic reranking</strong></td><td>Cosine similarity between query and candidate embeddings, blended with retrieval score using weight &alpha;.</td><td>Milliseconds</td></tr>
+    <tr><td><strong>3. Cross-encoder</strong></td><td>External HTTP endpoint (Qwen3-Reranker-4B). Logit margins normalized through sigmoid. Graceful degradation on timeout/failure.</td><td>~100ms</td></tr>
+    <tr><td><strong>4. Near-duplicate merge</strong></td><td>Union-find algorithm. Candidates with cosine similarity &gt; 0.95 clustered; only highest-scored retained.</td><td>Milliseconds</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ═══════════════ 14. WORKING SET MANAGER ═══════════════ -->
+<section id="working-set">
+<h2>14. Working Set Manager</h2>
+
+<p>This is the center of the architecture. Of everything the system knows, what deserves scarce prompt tokens <strong>right now</strong>?</p>
+
+<h3>14.1 Winner-takes-budget model</h3>
+<p>A fact is not injected because it was recalled &mdash; it is injected because it <em>won a budgeted competition</em>. The WorkingSetManager generates candidates from all memory classes via the 5-source retrieval pipeline, scores each on 11 dimensions, and selects winners under the profile's token budget with a (1 &minus; 1/e) &asymp; 0.63 approximation guarantee (submodular optimization).</p>
+
+<h3>14.2 Selection algorithm</h3>
+<ol>
+  <li><strong>Pre-allocate mandatory items unconditionally:</strong> constraints, goals with blockers, procedures requiring proof</li>
+  <li><strong>Pass 1:</strong> Compute 9 independent scoring dimensions for all remaining candidates</li>
+  <li><strong>Sort</strong> by Pass 1 weighted sum, descending</li>
+  <li><strong>Greedy selection with Pass 2:</strong> For each candidate in order, compute 2 interaction-dependent dimensions (redundancy + contradiction) against already-selected items. Include if total score &gt; 0 and budget permits</li>
+</ol>
+
+<h3>14.3 Candidate sources</h3>
+<p><code>must-inject constraints</code> (always win) &middot; <code>session goals with blockers</code> &middot; <code>procedures requiring proof</code> &middot; <code>active facts from 5-source retrieval</code> &middot; <code>evidence summaries</code> &middot; <code>artifact summaries</code> &middot; <code>compact state entries</code></p>
+</section>
+
+<!-- ═══════════════ 15. 11-DIMENSION SCORING ═══════════════ -->
+<section id="scoring">
+<h2>15. Eleven-Dimension Scoring &amp; Per-Profile Tuning</h2>
+
+<h3>15.1 Pass 1 &mdash; Nine independent dimensions</h3>
+
+<table>
+  <thead><tr><th>Dimension</th><th>What it measures</th><th>Formula / Method</th></tr></thead>
+  <tbody>
+    <tr><td><code>turnRelevance</code></td><td>Semantic similarity to current turn</td><td>cosine(candidate_embedding, turn_embedding)</td></tr>
+    <tr><td><code>sessionGoalRelevance</code></td><td>Alignment with active session goals</td><td>Goal relevance tags (direct=1.0, indirect=0.7); fallback: max cosine over session goal embeddings with parent-chain walk-up (0.7 &times; child_relevance)</td></tr>
+    <tr><td><code>globalGoalRelevance</code></td><td>Alignment with persistent organizational goals</td><td>Max cosine similarity to any persistent goal</td></tr>
+    <tr><td><code>recency</code></td><td>How recently created, used, or updated</td><td>r(t) = exp(&minus;(ln2 / t<sub>&frac12;</sub>) &times; &Delta;t). Half-life per profile: coding=24h, research=168h, managerial=72h, worker=12h, personal=720h</td></tr>
+    <tr><td><code>successfulUsePrior</code></td><td>Track record of useful injection</td><td>successful_use_count / use_count</td></tr>
+    <tr><td><code>confidence</code></td><td>Certainty with verification multiplier</td><td>raw_confidence &times; m<sub>v</sub> where m<sub>v</sub>: UNVERIFIED=0.5, SELF=0.7, TOOL=0.9, SUPERVISOR=1.0</td></tr>
+    <tr><td><code>evidenceStrength</code></td><td>Quality and quantity of backing evidence</td><td>evidence_count / evidence_refs_max (per-profile: coding=2, research=5, manager=3, worker=2, personal=2)</td></tr>
+    <tr><td><code>novelty</code></td><td>Whether already in compact state</td><td>Binary: 0 if fact_id in compaction_state_set, 1 otherwise</td></tr>
+    <tr><td><code>costPenalty</code></td><td>Token cost relative to remaining budget</td><td>token_count / remaining_budget</td></tr>
+  </tbody>
+</table>
+
+<h3>15.2 Pass 2 &mdash; Two interaction-dependent dimensions</h3>
+<table>
+  <thead><tr><th>Dimension</th><th>Method</th><th>Weight</th></tr></thead>
+  <tbody>
+    <tr><td><code>redundancyPenalty</code></td><td>Max cosine similarity to already-selected items. If exceeds per-profile threshold, penalty applied.</td><td>&minus;0.7 default</td></tr>
+    <tr><td><code>contradictionPenalty</code></td><td>Two-layer: (a) explicit graph edges &mdash; supersession penalty 1.0, contradiction penalty 0.9; (b) semantic: highly similar facts with large confidence gap, penalty 0.7</td><td>&minus;1.0 default</td></tr>
+  </tbody>
+</table>
+
+<h3>15.3 Per-profile weight presets</h3>
+
+<table>
+  <thead><tr><th>Weight</th><th>Coding</th><th>Research</th><th>Managerial</th><th>Worker</th><th>Personal</th></tr></thead>
+  <tbody>
+    <tr><td>turnRelevance</td><td>1.5</td><td>0.8</td><td>0.7</td><td>1.3</td><td>1.0</td></tr>
+    <tr><td>sessionGoalRelevance</td><td>1.2</td><td>1.0</td><td>1.5</td><td>1.4</td><td>0.8</td></tr>
+    <tr><td>globalGoalRelevance</td><td>0.3</td><td>0.8</td><td>1.0</td><td>0.3</td><td>0.4</td></tr>
+    <tr><td>recency</td><td>1.2</td><td>0.5</td><td>0.6</td><td>1.3</td><td>0.9</td></tr>
+    <tr><td>successfulUsePrior</td><td>0.8</td><td>0.6</td><td>0.5</td><td>0.7</td><td>0.9</td></tr>
+    <tr><td>confidence</td><td>0.3</td><td>0.8</td><td>0.5</td><td>0.4</td><td>0.3</td></tr>
+    <tr><td>evidenceStrength</td><td>0.2</td><td>0.9</td><td>0.7</td><td>0.3</td><td>0.2</td></tr>
+    <tr><td>novelty</td><td>0.6</td><td>0.7</td><td>0.4</td><td>0.5</td><td>0.5</td></tr>
+    <tr><td>redundancyPenalty</td><td>&minus;0.8</td><td>&minus;0.5</td><td>&minus;0.9</td><td>&minus;0.7</td><td>&minus;0.6</td></tr>
+    <tr><td>contradictionPenalty</td><td>&minus;1.0</td><td>&minus;1.0</td><td>&minus;1.0</td><td>&minus;1.0</td><td>&minus;1.0</td></tr>
+    <tr><td>costPenalty</td><td>&minus;0.4</td><td>&minus;0.2</td><td>&minus;0.5</td><td>&minus;0.4</td><td>&minus;0.3</td></tr>
+    <tr style="border-top: 2px solid var(--border-accent);"><td>half_life (hours)</td><td>24</td><td>168</td><td>72</td><td>12</td><td>720</td></tr>
+    <tr><td>evidence_refs_max</td><td>2</td><td>5</td><td>3</td><td>2</td><td>2</td></tr>
+    <tr><td>budget (tokens)</td><td>8000</td><td>12000</td><td>8000</td><td>8000</td><td>8000</td></tr>
+    <tr><td>isolation_level</td><td>LOOSE</td><td>NONE</td><td>LOOSE</td><td>LOOSE</td><td>STRICT</td></tr>
+    <tr><td>graph_mode</td><td>LOCAL</td><td>GLOBAL</td><td>HYBRID</td><td>LOCAL</td><td>HYBRID</td></tr>
+    <tr><td>graph_depth</td><td>1</td><td>3</td><td>2</td><td>1</td><td>2</td></tr>
+  </tbody>
+</table>
+
+<h3>15.4 Tuning mechanism</h3>
+<p>The <code>ScoringTuner</code> implements a feedback-driven tuning loop during consolidation. It computes Spearman correlations between each scoring dimension and the successful-use signal, then applies EMA-smoothed weight adjustments capped at &plusmn;5% per cycle to prevent oscillation. Tuning deltas are persisted in SQLite, scoped per profile/org/gateway. Weight resolution chain: base preset &rarr; profile &rarr; org override &rarr; tuning delta.</p>
+</section>
+
+<!-- ═══════════════ 16. CONTEXT LIFECYCLE ═══════════════ -->
+<section id="context-lifecycle">
+<h2>16. Context Lifecycle</h2>
+
+<h3>16.1 <code>bootstrap</code></h3>
+<p>Resolves profile policy (immutable for session lifetime). Registers agent actor if new. Loads session goals from Redis. Creates session context record in cache. Loads compacted state snapshot. Seeds working set with must-have constraints and goals.</p>
+
+<h3>16.2 <code>ingest</code></h3>
+<p>Turn ingest pipeline processes messages through ten sequential tasks: actor resolution, recent fact loading, LLM extraction with structured schema, supersession/contradiction detection, memory classification, batch embedding, dedup at 0.95, storage via <code>add_data_points()</code>, Cognee enrichment. Artifact ingest handles tool outputs with SHA-256 dedup. Procedure ingest extracts multi-step workflows.</p>
+
+<h3>16.3 <code>assemble</code></h3>
+<p>Working set manager produces scored snapshot. Guard engine runs preflight check. Context assembler distributes items across <strong>four blocks on two prompt surfaces</strong>:</p>
+
+<table>
+  <thead><tr><th>Surface</th><th>Block</th><th>Content</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="2"><strong>Surface A</strong> (system prompt addition &mdash; highest attention)</td><td>Block 1: systemPromptAddition</td><td>Constraints, guard reinjections, proof-required procedure instructions</td></tr>
+    <tr><td>Block 2: prependSystemContext</td><td>Goals with blockers highlighted</td></tr>
+    <tr><td rowspan="2"><strong>Surface B</strong> (prepended context)</td><td>Block 3: prependContext</td><td>Scored working set, ordered by memory class (POLICY &rarr; PROCEDURAL &rarr; SEMANTIC &rarr; EPISODIC) then by score descending</td></tr>
+    <tr><td>Block 4: appendSystemContext</td><td>Evidence references</td></tr>
+  </tbody>
+</table>
+
+<h3>16.4 <code>compact</code></h3>
+<p>Two-stage compaction. <strong>Stage 1</strong> (zero LLM cost): classifies each message as PRESERVE, COMPRESS, or DROP. <strong>Stage 2</strong> (one LLM call): summarizes the COMPRESS bucket into 1&ndash;3 paragraphs with goal-aware prompts. Cadence thresholds vary by profile aggressiveness (1.3x to 4x target token count).</p>
+
+<h3>16.5 <code>afterTurn</code></h3>
+<p>Six-signal successful-use detection:</p>
+<table>
+  <thead><tr><th>Signal</th><th>Method</th><th>Weight</th></tr></thead>
+  <tbody>
+    <tr><td>S1: Direct Quote</td><td>Substring match of injected fact in LLM response</td><td>0.95</td></tr>
+    <tr><td>S2: Tool Correlation</td><td>Tool call arguments match injected fact content</td><td>0.70</td></tr>
+    <tr><td>S3: Goal Mention</td><td>Response references a goal the fact was tagged for</td><td>0.50</td></tr>
+    <tr><td>S4: Emergent Behavior</td><td>Response shows action consistent with injected constraint</td><td>0.40</td></tr>
+    <tr><td>S5: Continuation</td><td>Follow-up turn builds on injected fact</td><td>0.35</td></tr>
+    <tr><td>S6: Ignored Penalty</td><td>3+ turns with zero signals &mdash; negative marker</td><td>&minus;0.30</td></tr>
+  </tbody>
+</table>
+<p>Running Jaccard coefficient &gt; 0.3 triggers successful-use increment. Smart goal injection cadence: goals re-injected only when at least one of five conditions holds (goal status changed, new blocker, progress recorded, N turns since last injection, explicit user request).</p>
+
+<h3>16.6 Subagent support</h3>
+<p><code>prepareSubagentSpawn</code>: filters parent working set by child goal relevance with 2x budget allocation. <code>onSubagentEnded</code>: merges child facts into parent, updates parent goals, verifies declared completion where required.</p>
+</section>
+
+<!-- ═══════════════ 17. GUARD PIPELINE ═══════════════ -->
+<section id="guards">
+<h2>17. Six-Layer Guard Pipeline</h2>
+
+<div class="callout red">
+  <strong>Cheap-first pipeline:</strong> Each layer is faster and cheaper than the next. Most violations are caught before any LLM call. Five policy presets (coding, research, managerial, worker, personal_assistant) control strictness per layer.
+</div>
+
+<h3>Layer 0 &mdash; Autonomy domain classification</h3>
+<p>Classifies agent actions into ten domains: <code>FINANCIAL</code>, <code>DATA_ACCESS</code>, <code>COMMUNICATION</code>, <code>CODE_CHANGE</code>, <code>SCOPE_CHANGE</code>, <code>RESOURCE</code>, <code>INFORMATION_SHARE</code>, <code>DELEGATION</code>, <code>RECORD_MUTATION</code>, <code>UNCATEGORIZED</code>.</p>
+<p>Four-point autonomy scale per domain: <code>AUTONOMOUS</code>, <code>INFORM</code>, <code>APPROVE_FIRST</code>, <code>HARD_STOP</code>. Floor composition: final = max(autonomy_floor, safety_result) &mdash; safety can only escalate, never relax.</p>
+
+<h3>Layer 1 &mdash; Static rule matching</h3>
+<p>Four-source rule registry: built-in rules (12 default patterns), profile-specific rules, procedure-bound rules (loaded dynamically from active procedures' guard bindings), operator-defined custom rules. Match by keyword, phrase, regex, or tool target patterns. Cost: microseconds.</p>
+
+<h3>Layer 2 &mdash; Semantic matching</h3>
+<p>BM25 scoring (block threshold 8.0, warn threshold 5.0) and cosine similarity (threshold 0.80) against known-bad exemplars. Per-profile strictness modifier: loose = 1.5x thresholds, strict = 0.7x thresholds. Cost: milliseconds.</p>
+
+<h3>Layer 3 &mdash; Structural validation</h3>
+<p>Graph queries for approval tokens, evidence existence, and confirmation flags. Disabled under loose strictness. Cost: milliseconds.</p>
+
+<h3>Layer 4 &mdash; Forced constraint reinjection</h3>
+<p>Always executes. Collects all triggered constraints and formats them as mandatory working-set items for Block 1 of context assembly. The agent sees all applicable constraints even when the verdict is pass or warn.</p>
+
+<h3>Layer 5 &mdash; Optional LLM escalation</h3>
+<p>Narrow safety-focused prompt for ambiguous cases. Only fires under strict profiles or when explicitly enabled. Cost: one LLM call.</p>
+
+<h3>Guard outputs and escalation</h3>
+<p>Five result types: <code>pass</code>, <code>warn</code>, <code>block</code>, <code>require_approval</code>, <code>require_evidence</code>. Near-miss escalation: three <code>warn</code> results within five turns auto-tightens strictness (medium &rarr; strict &rarr; LLM layer enabled).</p>
+
+<h3>Procedures-Guards-Evidence triangle</h3>
+<p>The "Triangle of Accountability": procedure activation loads guard bindings (connection 1). Guard violation demands evidence from agent (connection 2). Procedure completion check validates all proof requirements have verified claims (connection 3).</p>
+</section>
+
+<!-- ═══════════════ 18. AI FIREWALL ═══════════════ -->
+<section id="firewall">
+<h2>18. AI Firewall</h2>
+
+<p>The guard pipeline (Section 17) provides <strong>advisory enforcement</strong> &mdash; it shapes context assembly but cannot physically prevent tool calls. The AI Firewall adds <strong>physical enforcement</strong>, forming a "belt-and-suspenders" dual-enforcement architecture.</p>
+
+<h3>18.1 Three physical enforcement layers</h3>
+<table>
+  <thead><tr><th>Layer</th><th>Location</th><th>Mechanism</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Layer A: Agent hook</strong></td><td>TypeScript ContextEngine plugin</td><td>Intercepts via <code>onToolCall</code> lifecycle hook. Fast-path cache lookup &lt; 5ms for previously evaluated tool-argument combinations.</td></tr>
+    <tr><td><strong>Layer B: Proxy guardrails</strong></td><td>Standalone LiteLLM guardrails server</td><td>Between agent and LLM API. Scans prompts (pre-call) and completions (post-call).</td></tr>
+    <tr><td><strong>Layer C: SDK hooks</strong></td><td>In-process LiteLLM Python SDK</td><td>Guardrails hooks for direct SDK usage paths.</td></tr>
+  </tbody>
+</table>
+
+<h3>18.2 Six-tier cost-ordered safety scanning</h3>
+<table>
+  <thead><tr><th>Tier</th><th>Method</th><th>Latency</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Tier 0: Pattern detection</strong></td><td>~200 regex patterns from OWASP LLM security guidelines</td><td>Sub-millisecond</td></tr>
+    <tr><td><strong>Tier 1: Heuristic scoring</strong></td><td>Token entropy, special character density, instruction-like phrase frequency, encoding anomalies</td><td>Microseconds</td></tr>
+    <tr><td><strong>Tier 2: Classification models</strong></td><td>Fine-tuned models (LLM Guard) for prompt injection, PII, toxicity, relevance</td><td>~100ms</td></tr>
+    <tr><td><strong>Tier 3: Declarative validators</strong></td><td>Guardrails AI validators for structural/content constraints with auto-correction</td><td>~50ms</td></tr>
+    <tr><td><strong>Tier 4: Dialog rails</strong></td><td>NeMo Guardrails for topic drift, refusal bypass, multi-turn manipulation</td><td>~200ms</td></tr>
+    <tr><td><strong>Tier 5: Canary tokens</strong></td><td>Traceable tokens injected into stored content to detect exfiltration</td><td>Passive</td></tr>
+  </tbody>
+</table>
+
+<h3>18.3 Knowledge base contamination prevention</h3>
+<p>Integrated with the ingest pipeline: when the scanner flags tool output as containing prompt injection or adversarial content, fact extraction is skipped for that output, preventing poisoning of the knowledge graph.</p>
+</section>
+
+<!-- ═══════════════ 19. EVIDENCE VERIFICATION ═══════════════ -->
+<section id="verification">
+<h2>19. Evidence Verification Model</h2>
+
+<h3>19.1 Four-state machine</h3>
+<p>Claims progress through a verification state machine with graded confidence multipliers (m<sub>v</sub>) that feed directly into the scoring engine:</p>
+
+<table>
+  <thead><tr><th>State</th><th>m<sub>v</sub></th><th>Transition Trigger</th></tr></thead>
+  <tbody>
+    <tr><td><strong>UNVERIFIED</strong></td><td>0.5</td><td>Initial state for all new claims</td></tr>
+    <tr><td><strong>SELF-SUPPORTED</strong></td><td>0.7</td><td>Any evidence attached (e.g., reference to supporting fact)</td></tr>
+    <tr><td><strong>TOOL-SUPPORTED</strong></td><td>0.9</td><td>Tool output evidence provided (e.g., API call result, diff hash)</td></tr>
+    <tr><td><strong>SUPERVISOR-VERIFIED</strong></td><td>1.0</td><td>Human supervisor explicit sign-off</td></tr>
+    <tr><td><strong>REJECTED</strong></td><td>&mdash;</td><td>Reachable from any state. Mandatory reason string + rejector actor ID</td></tr>
+  </tbody>
+</table>
+
+<h3>19.2 Completion contract</h3>
+<p>For procedures with proof requirements, completion is valid only if: all required steps executed, all required evidence attached, all red-line checks passed, and any required approval exists. The <code>validate_completion()</code> method enforces this contract.</p>
+
+<h3>19.3 HITL approval queue</h3>
+<p>Redis-backed approval queue for <code>require_approval</code> guard verdicts. A separate HITL middleware service (port 8421) provides the approval/rejection interface. Auto-goals created for pending approvals to surface them in the working set.</p>
+</section>
+
+<!-- ═══════════════ 20. TRACEABILITY ═══════════════ -->
+<section id="trace">
+<h2>20. Traceability &amp; Observability</h2>
+
+<p>Every relevant event creates an append-only trace event from a vocabulary of 47 event types. Events reference artifact IDs, chunk refs, claim IDs, procedure IDs, goal IDs, and actors involved.</p>
+
+<h3>20.1 Trace API</h3>
+<p>Six endpoints: <code>POST /trace/query</code> (filtered search), <code>GET /trace/sessions</code> (list), <code>GET /trace/session/{id}/timeline</code>, <code>GET /trace/session/{id}/summary</code>, <code>GET /trace/event-types</code>. All gateway-scoped.</p>
+
+<h3>20.2 Observability stack</h3>
+<ul>
+  <li><strong>Traces:</strong> <code>@traced</code> decorator auto-spans; session_key/gateway_id propagated via W3C trace context</li>
+  <li><strong>Logs:</strong> <code>GatewayLoggerAdapter</code> prepends <code>[gateway_id][agent_key]</code> to all messages</li>
+  <li><strong>Metrics:</strong> 49 Prometheus counters/gauges via <code>StatsEngine</code> (retrieved, stored, dedup, guard hits, compaction, etc.)</li>
+  <li><strong>Analytics:</strong> TraceLedger &rarr; OTEL Collector &rarr; ClickHouse for cross-session analytics. Grafana dashboards.</li>
+</ul>
+</section>
+
+<!-- ═══════════════ 21. COMPACTION ═══════════════ -->
+<section id="compaction">
+<h2>21. Compaction Architecture</h2>
+
+<h3>21.1 Goal-aware compaction preserves</h3>
+<p>Current session goal state, blockers, decisions made, unresolved questions, critical constraints, evidence refs needed later, important actor relationships.</p>
+
+<h3>21.2 Two-stage classification</h3>
+<p><strong>Stage 1 (zero LLM):</strong> Rule-based classification &mdash; PRESERVE (goals, constraints, open blockers), COMPRESS (explanations, repeated injections, stale context), DROP (phatic text, superseded artifacts, restated information). <strong>Stage 2 (one LLM call):</strong> Summarize the COMPRESS bucket into 1&ndash;3 paragraphs with goal-aware prompts.</p>
+
+<h3>21.3 Post-compaction feedback</h3>
+<p>Items well-represented in compact state get their novelty score zeroed in subsequent working-set competitions. Successful-use signals (S1&ndash;S6) track which compacted items the LLM actually used.</p>
+</section>
+
+<!-- ═══════════════ 22. CONSOLIDATION ═══════════════ -->
+<section id="consolidation">
+<h2>22. Consolidation / "Sleep" Pipeline &mdash; 9 Stages</h2>
+
+<div class="callout warn">
+  <strong>Analogous to memory consolidation during sleep.</strong> Runs during idle periods with a Redis distributed lock (1-hour timeout). Gateway-scoped. Seven of nine stages require zero LLM calls.
+</div>
+
+<h4>Stage 1 &mdash; Cluster near-duplicates</h4>
+<p>Cosine similarity &gt; 0.92 threshold via Cognee vector search. Pure vector math + union-find clustering. Zero LLM.</p>
+
+<h4>Stage 2 &mdash; Canonicalize</h4>
+<p>Select highest-confidence, most-cited version as canonical. Merge provenance from all versions. LLM only for ambiguous clusters (&lt;5% of cases).</p>
+
+<h4>Stage 3 &mdash; Strengthen useful facts</h4>
+<p>Confidence boost: <code>c'(f) = min(c(f) + s(f)/u(f) &times; 0.3, 1.0)</code> where s(f) = successful use count, u(f) = total use count. Zero LLM.</p>
+
+<h4>Stage 4 &mdash; Decay unused facts</h4>
+<p>Two modes. Recalled but unused: <code>c' = c &times; 0.9<sup>t<sub>r</sub></sup></code> (t<sub>r</sub> = recall turns). Never recalled: <code>c' = c &times; 0.95<sup>t<sub>d</sub></sup></code> (t<sub>d</sub> = days since creation). Decay rates by scope: SESSION hourly, ACTOR daily, TEAM/ORG weekly, GLOBAL monthly. Facts below 0.1 are archived. Zero LLM.</p>
+
+<h4>Stage 5 &mdash; Prune bad autorecall</h4>
+<p>Facts auto-recalled 5+ times with zero successful uses are blacklisted from automatic injection. Remain searchable. Zero LLM.</p>
+
+<h4>Stage 6 &mdash; Promote episodic &rarr; semantic</h4>
+<p>Recurring episodic facts (3+ sessions, embedding similarity &gt; 0.95 cross-session) promoted to semantic class. Memory class and scope co-promote. Zero LLM.</p>
+
+<h4>Stage 7 &mdash; Refine procedures from patterns</h4>
+<p>Trace ledger analysis for repeated multi-step patterns (3+ occurrences). LLM generates draft ProcedureDefinition. Goes to review queue &mdash; never auto-activated. 1 LLM call per pattern.</p>
+
+<h4>Stage 8 &mdash; Identify verification gaps</h4>
+<p>Claims compared against procedure proof requirements. Missing evidence flagged for supervisor sampling. Zero LLM.</p>
+
+<h4>Stage 9 &mdash; Recompute salience priors</h4>
+<p>EMA adjusts per-profile scoring weights from cumulative use data. Spearman correlation between dimensions and success signal. Capped at &plusmn;5% per cycle. Persisted in SQLite. Zero LLM.</p>
+
+<h3>Consolidation outputs</h3>
+<p>Most recalled &middot; Most useful &middot; Most wasted-prompt &middot; Procedures correlated with success &middot; Claims frequently rejected &middot; Artifacts repeatedly reused &middot; Safe to archive &middot; Suggested procedures &middot; Verification gaps &middot; Weight tuning deltas</p>
+</section>
+
+<!-- ═══════════════ 23. PROCEDURAL MEMORY ═══════════════ -->
+<section id="procedures">
+<h2>23. Procedural Memory</h2>
+
+<h3>23.1 Capabilities</h3>
+<p>Workflows, checklists, escalation paths, red-line guard bindings, proof requirements per step, role-specific variants, approval requirements, retry/fallback patterns, supervisor review hooks.</p>
+
+<h3>23.2 Activation modes</h3>
+<p>Manual selection &middot; Actor/profile default &middot; Trigger-word based &middot; Task classifier based &middot; Goal-bound &middot; Supervisor-forced.</p>
+
+<h3>23.3 Guard bindings</h3>
+<p>Procedures declare guard bindings that activate when the procedure activates. This dynamically extends the guard engine's rule set for the duration of the procedure, creating the Procedures-Guards-Evidence triangle described in Section 17.</p>
+
+<h3>23.4 Procedure &rarr; Context interaction</h3>
+<p>A procedure can influence context assembly by: adding must-inject constraints (Block 1), reserving budget for required evidence, forcing a completion schema, altering compact/preserve policy, changing subagent packet structure.</p>
+</section>
+
+<!-- ═══════════════ 24. SUBAGENT PACKETS ═══════════════ -->
+<section id="subagents">
+<h2>24. Subagent Packet Management</h2>
+
+<h3>24.1 Spawn mechanism</h3>
+<p>The <code>prepareSubagentSpawn</code> hook filters the parent's working set by child goal relevance, allocating 2x budget. Depth is configurable (default: max 3 levels of nesting). Subagent spawns are bounded events &mdash; typically 0&ndash;5 per session.</p>
+
+<h3>24.2 Packet contents</h3>
+<p>Subgoal, local constraints, relevant procedures, essential actor relationships, necessary evidence references, bounded artifact snippets. Not the full parent context.</p>
+
+<h3>24.3 Return merge</h3>
+<p><code>onSubagentEnded</code>: ingest returned claims/artifacts/evidence, score relevance to parent goal, verify declared completion, update trace, promote accepted facts, compact large outputs.</p>
+</section>
+
+<!-- ═══════════════ 25. PROFILES ═══════════════ -->
+<section id="profiles">
+<h2>25. Profiles &amp; Inheritance</h2>
+
+<p>Four-level inheritance chain: <strong>base</strong> &rarr; <strong>profile preset</strong> &rarr; <strong>organization override</strong> &rarr; <strong>resolved policy</strong>. Resolved at bootstrap, immutable per session.</p>
+
+<table>
+  <thead><tr><th>Profile</th><th>Graph Mode</th><th>Key Characteristics</th></tr></thead>
+  <tbody>
+    <tr><td><strong>coding</strong></td><td>LOCAL (depth 1)</td><td>High turn relevance + recency. Strong exact match, dependency locality. Aggressive tool-artifact reuse. Proof-required for edits/deployments. 24h half-life, LOOSE isolation.</td></tr>
+    <tr><td><strong>research</strong></td><td>GLOBAL (depth 3)</td><td>Largest evidence budget (12000 tokens). Strong provenance requirements. Slower but higher quality rerank. 168h half-life, NONE isolation.</td></tr>
+    <tr><td><strong>managerial</strong></td><td>HYBRID (depth 2)</td><td>Strong compaction + redundancy penalty. Goal/action/decision centric. Summary-over-raw preference. 72h half-life, LOOSE isolation.</td></tr>
+    <tr><td><strong>worker</strong></td><td>LOCAL (depth 1)</td><td>Recency-heavy (12h half-life). Execution-oriented. Explicit procedures + blockers. Frequent completion/evidence checks. LOOSE isolation.</td></tr>
+    <tr><td><strong>personal_assistant</strong></td><td>HYBRID (depth 2)</td><td>High stable-preference promotion. 720h half-life (longest memory). Temporal + routine emphasis. STRICT isolation.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Profile resolution:</strong> <code>resolve_profile("coding")</code> loads the base profile, overlays the coding preset, then overlays any org-specific overrides from <code>OrgOverrideStore</code> (SQLite, 5-minute cache). The result is a single flat <code>ProfilePolicy</code> object stored in the trace ledger alongside every assemble event.
+</div>
+</section>
+
+<!-- ═══════════════ 26. BUSINESS TIERS ═══════════════ -->
+<section id="tiers">
+<h2>26. Business-Tier Capability Matrix</h2>
+
+<table>
+  <thead><tr><th>Capability</th><th>Memory Only</th><th>Context Only</th><th>Full</th></tr></thead>
+  <tbody>
+    <tr><td>Episodic/semantic memory</td><td>yes</td><td>partial</td><td>yes</td></tr>
+    <tr><td>Procedural memory</td><td>yes</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Actor graph</td><td>yes</td><td>partial</td><td>yes</td></tr>
+    <tr><td>Tool artifact store</td><td>yes</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Working-set manager</td><td>API only</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Lifecycle compaction</td><td>no</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Context assembly (4-block)</td><td>minimal</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Six-layer guard pipeline</td><td>limited</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Claim/evidence tracking</td><td>yes</td><td>yes</td><td>yes</td></tr>
+    <tr><td>Consolidation (9-stage)</td><td>yes</td><td>limited</td><td>yes</td></tr>
+    <tr><td>Scoring tuner feedback</td><td>partial</td><td>partial</td><td>yes</td></tr>
+    <tr><td>Subagent packets</td><td>no</td><td>yes</td><td>yes</td></tr>
+  </tbody>
+</table>
+
+<p>The dependency injection container (<code>RuntimeContainer</code>) instantiates only tier-enabled modules. Modules outside the current tier's capability set are <code>None</code>.</p>
+</section>
+
+<!-- ═══════════════ 27. COGNEE INTEGRATION ═══════════════ -->
+<section id="cognee">
+<h2>27. Cognee Knowledge Plane Integration</h2>
+
+<h3>27.1 Storage pattern</h3>
+<p>All DataPoint subclasses are stored via <code>add_data_points()</code>. This automatically: stores all custom fields as Neo4j node properties via MERGE by ID, embeds and indexes <code>index_fields</code> in Qdrant (e.g., <code>FactDataPoint_text</code> collection), and supports upsert on same ID. Cognee's <code>GRAPH_COMPLETION</code> search auto-discovers DataPoint subclasses via <code>get_all_subclasses(DataPoint)</code>.</p>
+
+<h3>27.2 Ingest pipelines</h3>
+<ul>
+  <li><code>turn_ingest</code> &mdash; messages &rarr; LLM fact extraction &rarr; classification &rarr; supersession detection &rarr; dedup &rarr; storage</li>
+  <li><code>artifact_ingest</code> &mdash; tool outputs &rarr; SHA-256 dedup &rarr; LLM extraction &rarr; summary &rarr; storage</li>
+  <li><code>procedure_ingest</code> &mdash; completion logs &rarr; procedural knowledge extraction</li>
+</ul>
+
+<h3>27.3 Search pattern (hybrid)</h3>
+<ul>
+  <li><code>cognee.search(GRAPH_COMPLETION, only_context=True)</code> &mdash; semantic/graph discovery</li>
+  <li><code>cognee.search(CHUNKS)</code> &mdash; semantic chunk search</li>
+  <li><code>cognee.search(CHUNKS_LEXICAL)</code> &mdash; BM25-like keyword search</li>
+  <li><code>GraphAdapter.query_cypher()</code> &mdash; structural hits by scope, actor, session_key</li>
+  <li><code>VectorAdapter.search_similar()</code> &mdash; filtered vector search on Cognee-managed collections</li>
+</ul>
+
+<h3>27.4 Dataset scoping</h3>
+<p>All <code>cognee.add()</code> calls use <code>dataset_name=f"{gateway_id}__{base}"</code> for gateway-scoped datasets. <code>cognee.cognify()</code> runs Cognee's full pipeline: chunking, entity extraction, relationship extraction, triplet embedding &mdash; making <code>GRAPH_COMPLETION</code> search work.</p>
+</section>
+
+<!-- Footer -->
+<div style="margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--text-dim);">
+  ElephantBroker: A Knowledge-Grounded Cognitive Runtime for Trustworthy AI Agents &middot; Cristian Lupascu, Alexandru Lupascu &middot; arXiv:2603.25097 &middot; AGPL-3.0 &middot; 2026-04-03
+</div>
+
+</div><!-- /main -->
+</body>
+</html>

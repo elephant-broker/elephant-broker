@@ -1,0 +1,85 @@
+version: "3.9"
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "17474:7474"
+      - "17687:7687"
+    environment:
+      # Dev/test credentials — override via EB_NEO4J_PASSWORD in production
+      NEO4J_AUTH: neo4j/elephant_dev
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    ports:
+      - "16333:6333"
+      - "16334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Phase 9: Observability stack (optional — for ClickHouse analytics + OTEL log export)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4317:4317"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    depends_on:
+      - clickhouse
+      - jaeger
+    profiles:
+      - observability
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      # dev/staging only — use real credentials in production
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    profiles:
+      - observability
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+    environment:
+      SPAN_STORAGE_TYPE: memory
+      COLLECTOR_OTLP_ENABLED: "true"
+    profiles:
+      - observability
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "13000:3000"
+    profiles:
+      - observability
+
+  # ElephantBroker runtime runs natively via Python venv (not containerized).
+  # See docs/DEPLOYMENT.md for setup instructions.
+  # Infrastructure services above are the only Docker dependencies.
+
+volumes:
+  neo4j_data:
+  qdrant_data:
+  redis_data:
+  clickhouse_data:

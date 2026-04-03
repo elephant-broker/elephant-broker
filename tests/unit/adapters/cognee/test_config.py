@@ -1,0 +1,107 @@
+"""Unit tests for the Cognee configuration adapter."""
+from __future__ import annotations
+
+import os
+from unittest.mock import MagicMock, patch
+
+from elephantbroker.runtime.adapters.cognee.config import configure_cognee
+from elephantbroker.schemas.config import CogneeConfig, LLMConfig
+
+
+def _cognee_mocks(mock_config_module, mock_embedding_cfg):
+    """Build sys.modules dict that mocks cognee + its embedding config subpackage."""
+    embedding_config_mod = MagicMock()
+    embedding_config_mod.get_embedding_config = MagicMock(return_value=mock_embedding_cfg)
+    return {
+        "cognee": MagicMock(config=mock_config_module),
+        "cognee.infrastructure": MagicMock(),
+        "cognee.infrastructure.databases": MagicMock(),
+        "cognee.infrastructure.databases.vector": MagicMock(),
+        "cognee.infrastructure.databases.vector.embeddings": MagicMock(),
+        "cognee.infrastructure.databases.vector.embeddings.config": embedding_config_mod,
+        # Community Qdrant adapter — register import is a no-op in tests
+        "cognee_community_vector_adapter_qdrant": MagicMock(),
+    }
+
+
+class TestConfigureCognee:
+    async def test_sets_graph_provider_to_neo4j(self):
+        mock_config_module = MagicMock()
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig())
+            mock_config_module.set_graph_database_provider.assert_called_once_with("neo4j")
+
+    async def test_sets_vector_provider_to_qdrant(self):
+        mock_config_module = MagicMock()
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig())
+            mock_config_module.set_vector_db_provider.assert_called_once_with("qdrant")
+
+    async def test_passes_qdrant_url(self):
+        mock_config_module = MagicMock()
+        cfg = CogneeConfig(qdrant_url="http://qdrant.prod:6333")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(cfg)
+            call_args = mock_config_module.set_vector_db_config.call_args[0][0]
+            assert call_args["vector_db_url"] == "http://qdrant.prod:6333"
+
+    async def test_passes_neo4j_credentials(self):
+        mock_config_module = MagicMock()
+        cfg = CogneeConfig(neo4j_uri="bolt://prod:7687", neo4j_user="admin", neo4j_password="secret")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(cfg)
+            call_args = mock_config_module.set_graph_db_config.call_args[0][0]
+            assert call_args["graph_database_url"] == "bolt://prod:7687"
+            assert call_args["graph_database_username"] == "admin"
+            assert call_args["graph_database_password"] == "secret"
+
+    async def test_sets_access_control_env_var(self):
+        mock_config_module = MagicMock()
+        os.environ.pop("ENABLE_BACKEND_ACCESS_CONTROL", None)
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig())
+            assert os.environ.get("ENABLE_BACKEND_ACCESS_CONTROL") == "false"
+
+    async def test_with_llm_config_sets_real_model(self):
+        mock_config_module = MagicMock()
+        llm = LLMConfig(model="openai/gemini/gemini-2.5-pro", endpoint="http://llm:8811/v1", api_key="sk-real")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig(), llm_config=llm)
+            call_args = mock_config_module.set_llm_config.call_args[0][0]
+            assert call_args["llm_model"] == "openai/gemini/gemini-2.5-pro"
+            assert call_args["llm_endpoint"] == "http://llm:8811/v1"
+            assert call_args["llm_api_key"] == "sk-real"
+
+    async def test_without_llm_config_falls_back(self):
+        mock_config_module = MagicMock()
+        cfg = CogneeConfig(embedding_model="openai/text-embedding-3-large")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(cfg)  # no llm_config
+            call_args = mock_config_module.set_llm_config.call_args[0][0]
+            assert call_args["llm_model"] == "openai/text-embedding-3-large"
+
+    async def test_sets_embedding_config(self):
+        mock_config_module = MagicMock()
+        mock_embedding_cfg = MagicMock()
+        cfg = CogneeConfig(
+            embedding_provider="openai",
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dimensions=1024,
+            embedding_endpoint="http://embed:8811/v1",
+            embedding_api_key="sk-embed",
+        )
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, mock_embedding_cfg)):
+            await configure_cognee(cfg)
+            assert mock_embedding_cfg.embedding_provider == "openai"
+            assert mock_embedding_cfg.embedding_model == "openai/text-embedding-3-large"
+            assert mock_embedding_cfg.embedding_dimensions == 1024
+            assert mock_embedding_cfg.embedding_endpoint == "http://embed:8811/v1"
+            assert mock_embedding_cfg.embedding_api_key == "sk-embed"
+
+    async def test_llm_provider_is_openai(self):
+        mock_config_module = MagicMock()
+        llm = LLMConfig(model="openai/gemini/gemini-2.5-pro")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig(), llm_config=llm)
+            call_args = mock_config_module.set_llm_config.call_args[0][0]
+            assert call_args["llm_provider"] == "openai"

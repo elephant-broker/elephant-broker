@@ -1,0 +1,30 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "17474:7474"
+      - "17687:7687"
+    environment:
+      # Dev/test credentials — ephemeral tmpfs containers, not used in production
+      NEO4J_AUTH: neo4j/testpassword
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_auth__max__failed__attempts: "0"
+      NEO4J_dbms_security_auth__lock__time: "0"
+    tmpfs:
+      - /data
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    ports:
+      - "16333:6333"
+      - "16334:6334"
+    tmpfs:
+      - /qdrant/storage
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+    command: redis-server
+    tmpfs:
+      - /data
