@@ -128,6 +128,8 @@ class RuntimeContainer:
         # Gateway identity infrastructure
         self.redis_keys: RedisKeyBuilder | None = None
         self.metrics_ctx: MetricsContext | None = None
+        # Phase prod: shared asyncpg pool for all audit stores
+        self._pg_pool: object | None = None
 
     @classmethod
     async def from_config(
@@ -140,11 +142,10 @@ class RuntimeContainer:
         c.config = config
         c.tier = tier
 
-        # Register VERBOSE logging level and configure logging
+        # Register VERBOSE logging level and configure structured logging
         register_verbose_level()
-        level_name = config.infra.log_level.upper()
-        log_level = 15 if level_name == "VERBOSE" else getattr(logging, level_name, logging.INFO)
-        logging.basicConfig(level=log_level)
+        from elephantbroker.runtime.observability import setup_json_logging
+        setup_json_logging(config.infra, config.gateway.gateway_id)
 
         # Configure Cognee SDK (graph/vector/LLM/embedding) before creating adapters
         await configure_cognee(config.cognee, config.llm)
@@ -153,6 +154,19 @@ class RuntimeContainer:
         gw_id = config.gateway.gateway_id
         c.redis_keys = RedisKeyBuilder(gw_id)
         c.metrics_ctx = MetricsContext(gw_id)
+
+        # --- Shared asyncpg pool (for all audit/config stores) ---
+        try:
+            import asyncpg  # type: ignore[import-untyped]
+            c._pg_pool = await asyncpg.create_pool(
+                config.audit.postgres_dsn,
+                min_size=2,
+                max_size=10,
+            )
+            logger.info("PostgreSQL pool created: %s", config.audit.postgres_dsn)
+        except Exception as exc:
+            logger.warning("PostgreSQL pool creation failed — audit stores disabled: %s", exc)
+            c._pg_pool = None
 
         # --- Shared infrastructure ---
         # Create async Redis client
@@ -210,19 +224,19 @@ class RuntimeContainer:
         if _enabled(tier, "IStatsAndTelemetryEngine"):
             c.stats = StatsAndTelemetryEngine(c.trace_ledger)
 
-        # Phase 9: TuningDeltaStore + ScoringLedgerStore
+        # Phase 9: TuningDeltaStore + ScoringLedgerStore (PostgreSQL)
         c.tuning_delta_store = None
         c.scoring_ledger_store = None
         try:
             from elephantbroker.runtime.working_set.tuning_delta_store import TuningDeltaStore
-            c.tuning_delta_store = TuningDeltaStore(db_path=config.audit.tuning_deltas_db_path)
-            await c.tuning_delta_store.init_db()
+            c.tuning_delta_store = TuningDeltaStore()
+            await c.tuning_delta_store.init(c._pg_pool)
         except Exception:
             pass
         try:
             from elephantbroker.runtime.consolidation.scoring_ledger_store import ScoringLedgerStore
-            c.scoring_ledger_store = ScoringLedgerStore(db_path=config.audit.scoring_ledger_db_path)
-            await c.scoring_ledger_store.init_db()
+            c.scoring_ledger_store = ScoringLedgerStore()
+            await c.scoring_ledger_store.init(c._pg_pool)
         except Exception:
             pass
 
@@ -359,10 +373,8 @@ class RuntimeContainer:
             c.trace_query_client = None
             try:
                 from elephantbroker.runtime.consolidation.report_store import ConsolidationReportStore
-                c.consolidation_report_store = ConsolidationReportStore(
-                    db_path=config.audit.consolidation_reports_db_path,
-                )
-                await c.consolidation_report_store.init_db()
+                c.consolidation_report_store = ConsolidationReportStore()
+                await c.consolidation_report_store.init(c._pg_pool)
             except Exception:
                 pass
             try:
@@ -524,26 +536,24 @@ class RuntimeContainer:
             gateway_id=gw_id,
         )
 
-        # Audit stores
+        # Audit stores (PostgreSQL)
         c.procedure_audit = ProcedureAuditStore(
-            db_path=config.audit.procedure_audit_db_path,
             enabled=config.audit.procedure_audit_enabled,
         )
-        await c.procedure_audit.init_db()
+        await c.procedure_audit.init(c._pg_pool)
 
         c.session_goal_audit = SessionGoalAuditStore(
-            db_path=config.audit.session_goal_audit_db_path,
             enabled=config.audit.session_goal_audit_enabled,
         )
-        await c.session_goal_audit.init_db()
+        await c.session_goal_audit.init(c._pg_pool)
 
-        # --- Phase 8: Org override + authority stores ---
+        # --- Phase 8: Org override + authority stores (PostgreSQL) ---
         from elephantbroker.runtime.profiles.org_override_store import OrgOverrideStore
         from elephantbroker.runtime.profiles.authority_store import AuthorityRuleStore
-        c.org_override_store = OrgOverrideStore(config.audit.org_overrides_db_path)
-        await c.org_override_store.init_db()
-        c.authority_store = AuthorityRuleStore(config.audit.authority_rules_db_path)
-        await c.authority_store.init_db()
+        c.org_override_store = OrgOverrideStore()
+        await c.org_override_store.init(c._pg_pool)
+        c.authority_store = AuthorityRuleStore()
+        await c.authority_store.init(c._pg_pool)
 
         # Bootstrap detection is LAZY — checked on first admin API request
         # via GET /admin/bootstrap-status. This avoids opening a Neo4j
@@ -681,5 +691,11 @@ class RuntimeContainer:
         if trace_qc:
             try:
                 trace_qc.close()
+            except Exception:
+                pass
+        # Close shared PostgreSQL pool
+        if self._pg_pool:
+            try:
+                await self._pg_pool.close()
             except Exception:
                 pass

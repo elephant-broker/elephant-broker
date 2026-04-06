@@ -1,8 +1,274 @@
 # ElephantBroker Deployment Guide
 
-## Architecture
+## Recommended: Production (Docker Compose)
 
-The runtime runs as a native Python process (venv), NOT in Docker. Infrastructure services (Neo4j, Qdrant, Redis) run via Docker Compose.
+The recommended production deployment uses `docker-compose.prod.yml` which brings up the **complete stack** as containers — no native venv required.
+
+```
+Host
+├─ docker-compose.prod.yml
+│  ├─ postgres       :5432   (audit stores — authority rules, procedures, etc.)
+│  ├─ neo4j          :7474/:7687
+│  ├─ qdrant         :6333
+│  ├─ redis          :6379
+│  ├─ elephantbroker :8420   (runs `migrate` then `serve` on start)
+│  └─ hitl           :8421
+└─ OpenClaw VM → HTTP to host:8420
+```
+
+### 1. Setup Environment
+
+```bash
+cd infrastructure/
+cp .env.prod.example .env.prod
+# Edit .env.prod with real credentials and API keys
+```
+
+### 2. Start the Stack
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+```
+
+Migrations run automatically before the server starts (`elephantbroker migrate` is the container entrypoint). The runtime only becomes healthy after all infra dependencies pass their health checks.
+
+### 3. Bootstrap (first run only)
+
+```bash
+docker compose -f docker-compose.prod.yml exec elephantbroker \
+  ebrun bootstrap \
+    --org-name "YourOrg" \
+    --team-name "YourTeam" \
+    --admin-name "admin" \
+    --admin-handles "email:you@example.com"
+```
+
+### 4. Verify
+
+```bash
+curl http://localhost:8420/health/ready
+curl http://localhost:8421/health
+docker compose -f docker-compose.prod.yml logs elephantbroker
+```
+
+Logs are structured JSON — pipe through `jq` for readability:
+```bash
+docker compose -f docker-compose.prod.yml logs elephantbroker | jq .
+```
+
+### 5. Observability (optional)
+
+```bash
+docker compose -f docker-compose.prod.yml --profile observability up -d
+# Jaeger UI: http://localhost:16686
+# Grafana:   http://localhost:3000
+```
+
+### 6. Update (after git pull)
+
+```bash
+git pull
+docker compose -f docker-compose.prod.yml --env-file .env.prod build
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+# Migrations applied automatically on restart
+```
+
+---
+
+## Legacy / Development: Native venv + Docker infra
+
+> **Use this for local development only.** The runtime runs as a native Python process (venv) while infrastructure services (Neo4j, Qdrant, Redis) run via Docker Compose.
+
+### Architecture
+
+```
+Dev Machine
+├─ Python venv (uv)
+│  ├─ elephantbroker serve  :8420
+│  └─ python -m hitl_middleware :8421
+├─ Docker Compose (infra only)
+│  ├─ Neo4j     :17474/:17687
+│  ├─ Qdrant    :16333
+│  └─ Redis     :16379
+└─ PostgreSQL (local or Docker)
+```
+
+### Prerequisites
+
+- Python 3.11+ and [`uv`](https://github.com/astral-sh/uv)
+- Docker + Docker Compose
+- Node.js 18+ (OpenClaw VM only)
+- LiteLLM proxy or OpenAI-compatible endpoint
+
+### 1. Infrastructure Services
+
+```bash
+cd infrastructure/
+docker compose up -d neo4j qdrant redis
+
+# With observability (optional):
+docker compose --profile observability up -d
+```
+
+### 2. Python venv (via uv)
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+cd /opt/elephant-broker
+uv sync          # creates .venv and installs all deps from uv.lock
+source .venv/bin/activate
+
+# HITL middleware
+cd hitl-middleware && uv sync && cd ..
+```
+
+> **Note:** The `mistralai` conflict is resolved automatically by `uv`'s lock file — no post-install scripts needed.
+
+> **Cognee writable dirs** — still required in native venv mode:
+> ```bash
+> mkdir -p .venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
+> mkdir -p .venv/lib/python3.*/site-packages/cognee/.data_storage
+> chmod -R 777 .venv/lib/python3.*/site-packages/cognee/
+> touch .venv/lib/python3.*/site-packages/.anon_id && chmod 666 .venv/lib/python3.*/site-packages/.anon_id
+> ```
+
+### 3. Configuration
+
+Create `/etc/elephantbroker/default.yaml` — see `elephantbroker/config/default.yaml` for template.
+
+**Critical: LLM model prefix.** Cognee requires `openai/` prefix:
+```yaml
+llm:
+  model: "openai/gemini/gemini-2.5-pro"
+infra:
+  log_format: "text"   # use "json" in production
+audit:
+  postgres_dsn: "postgresql://elephantbroker:yourpassword@localhost:5432/elephantbroker"
+```
+
+### 4. Run Migrations
+
+```bash
+export EB_POSTGRES_DSN="postgresql://elephantbroker:yourpassword@localhost:5432/elephantbroker"
+elephantbroker migrate --config /etc/elephantbroker/default.yaml
+```
+
+### 5. Environment Files
+
+**Runtime** — `/etc/elephantbroker/env`:
+```bash
+EB_GATEWAY_ID=gw-prod
+EB_NEO4J_URI=bolt://localhost:17687
+EB_QDRANT_URL=http://localhost:16333
+EB_REDIS_URL=redis://localhost:16379
+EB_POSTGRES_DSN=postgresql://elephantbroker:yourpassword@localhost:5432/elephantbroker
+EB_LLM_API_KEY=your-key
+EB_EMBEDDING_API_KEY=your-key
+EB_ORG_ID=your-org
+EB_TEAM_ID=your-team
+EB_HITL_CALLBACK_SECRET=<openssl rand -hex 32>
+EB_LOG_FORMAT=json
+COGNEE_DISABLE_TELEMETRY=true
+```
+
+**HITL** — `/etc/elephantbroker/hitl.env`:
+```bash
+HITL_HOST=0.0.0.0
+HITL_PORT=8421
+HITL_LOG_LEVEL=info
+EB_HITL_CALLBACK_SECRET=<same secret as runtime>
+EB_RUNTIME_URL=http://localhost:8420
+```
+
+### 6. systemd Units
+
+**`/etc/systemd/system/elephantbroker.service`** (see repo root `elephantbroker.service`):
+```bash
+systemctl daemon-reload
+systemctl enable elephantbroker elephantbroker-hitl
+systemctl start elephantbroker elephantbroker-hitl
+```
+
+### 7. Bootstrap
+
+```bash
+source .venv/bin/activate
+ebrun --runtime-url http://localhost:8420 bootstrap \
+  --org-name "YourOrg" --team-name "YourTeam" \
+  --admin-name "admin" --admin-handles "email:you@example.com"
+```
+
+### 8. Verify
+
+```bash
+curl http://localhost:8420/health/    # note trailing slash
+curl http://localhost:8421/health
+```
+
+---
+
+## OpenClaw VM Setup
+
+> Same for both deployment modes — the plugins only need `EB_RUNTIME_URL` pointing to the runtime.
+
+### 1. Install Plugins
+
+> **Deployment mode:** Installing both plugins configures **FULL mode** — the recommended operating mode for all production deployments.
+
+```bash
+git clone https://github.com/<your-org>/elephant-broker.git /opt/elephant-broker
+
+ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
+ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
+
+cd ~/.openclaw/extensions/elephantbroker-memory && npm install
+cd ~/.openclaw/extensions/elephantbroker-context && npm install
+```
+
+### 2. Environment
+
+```bash
+EB_GATEWAY_ID=gw-prod                  # must match runtime
+EB_RUNTIME_URL=http://DB_VM_IP:8420
+EB_GATEWAY_SHORT_NAME=prod
+```
+
+### 3. Plugin Registration
+
+```bash
+openclaw config set plugins.slots.memory elephantbroker-memory
+openclaw config unset tools.profile   # must be "full" — "coding" blocks 22/24 EB tools
+openclaw hooks disable session-memory
+openclaw gateway restart
+```
+
+---
+
+## Firewall
+
+| Port | Service | Expose to |
+|------|---------|-----------| 
+| 8420 | Runtime | OpenClaw VM |
+| 8421 | HITL | OpenClaw VM |
+| 7687 | Neo4j | Internal only |
+| 6333 | Qdrant | Internal only |
+| 6379 | Redis | Internal only |
+| 5432 | PostgreSQL | Internal only |
+
+---
+
+## Known Gotchas
+
+1. **mistralai conflict** — Resolved automatically by `uv` lock. In native venv mode with `pip`, the post-install fix (remove + chmod) is still required. With `uv sync` it is not.
+2. **Cognee writable dirs** — In native venv mode, Cognee creates `.cognee_system/` and `.data_storage/` inside its package dir. These must be writable by the service user. Not an issue in Docker (runs as root).
+3. **LLM model prefix** — Cognee needs `openai/gemini/gemini-2.5-pro`. Without `openai/` prefix, Cognee hangs on LLM connection test.
+4. **Health endpoint trailing slash** — `/health` returns 307 redirect; use `/health/` or `/health/ready`.
+5. **HITL log level** — Does not support `verbose`. Use `info` or `debug`.
+6. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose down -v` and retry.
+7. **Qdrant version pairing** — Qdrant server pinned to `v1.17.0` — must stay aligned with `qdrant-client` in `pyproject.toml`.
+8. **Migrations before serve** — `elephantbroker migrate` must run before `elephantbroker serve`. In `docker-compose.prod.yml` this is handled by the container command. In native deploys, run it manually after `git pull`.
+9. **Alembic offline mode** — To generate SQL without a live DB: `alembic -c elephantbroker/db/alembic.ini upgrade head --sql`.
+
 
 ```
 DB VM                                    OpenClaw VM
@@ -24,160 +290,7 @@ DB VM                                    OpenClaw VM
 - Node.js 18+ (OpenClaw VM only)
 - LiteLLM proxy or OpenAI-compatible endpoint for LLM + embeddings
 
-## DB VM Setup
 
-### 1. Infrastructure Services
-
-```bash
-cd infrastructure/
-docker compose up -d neo4j qdrant redis
-
-# With observability (optional — Jaeger UI at http://localhost:16686):
-docker compose --profile observability up -d
-```
-
-### 2. Python venv
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install .
-
-# HITL middleware
-cd hitl-middleware && pip install . && cd ..
-
-# OTEL tracing (optional — required for Jaeger traces)
-pip install opentelemetry-exporter-otlp-proto-grpc
-```
-
-### 3. Post-install Fixes
-
-```bash
-# Remove broken mistralai namespace package (cognee transitive dep,
-# conflicts with instructor — we don't use Mistral)
-pip uninstall -y mistralai 2>/dev/null
-rm -rf venv/lib/python3.*/site-packages/mistralai/
-
-# Cognee needs writable dirs inside its package for internal state
-mkdir -p venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
-mkdir -p venv/lib/python3.*/site-packages/cognee/.data_storage
-chmod -R 777 venv/lib/python3.*/site-packages/cognee/
-
-# Cognee anonymous telemetry ID file (avoids repeated permission warnings)
-touch venv/lib/python3.*/site-packages/.anon_id
-chmod 666 venv/lib/python3.*/site-packages/.anon_id
-```
-
-### 4. Configuration
-
-Create `/etc/elephantbroker/default.yaml` — see `elephantbroker/config/default.yaml` for template.
-
-**Critical: LLM model prefix.** Cognee requires `openai/` prefix:
-```yaml
-llm:
-  model: "openai/gemini/gemini-2.5-pro"   # Cognee strips "openai/", sends "gemini/gemini-2.5-pro"
-```
-
-### 5. Environment Files
-
-**Runtime** — `/etc/elephantbroker/env`:
-```bash
-EB_GATEWAY_ID=gw-prod
-EB_NEO4J_URI=bolt://localhost:7687
-EB_QDRANT_URL=http://localhost:6333
-EB_REDIS_URL=redis://localhost:6379
-EB_LLM_API_KEY=your-key
-EB_EMBEDDING_API_KEY=your-key
-EB_ORG_ID=your-org
-EB_TEAM_ID=your-team
-EB_HITL_CALLBACK_SECRET=<openssl rand -hex 32>
-
-# OTEL tracing (optional — requires opentelemetry-exporter-otlp-proto-grpc)
-# EB_OTEL_ENDPOINT=http://localhost:4317
-
-# Disable Cognee's built-in usage telemetry (phones home to Cognee servers)
-COGNEE_DISABLE_TELEMETRY=true
-```
-
-**HITL** — `/etc/elephantbroker/hitl.env`:
-```bash
-HITL_HOST=0.0.0.0
-HITL_PORT=8421
-HITL_LOG_LEVEL=info
-EB_HITL_CALLBACK_SECRET=<same secret as runtime>
-EB_RUNTIME_URL=http://localhost:8420
-```
-
-### 6. Data Directory
-
-```bash
-mkdir -p /var/lib/elephantbroker/data
-chown -R <service-user>:<service-user> /var/lib/elephantbroker
-```
-
-### 7. systemd Units
-
-**`/etc/systemd/system/elephantbroker.service`**:
-```ini
-[Unit]
-Description=ElephantBroker Cognitive Runtime
-After=network.target docker.service
-
-[Service]
-Type=simple
-User=dbadmin
-WorkingDirectory=/var/lib/elephantbroker
-EnvironmentFile=/etc/elephantbroker/env
-ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**`/etc/systemd/system/elephantbroker-hitl.service`**:
-```ini
-[Unit]
-Description=ElephantBroker HITL Middleware
-After=elephantbroker.service
-
-[Service]
-Type=simple
-User=dbadmin
-EnvironmentFile=/etc/elephantbroker/hitl.env
-ExecStart=/opt/elephant-broker/venv/bin/python -m hitl_middleware
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload
-systemctl enable elephantbroker elephantbroker-hitl
-systemctl start elephantbroker elephantbroker-hitl
-```
-
-### 8. Bootstrap
-
-```bash
-source venv/bin/activate
-ebrun --runtime-url http://localhost:8420 bootstrap \
-  --org-name "YourOrg" \
-  --team-name "YourTeam" \
-  --admin-name "admin" \
-  --admin-handles "email:you@example.com"
-```
-
-### 9. Verify
-
-```bash
-curl http://localhost:8420/health/    # note trailing slash
-curl http://localhost:8421/health
-```
 
 ## OpenClaw VM Setup
 

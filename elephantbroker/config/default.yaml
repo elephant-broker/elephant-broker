@@ -26,10 +26,16 @@ infra:
   # Supported: debug, verbose, info, warning, error, critical
   # "verbose" shows per-item assembly decisions without full DEBUG payloads
   log_level: "info"
+  # log_format: "json" for production (machine-parseable), "text" for local dev
+  log_format: "text"   # override to "json" in production via EB_LOG_FORMAT=json
 
 profile_cache:
   ttl_seconds: 300
 
 audit:
-  org_overrides_db_path: "data/org_overrides.db"
-  authority_rules_db_path: "data/authority_rules.db"
+  # PostgreSQL DSN for all audit/config stores.
+  # Override via EB_POSTGRES_DSN environment variable in production.
+  postgres_dsn: "postgresql://elephantbroker:elephantbroker@localhost:5432/elephantbroker"
+  procedure_audit_enabled: true
+  session_goal_audit_enabled: true
+  retention_days: 90

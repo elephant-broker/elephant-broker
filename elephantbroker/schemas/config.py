@@ -73,6 +73,7 @@ class InfraConfig(BaseModel):
     redis_url: str = "redis://localhost:6379"
     otel_endpoint: str | None = None
     log_level: str = "INFO"
+    log_format: str = "json"  # 'json' (prod) or 'text' (local dev)
     metrics_ttl_seconds: int = Field(default=3600, ge=60)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     clickhouse: ClickHouseConfig = Field(default_factory=ClickHouseConfig)
@@ -167,17 +168,10 @@ class ProcedureCandidateConfig(BaseModel):
 
 
 class AuditConfig(BaseModel):
-    """SQLite audit trail configuration."""
+    """PostgreSQL audit trail configuration."""
+    postgres_dsn: str = "postgresql://elephantbroker:elephantbroker@localhost:5432/elephantbroker"
     procedure_audit_enabled: bool = True
-    procedure_audit_db_path: str = "data/procedure_audit.db"
     session_goal_audit_enabled: bool = True
-    session_goal_audit_db_path: str = "data/session_goals_audit.db"
-    org_overrides_db_path: str = "data/org_overrides.db"
-    authority_rules_db_path: str = "data/authority_rules.db"
-    # Phase 9 consolidation stores
-    consolidation_reports_db_path: str = "data/consolidation_reports.db"
-    tuning_deltas_db_path: str = "data/tuning_deltas.db"
-    scoring_ledger_db_path: str = "data/scoring_ledger.db"
     retention_days: int = Field(default=90, ge=7)
 
 
@@ -410,6 +404,10 @@ class ElephantBrokerConfig(BaseModel):
             env_overrides.setdefault("reranker", {})["api_key"] = os.environ["EB_RERANKER_API_KEY"]
         if os.environ.get("EB_HITL_CALLBACK_SECRET"):
             env_overrides.setdefault("hitl", {})["callback_hmac_secret"] = os.environ["EB_HITL_CALLBACK_SECRET"]
+        if os.environ.get("EB_POSTGRES_DSN"):
+            env_overrides.setdefault("audit", {})["postgres_dsn"] = os.environ["EB_POSTGRES_DSN"]
+        if os.environ.get("EB_LOG_FORMAT"):
+            env_overrides.setdefault("infra", {})["log_format"] = os.environ["EB_LOG_FORMAT"]
         # Apply env overrides on top of YAML config
         if env_overrides:
             yaml_data = yaml_config.model_dump()
@@ -474,6 +472,7 @@ class ElephantBrokerConfig(BaseModel):
             redis_url=os.environ.get("EB_REDIS_URL", "redis://localhost:6379"),
             otel_endpoint=os.environ.get("EB_OTEL_ENDPOINT"),
             log_level=os.environ.get("EB_LOG_LEVEL", "INFO"),
+            log_format=os.environ.get("EB_LOG_FORMAT", "json"),
             metrics_ttl_seconds=int(os.environ.get("EB_METRICS_TTL_SECONDS", "3600")),
             trace=trace_config,
             clickhouse=clickhouse_config,

@@ -1,46 +1,24 @@
-"""ProcedureAuditStore — SQLite audit trail for procedure compliance."""
+"""ProcedureAuditStore — PostgreSQL audit trail for procedure compliance.
+
+Table ``procedure_events`` is created by Alembic migration 0001_initial_schema.
+"""
 from __future__ import annotations
 
 import logging
-import sqlite3
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from elephantbroker.runtime.db.pg_store import PostgresStore
 
 logger = logging.getLogger("elephantbroker.runtime.audit.procedure_audit")
 
 
-class ProcedureAuditStore:
-    """Append-only SQLite audit for procedure lifecycle events."""
+class ProcedureAuditStore(PostgresStore):
+    """Append-only PostgreSQL audit for procedure lifecycle events."""
 
-    def __init__(self, db_path: str = "data/procedure_audit.db", enabled: bool = True) -> None:
-        self._db_path = db_path
+    def __init__(self, enabled: bool = True) -> None:
+        super().__init__()
         self._enabled = enabled
-        self._conn: sqlite3.Connection | None = None
-
-    async def init_db(self) -> None:
-        if not self._enabled:
-            return
-        import os
-        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
-        self._conn.execute('''
-            CREATE TABLE IF NOT EXISTS procedure_events (
-                event_id TEXT PRIMARY KEY,
-                session_key TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                procedure_id TEXT NOT NULL,
-                procedure_name TEXT NOT NULL,
-                execution_id TEXT,
-                event_type TEXT NOT NULL,
-                step_id TEXT,
-                step_instruction TEXT,
-                proof_type TEXT,
-                proof_value TEXT,
-                timestamp TEXT NOT NULL,
-                gateway_id TEXT NOT NULL DEFAULT 'local'
-            )
-        ''')
-        self._conn.commit()
 
     async def record_event(
         self, session_key: str, session_id: str,
@@ -53,64 +31,51 @@ class ProcedureAuditStore:
         proof_value: str | None = None,
         gateway_id: str = "local",
     ) -> None:
-        if not self._enabled or not self._conn:
+        if not self._enabled or not self._ready:
             return
         try:
-            self._conn.execute(
-                '''INSERT INTO procedure_events
+            await self.execute(
+                """INSERT INTO procedure_events
                    (event_id, session_key, session_id, procedure_id, procedure_name,
                     execution_id, event_type, step_id, step_instruction, proof_type,
                     proof_value, timestamp, gateway_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (
-                    str(uuid.uuid4()), session_key, session_id,
-                    procedure_id, procedure_name, execution_id,
-                    event_type, step_id, step_instruction,
-                    proof_type, proof_value,
-                    datetime.now(UTC).isoformat(), gateway_id,
-                ),
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
+                str(uuid.uuid4()), session_key, session_id,
+                procedure_id, procedure_name, execution_id,
+                event_type, step_id, step_instruction,
+                proof_type, proof_value,
+                datetime.now(UTC).isoformat(), gateway_id,
             )
-            self._conn.commit()
         except Exception as exc:
             logger.warning("Failed to record procedure audit event: %s", exc)
 
     async def get_session_events(self, session_key: str, session_id: str) -> list[dict]:
-        if not self._enabled or not self._conn:
+        if not self._enabled or not self._ready:
             return []
-        cursor = self._conn.execute(
-            'SELECT * FROM procedure_events WHERE session_key=? AND session_id=? ORDER BY timestamp',
-            (session_key, session_id),
+        return await self.fetch(
+            "SELECT * FROM procedure_events WHERE session_key=$1 AND session_id=$2 ORDER BY timestamp",
+            session_key, session_id,
         )
-        cols = [d[0] for d in cursor.description]
-        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     async def get_procedure_events(self, procedure_id: str) -> list[dict]:
-        if not self._enabled or not self._conn:
+        if not self._enabled or not self._ready:
             return []
-        cursor = self._conn.execute(
-            'SELECT * FROM procedure_events WHERE procedure_id=? ORDER BY timestamp',
-            (procedure_id,),
+        return await self.fetch(
+            "SELECT * FROM procedure_events WHERE procedure_id=$1 ORDER BY timestamp",
+            procedure_id,
         )
-        cols = [d[0] for d in cursor.description]
-        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     async def cleanup_old(self, retention_days: int = 90) -> int:
         """Delete events older than retention_days. Returns deleted count."""
-        if not self._enabled or not self._conn:
+        if not self._enabled or not self._ready:
             return 0
-        from datetime import timedelta
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
         try:
-            cursor = self._conn.execute(
-                "DELETE FROM procedure_events WHERE timestamp < ?", (cutoff,),
+            status = await self.execute(
+                "DELETE FROM procedure_events WHERE timestamp < $1", cutoff,
             )
-            self._conn.commit()
-            return cursor.rowcount
+            # asyncpg returns "DELETE N" — extract count
+            return int(status.split()[-1]) if status else 0
         except Exception as exc:
             logger.warning("Failed to cleanup old procedure events: %s", exc)
             return 0
-
-    async def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None

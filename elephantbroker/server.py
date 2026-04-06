@@ -71,9 +71,39 @@ def health_check(host: str, port: int) -> None:
 
 
 @cli.command()
-def migrate() -> None:
-    """Run database migrations (placeholder)."""
-    click.echo("No migrations needed.")
+@click.option("--config", "config_path", type=click.Path(exists=True), default=None, help="YAML config file path")
+@click.option("--revision", default="head", help="Alembic revision target (default: head)")
+def migrate(config_path: str | None, revision: str) -> None:
+    """Run database migrations (Alembic upgrade)."""
+    import os
+    import pathlib
+
+    from alembic import command as alembic_command
+    from alembic.config import Config as AlembicConfig
+
+    # Resolve EB_POSTGRES_DSN from config file or env
+    if config_path:
+        import yaml
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+        eb_config = ElephantBrokerConfig.from_yaml(config_path)
+        os.environ.setdefault("EB_POSTGRES_DSN", eb_config.audit.postgres_dsn)
+    elif not os.environ.get("EB_POSTGRES_DSN"):
+        click.echo(
+            "ERROR: EB_POSTGRES_DSN is not set. "
+            "Pass --config or set EB_POSTGRES_DSN environment variable.",
+            err=True,
+        )
+        sys.exit(1)
+
+    alembic_ini = pathlib.Path(__file__).parent / "db" / "alembic.ini"
+    if not alembic_ini.exists():
+        click.echo(f"ERROR: Alembic config not found at {alembic_ini}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Running Alembic migrations → {revision} ...")
+    alembic_cfg = AlembicConfig(str(alembic_ini))
+    alembic_command.upgrade(alembic_cfg, revision)
+    click.echo("Migrations complete.")
 
 
 def main() -> None:

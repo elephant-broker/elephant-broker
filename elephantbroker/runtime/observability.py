@@ -95,6 +95,71 @@ def setup_otel_logging(config: InfraConfig, gateway_id: str = "local"):
         return None
 
 
+class GatewayLogFilter(logging.Filter):
+    """Injects ``gateway_id`` into every LogRecord for structured log parsing."""
+
+    def __init__(self, gateway_id: str) -> None:
+        super().__init__()
+        self._gateway_id = gateway_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.gateway_id = self._gateway_id  # type: ignore[attr-defined]
+        # Inject active OTEL trace/span IDs if available
+        try:
+            span = trace.get_current_span()
+            ctx = span.get_span_context()
+            record.trace_id = format(ctx.trace_id, "032x") if ctx.is_valid else ""  # type: ignore[attr-defined]
+            record.span_id = format(ctx.span_id, "016x") if ctx.is_valid else ""  # type: ignore[attr-defined]
+        except Exception:
+            record.trace_id = ""  # type: ignore[attr-defined]
+            record.span_id = ""  # type: ignore[attr-defined]
+        return True
+
+
+def setup_json_logging(config: InfraConfig, gateway_id: str = "local") -> None:
+    """Configure root logger with structured JSON output.
+
+    Uses python-json-logger when log_format='json' (production default).
+    Falls back to plain text for local dev (log_format='text').
+    Injects gateway_id, trace_id, span_id into every record.
+    """
+    log_format = getattr(config, "log_format", "json")
+    level_name = config.log_level.upper()
+    log_level = VERBOSE if level_name == "VERBOSE" else getattr(logging, level_name, logging.INFO)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Remove existing handlers so we own the full handler chain
+    root_logger.handlers.clear()
+
+    gw_filter = GatewayLogFilter(gateway_id)
+
+    if log_format == "json":
+        try:
+            from pythonjsonlogger.json import JsonFormatter
+            handler = logging.StreamHandler()
+            fmt = JsonFormatter(
+                fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+                rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+            )
+            handler.setFormatter(fmt)
+            handler.addFilter(gw_filter)
+            root_logger.addHandler(handler)
+            return
+        except ImportError:
+            logging.getLogger("elephantbroker.observability").warning(
+                "python-json-logger not installed; falling back to text logging. "
+                "Install with: pip install python-json-logger"
+            )
+
+    # Plain text fallback
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler.addFilter(gw_filter)
+    root_logger.addHandler(handler)
+
+
 def get_tracer(module_name: str) -> Tracer:
     """Return a module-scoped tracer."""
     return trace.get_tracer(f"elephantbroker.{module_name}")
@@ -131,7 +196,7 @@ def traced(fn: F) -> F:
 
 
 # ---------------------------------------------------------------------------
-# Gateway-aware log adapter
+# Gateway-aware log adapter (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
 class GatewayLoggerAdapter(logging.LoggerAdapter):

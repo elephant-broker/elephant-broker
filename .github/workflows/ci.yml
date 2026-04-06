@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master", "deployment-fixes"]
+  pull_request:
+    branches: ["main", "master"]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run ruff check
+        run: uv run ruff check elephantbroker/ tests/
+
+      - name: Run ruff format check
+        run: uv run ruff format --check elephantbroker/ tests/
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run mypy
+        run: uv run mypy elephantbroker/ --ignore-missing-imports --no-strict-optional
+        continue-on-error: true  # non-blocking until type coverage improves
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies (with dev extras)
+        run: uv sync --frozen --group dev
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit/ -x --tb=short -q --timeout=60
+        env:
+          EB_GATEWAY_ID: ci-test-gateway
+          EB_LOG_LEVEL: warning
+
+  build:
+    name: Docker Build Smoke Test
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: elephantbroker:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

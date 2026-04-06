@@ -27,7 +27,7 @@ Layer B  Cognitive Runtime     Python (17 modules, 84 API endpoints, FastAPI)
            ↓ Cognee SDK
 Layer C  Knowledge Plane       Cognee v0.5.x (7 DataPoint subclasses, graph+vector search)
            ↓
-Layer D  Infrastructure        Neo4j · Qdrant · Redis · SQLite · OTEL/Prometheus
+Layer D  Infrastructure        Neo4j · Qdrant · Redis · PostgreSQL · OTEL/Prometheus
 ```
 
 The runtime exposes two thin TypeScript plugin surfaces:
@@ -57,7 +57,7 @@ All intelligence, scoring, storage, and policy logic lives in Python. The plugin
 | **ProfileRegistry** | Base → named → org override inheritance, 5-minute TTL cache |
 | **TraceLedger** | Append-only trace (47 event types), OTEL export, session timeline queries |
 | **StatsEngine** | 49 Prometheus counters/gauges |
-| **ScoringTuner** | Per-gateway weight persistence (SQLite), EMA-smoothed deltas (±5% cap) |
+| **ScoringTuner** | Per-gateway weight persistence (PostgreSQL), EMA-smoothed deltas (±5% cap) |
 
 ### Adapters
 
@@ -174,7 +174,7 @@ Seven of nine stages require zero LLM calls.
 | Graph store | Neo4j 5 (community) |
 | Vector store | Qdrant v1.17.0 |
 | Cache | Redis 7 |
-| Audit stores | SQLite (procedures, session goals, authority rules, tuning deltas) |
+| Audit stores | PostgreSQL (procedures, session goals, authority rules, tuning deltas) |
 | LLM | Configurable via LiteLLM proxy (default: gemini/gemini-2.5-pro) |
 | Embeddings | openai/text-embedding-3-large |
 | Reranker | Qwen3-Reranker-4B (external HTTP endpoint) |
@@ -237,7 +237,7 @@ docker compose --profile observability up -d  # + ClickHouse, Jaeger, Grafana (o
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[all]"
+uv sync
 
 export EB_GATEWAY_ID="my-gateway"
 export EB_NEO4J_URI="bolt://localhost:17687"
