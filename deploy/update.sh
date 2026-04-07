@@ -165,6 +165,16 @@ if [[ -n "$SITE_PACKAGES" && -d "$SITE_PACKAGES" ]]; then
     COGNEE_DIR="$SITE_PACKAGES/cognee"
     if [[ -d "$COGNEE_DIR" ]]; then
         mkdir -p "$COGNEE_DIR/.cognee_system/databases" "$COGNEE_DIR/.data_storage"
+        # H4 (TODO-3-606): re-touch the .anon_id sentinel after every sync.
+        # A fresh `uv sync` may reinstall cognee without (re)creating its
+        # telemetry sentinel; without this, Cognee starts up unable to
+        # write its anon_id and the chown step below silently skips it
+        # (its existing `[[ -e "$ANON_ID_PATH" ]]` guard hides the gap).
+        # Mirrors install.sh step 4c, same form, same path resolution.
+        ANON_ID_PATH="$SITE_PACKAGES/.anon_id"
+        touch "$ANON_ID_PATH"
+        chmod 644 "$ANON_ID_PATH"
+        log "  cognee anon_id touched: $ANON_ID_PATH"
     fi
 else
     warn "  could not resolve venv site-packages dir — Cognee writable paths may be stale"

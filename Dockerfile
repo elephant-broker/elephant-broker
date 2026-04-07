@@ -15,18 +15,28 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
-# Copy pyproject.toml + uv.lock first so Docker can cache the dep layer
-# separately from source code changes.
+# H1 (TODO-3-314, TODO-3-215): split COPY+sync into two phases so Docker's
+# layer cache actually works the way the old comment promised. The previous
+# form copied source BEFORE running a single `uv sync`, which meant any
+# source-only edit busted the dep cache. Now:
+#   1. copy lockfile  ->  uv sync deps only (cached layer)
+#   2. copy source    ->  uv sync project on top (cheap re-run)
 COPY pyproject.toml uv.lock ./
-COPY elephantbroker/ elephantbroker/
 
 # uv sync --frozen installs EXACTLY what uv.lock specifies — same versions
 # as a native install via deploy/install.sh, no transitive drift between
 # Docker and bare-metal deployments.
 #
 # --no-dev: skip pytest/ruff/etc — production image only
-# --no-install-project: install deps but defer the project itself (we sync
-#   it after copying source so editable installs work right)
+# --no-install-project: install deps but defer the project itself; we
+#   sync it again after copying source so editable installs resolve right.
+RUN uv sync --frozen --no-install-project --no-dev
+
+COPY elephantbroker/ elephantbroker/
+
+# Second sync installs the project itself on top of the cached dep layer.
+# Source-only edits invalidate this layer but not the (much larger) dep
+# layer above it.
 RUN uv sync --frozen --no-dev
 
 # ---
@@ -50,6 +60,16 @@ COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 # Bake in default config so the container has something to read at startup.
 # In production, mount a real config file at /etc/elephantbroker/default.yaml.
 COPY elephantbroker/config/default.yaml /etc/elephantbroker/default.yaml
+
+# H2 (TODO-3-321): create a non-root service user. The native install
+# (deploy/install.sh) runs the runtime as a dedicated `elephantbroker`
+# system user; the Docker image should mirror that posture instead of
+# running as root. /app is chowned to the new user so the runtime can
+# read its own venv + source. /etc/elephantbroker/default.yaml stays
+# root-owned at default 644 (the service user only reads it).
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin elephantbroker \
+    && chown -R elephantbroker:elephantbroker /app
+USER elephantbroker
 
 # Required at runtime: EB_GATEWAY_ID
 # Optional: EB_ORG_ID, EB_TEAM_ID, EB_NEO4J_URI, EB_QDRANT_URL, EB_REDIS_URL
