@@ -23,6 +23,49 @@ DB VM                                    OpenClaw VM
 - Docker + Docker Compose
 - Node.js 18+ (OpenClaw VM only)
 - LiteLLM proxy or OpenAI-compatible endpoint for LLM + embeddings
+- Root access to the DB VM (install runs via `sudo`)
+
+## Service User and Directory Layout
+
+The runtime runs under a dedicated `elephantbroker` system user — never as
+root. The install script (`deploy/install.sh`) creates this user and the
+canonical directory layout below; all services and update scripts assume it
+exists.
+
+| Path | Owner | Mode | Purpose |
+|---|---|---|---|
+| `/opt/elephantbroker` | `elephantbroker:elephantbroker` | 755 | Source repo + venv install |
+| `/opt/elephantbroker/venv` | `elephantbroker:elephantbroker` | 755 | Python virtual environment |
+| `/etc/elephantbroker` | `elephantbroker:elephantbroker` | 750 | Config directory |
+| `/etc/elephantbroker/default.yaml` | `elephantbroker:elephantbroker` | 640 | Non-secret config (template) |
+| `/etc/elephantbroker/env` | `root:elephantbroker` | 640 | Runtime secrets (root writes, service reads) |
+| `/etc/elephantbroker/hitl.env` | `root:elephantbroker` | 640 | HITL middleware secrets |
+| `/var/lib/elephantbroker` | `elephantbroker:elephantbroker` | 750 | Runtime data dir (SQLite stores, working dir) |
+| `/etc/systemd/system/elephantbroker*.service` | `root:root` | 644 | systemd unit files |
+
+### Why a dedicated service user
+
+- **No root execution.** A compromised runtime process cannot escalate to
+  root or modify system binaries — it can only act inside the directories
+  it owns.
+- **No interactive login.** The user is created with `--shell /usr/sbin/nologin`,
+  so even if its credentials leak, no shell session can be opened.
+- **Defense in depth via systemd hardening.** The systemd units pair the
+  service user with `ProtectSystem=strict`, `ProtectHome=true`,
+  `NoNewPrivileges=true`, `PrivateTmp=true`, `PrivateDevices=true`, and
+  restricted address families. See `deploy/systemd/elephantbroker.service`
+  for the full list.
+- **Secrets stay readable only by the service.** The two env files are
+  `mode 640` with `root:elephantbroker` ownership, so only the service
+  user (via group membership) and root (via DAC override) can read them.
+
+### Verify the layout on a running host
+
+```bash
+id elephantbroker
+ls -ld /opt/elephantbroker /etc/elephantbroker /var/lib/elephantbroker
+stat -c '%U:%G %a %n' /etc/elephantbroker/env /etc/elephantbroker/hitl.env /etc/elephantbroker/default.yaml
+```
 
 ## DB VM Setup
 
@@ -36,147 +79,130 @@ docker compose up -d neo4j qdrant redis
 docker compose --profile observability up -d
 ```
 
-### 2. Python venv
+### 2. Run the install script
+
+The repo ships an idempotent installer at `deploy/install.sh` that creates
+the dedicated `elephantbroker` system user, sets up the canonical directory
+layout, builds the venv, installs the runtime + HITL middleware, applies the
+post-install fixes (mistralai purge, Cognee writable dirs), copies the
+config + env templates into `/etc/elephantbroker/`, and installs the systemd
+unit files. It runs entirely as root via `sudo` — no `sudo -u` switching.
+
+The installer expects the repo to be cloned **into** `/opt/elephantbroker`
+(not alongside it). This makes the install dir and the source dir the same
+location, which simplifies update flows later.
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install .
+# Clone directly into the install prefix
+sudo git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
-# HITL middleware
-cd hitl-middleware && pip install . && cd ..
-
-# OTEL tracing (optional — required for Jaeger traces)
-pip install opentelemetry-exporter-otlp-proto-grpc
+# Run the installer (idempotent — safe to re-run)
+sudo /opt/elephantbroker/deploy/install.sh
 ```
 
-### 3. Post-install Fixes
+What the installer does, in order:
+
+1. Creates the `elephantbroker` system user (no shell, home `/var/lib/elephantbroker`)
+2. Creates `/opt/elephantbroker`, `/etc/elephantbroker`, `/var/lib/elephantbroker` with the ownership/modes from the table above
+3. Builds the venv at `/opt/elephantbroker/venv`
+4. `pip install` the runtime and HITL middleware into the venv
+5. Applies post-install fixes:
+   - Removes the `mistralai` ghost package (broken cognee 0.5.3 transitive dep)
+   - Pre-creates `cognee/.cognee_system/databases` and `cognee/.data_storage` writable subdirs
+   - Touches the `cognee/.anon_id` telemetry file (telemetry is disabled at import time anyway)
+6. Copies `default.yaml` from the repo into `/etc/elephantbroker/`
+7. Copies `env.example` and `hitl.env.example` into `/etc/elephantbroker/env` and `hitl.env` (only on first install — never overwrites existing secrets)
+8. Final `chown -R elephantbroker:elephantbroker /opt/elephantbroker`
+9. Installs the systemd unit files from `deploy/systemd/` and enables both services (does not start them — operator must edit secrets first)
+
+> **Note:** The installer does NOT use `chmod 777` on the Cognee directories.
+> Earlier versions of these docs recommended that as a workaround for permission
+> errors, but it was wrong — it left Cognee state world-writable. The correct
+> fix is the dedicated service user with `chown -R` of the venv tree (which the
+> installer does in step 8).
+
+Optional flags:
 
 ```bash
-# Remove broken mistralai namespace package (cognee transitive dep,
-# conflicts with instructor — we don't use Mistral)
-pip uninstall -y mistralai 2>/dev/null
-rm -rf venv/lib/python3.*/site-packages/mistralai/
-
-# Cognee needs writable dirs inside its package for internal state
-mkdir -p venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
-mkdir -p venv/lib/python3.*/site-packages/cognee/.data_storage
-chmod -R 777 venv/lib/python3.*/site-packages/cognee/
-
-# Cognee anonymous telemetry ID file (avoids repeated permission warnings)
-touch venv/lib/python3.*/site-packages/.anon_id
-chmod 666 venv/lib/python3.*/site-packages/.anon_id
+sudo /opt/elephantbroker/deploy/install.sh --no-systemd   # skip installing unit files
+sudo /opt/elephantbroker/deploy/install.sh --prefix /custom/path
+sudo /opt/elephantbroker/deploy/install.sh --help
 ```
 
-### 4. Configuration
+### 3. Edit secrets
 
-Create `/etc/elephantbroker/default.yaml` — see `elephantbroker/config/default.yaml` for template.
+```bash
+sudo nano /etc/elephantbroker/env       # fill in EB_LLM_API_KEY, EB_NEO4J_PASSWORD, etc
+sudo nano /etc/elephantbroker/hitl.env  # fill in EB_HITL_CALLBACK_SECRET (same value as in env!)
+```
 
-**Critical: LLM model prefix.** Cognee requires `openai/` prefix:
+The installer copies `env.example` and `hitl.env.example` as starting
+templates. Required secret variables are uncommented at the top of each
+file with blank values — fill them in before starting the services. See
+`elephantbroker/config/env.example` for the complete annotated reference.
+
+> **Critical: `EB_HITL_CALLBACK_SECRET` must be identical** in `/etc/elephantbroker/env`
+> and `/etc/elephantbroker/hitl.env`. Generate it once with `openssl rand -hex 32`
+> and paste the same value in both files. A mismatch causes HITL callbacks to
+> fail silently with 401 responses, leaving approvals stuck in pending state.
+
+### 4. Review default.yaml
+
+Most operators only need to edit a handful of fields in
+`/etc/elephantbroker/default.yaml`:
+
+- `gateway.gateway_id`, `gateway.org_id`, `gateway.team_id` — your deployment identity
+- `cognee.neo4j_uri`, `cognee.qdrant_url`, `infra.redis_url` — only if your
+  databases are not on the same host
+- `reranker.enabled` — set to `false` if you do not have a Qwen3-Reranker server
+- `compaction_llm.model` and `goal_refinement.model` — override if your
+  LiteLLM proxy does not serve `gemini-2.5-flash`
+
+**Critical: LLM model prefix.** Cognee requires the `openai/` prefix on the
+LLM model name (it strips the prefix internally before sending to LiteLLM):
+
 ```yaml
 llm:
   model: "openai/gemini/gemini-2.5-pro"   # Cognee strips "openai/", sends "gemini/gemini-2.5-pro"
 ```
 
-### 5. Environment Files
+Without the prefix, Cognee hangs at startup on the LLM connection test.
 
-**Runtime** — `/etc/elephantbroker/env`:
-```bash
-EB_GATEWAY_ID=gw-prod
-EB_NEO4J_URI=bolt://localhost:7687
-EB_QDRANT_URL=http://localhost:6333
-EB_REDIS_URL=redis://localhost:6379
-EB_LLM_API_KEY=your-key
-EB_EMBEDDING_API_KEY=your-key
-EB_ORG_ID=your-org
-EB_TEAM_ID=your-team
-EB_HITL_CALLBACK_SECRET=<openssl rand -hex 32>
-
-# OTEL tracing (optional — requires opentelemetry-exporter-otlp-proto-grpc)
-# EB_OTEL_ENDPOINT=http://localhost:4317
-
-# Disable Cognee's built-in usage telemetry (phones home to Cognee servers)
-COGNEE_DISABLE_TELEMETRY=true
-```
-
-**HITL** — `/etc/elephantbroker/hitl.env`:
-```bash
-HITL_HOST=0.0.0.0
-HITL_PORT=8421
-HITL_LOG_LEVEL=info
-EB_HITL_CALLBACK_SECRET=<same secret as runtime>
-EB_RUNTIME_URL=http://localhost:8420
-```
-
-### 6. Data Directory
+### 5. Bootstrap your org/team/admin
 
 ```bash
-mkdir -p /var/lib/elephantbroker/data
-chown -R <service-user>:<service-user> /var/lib/elephantbroker
-```
-
-### 7. systemd Units
-
-**`/etc/systemd/system/elephantbroker.service`**:
-```ini
-[Unit]
-Description=ElephantBroker Cognitive Runtime
-After=network.target docker.service
-
-[Service]
-Type=simple
-User=dbadmin
-WorkingDirectory=/var/lib/elephantbroker
-EnvironmentFile=/etc/elephantbroker/env
-ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**`/etc/systemd/system/elephantbroker-hitl.service`**:
-```ini
-[Unit]
-Description=ElephantBroker HITL Middleware
-After=elephantbroker.service
-
-[Service]
-Type=simple
-User=dbadmin
-EnvironmentFile=/etc/elephantbroker/hitl.env
-ExecStart=/opt/elephant-broker/venv/bin/python -m hitl_middleware
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload
-systemctl enable elephantbroker elephantbroker-hitl
-systemctl start elephantbroker elephantbroker-hitl
-```
-
-### 8. Bootstrap
-
-```bash
-source venv/bin/activate
-ebrun --runtime-url http://localhost:8420 bootstrap \
+sudo -u elephantbroker /opt/elephantbroker/venv/bin/ebrun \
+  --runtime-url http://localhost:8420 bootstrap \
   --org-name "YourOrg" \
   --team-name "YourTeam" \
   --admin-name "admin" \
   --admin-handles "email:you@example.com"
 ```
 
-### 9. Verify
+(This is the one place we use `sudo -u elephantbroker` — `ebrun` is the
+admin CLI and should run as the service user so any local state it creates
+inherits the right ownership.)
+
+Bootstrap is one-shot — only works on an empty graph. If it fails partway,
+`docker compose -f infrastructure/docker-compose.yml down -v` to wipe the
+infra and retry.
+
+### 6. Start the services
 
 ```bash
+sudo systemctl start elephantbroker elephantbroker-hitl
+```
+
+The installer already enabled both services in step 9 above, so they will
+also come up automatically on the next reboot.
+
+### 7. Verify
+
+```bash
+systemctl status elephantbroker elephantbroker-hitl
 curl http://localhost:8420/health/    # note trailing slash
 curl http://localhost:8421/health
+journalctl -u elephantbroker -f       # follow runtime logs
 ```
 
 ## OpenClaw VM Setup
@@ -187,11 +213,11 @@ curl http://localhost:8421/health
 
 ```bash
 # Clone the repo on the gateway host (if not already present)
-git clone https://github.com/<your-org>/elephant-broker.git /opt/elephant-broker
+git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
 # Symlink plugins into OpenClaw extensions directory (FULL mode — both plugins)
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
 # Install dependencies in each plugin directory
 cd ~/.openclaw/extensions/elephantbroker-memory && npm install
@@ -252,36 +278,34 @@ See docs/OPENCLAW-SETUP.md for tool definitions and agent prompt instructions.
 | 6333, 6334 | Qdrant | Internal only |
 | 6379 | Redis | Internal only |
 
-## Updating the Runtime (after git pull)
+## Updating the Runtime
 
-**IMPORTANT:** Use `--no-deps` to avoid re-pulling broken transitive deps (mistralai).
+### DB VM (runtime + HITL)
 
-### DB VM (runtime)
-
-```bash
-cd /opt/elephant-broker
-git pull origin deployment-fixes
-source venv/bin/activate
-pip install --no-deps .
-sudo systemctl restart elephantbroker
-```
-
-If you need to update dependencies (new dep added to pyproject.toml):
+The repo ships an idempotent updater at `deploy/update.sh`. It pulls from
+the current branch, reinstalls into the venv (using `--no-deps` by default
+to preserve the mistralai workaround), re-chowns the install tree, and
+restarts both systemd services.
 
 ```bash
-pip install .
-# Then re-apply post-install fixes:
-pip uninstall -y mistralai 2>/dev/null
-rm -rf venv/lib/python3.*/site-packages/mistralai/
-chmod -R 777 venv/lib/python3.*/site-packages/cognee/
-sudo systemctl restart elephantbroker
+sudo /opt/elephantbroker/deploy/update.sh
 ```
+
+If you added a new dependency to `pyproject.toml`, use `--full` to do a
+full reinstall and re-apply the post-install fixes:
+
+```bash
+sudo /opt/elephantbroker/deploy/update.sh --full
+```
+
+The updater refuses to run on a dirty git tree — commit or stash any local
+changes first. See `deploy/update.sh --help` for all flags.
 
 ### Gateway VM (plugins)
 
 ```bash
-cd /opt/elephant-broker
-git pull origin deployment-fixes
+cd /opt/elephantbroker
+git pull origin main
 
 # Re-install npm deps if package.json changed
 cd openclaw-plugins/elephantbroker-memory && npm install
@@ -293,12 +317,14 @@ openclaw gateway restart
 
 ## Known Deployment Gotchas
 
-1. **mistralai ghost package** — `cognee==0.5.3` pulls in a broken `mistralai` namespace package that crashes `instructor`. Remove it after every `pip install .` (full install). Use `pip install --no-deps .` for code-only updates to avoid this.
-2. **Cognee writable dirs** — Cognee creates `.cognee_system/` and `.data_storage/` inside its own package directory. These must be writable by the service user.
+1. **mistralai ghost package** — `cognee==0.5.3` pulls in a broken `mistralai` namespace package that crashes `instructor`. The installer (`deploy/install.sh`) and updater (`deploy/update.sh --full`) remove it automatically. The fast `update.sh` path uses `pip install --no-deps .` to avoid re-pulling it.
+2. **Cognee writable dirs** — Cognee creates `.cognee_system/` and `.data_storage/` inside its own site-packages directory at runtime. The installer pre-creates these dirs and the final `chown -R elephantbroker:elephantbroker /opt/elephantbroker` makes them writable by the service user. Earlier docs recommended `chmod -R 777 venv/.../cognee/` as a workaround — that was wrong (world-writable Cognee state). Use the dedicated service user instead.
 3. **LLM model prefix** — Cognee needs `openai/gemini/gemini-2.5-pro`. Without `openai/` prefix, Cognee hangs on LLM connection test.
-4. **Health endpoint trailing slash** — `/health` returns 307 redirect, use `/health/`.
-5. **HITL log level** — Does not support `verbose`. Use `info` or `debug`.
-6. **venv portability** — Shebangs in `venv/bin/` are absolute paths. If you move/copy the venv, recreate it in place.
-7. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose down -v` and retry.
-8. **`pip install .` vs `pip install --no-deps .`** — Full install re-resolves all deps and re-pulls mistralai. Use `--no-deps` for code-only updates.
-9. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml` (currently `>=1.7`). If upgrading the client, update both compose files to match.
+4. **Embedding model + tiktoken** — Cognee tokenizes via tiktoken which only knows OpenAI model names. If you set `EB_EMBEDDING_MODEL` to a non-OpenAI model name (e.g. `gemini/text-embedding-004`), the runtime will crash at first embedding call with `KeyError: Could not automatically map ... to a tokeniser`. Stick to `openai/text-embedding-3-large` (1024 dim) unless you have verified your specific model works with tiktoken.
+5. **Health endpoint trailing slash** — `/health` returns 307 redirect, use `/health/`.
+6. **HITL log level** — Does not support `verbose`. Use `info` or `debug`.
+7. **venv portability** — Shebangs in `venv/bin/` are absolute paths. If you move/copy the venv, recreate it in place. The installer always creates the venv at `/opt/elephantbroker/venv` so this only matters for unusual deployments.
+8. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose -f infrastructure/docker-compose.yml down -v` and retry.
+9. **`pip install .` vs `pip install --no-deps .`** — Full install re-resolves all deps and re-pulls mistralai. The updater's default fast path uses `--no-deps` for code-only updates; use `update.sh --full` when bumping a dependency.
+10. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml`. If upgrading the client, update both compose files to match.
+11. **Service user ownership** — Files inside `/opt/elephantbroker`, `/etc/elephantbroker`, and `/var/lib/elephantbroker` must be owned by `elephantbroker:elephantbroker` (with `root:elephantbroker` for the env files specifically). If you copy files in manually, follow up with `sudo chown -R elephantbroker:elephantbroker <path>` or the systemd unit will fail to read them.

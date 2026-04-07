@@ -1,0 +1,82 @@
+# =============================================================================
+# ElephantBroker HITL Middleware — systemd service unit
+# =============================================================================
+#
+# Installation:
+#   sudo cp deploy/systemd/elephantbroker-hitl.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable elephantbroker-hitl
+#   sudo systemctl start elephantbroker-hitl
+#
+# Verification:
+#   systemctl status elephantbroker-hitl
+#   journalctl -u elephantbroker-hitl -f
+#   curl http://localhost:8421/health
+#
+# This unit shares the `elephantbroker` system user and the `/opt/elephantbroker`
+# venv with the main runtime — both services live in the same install but run
+# as separate processes on different ports.
+#
+# REQUIRED: /etc/elephantbroker/hitl.env must contain EB_HITL_CALLBACK_SECRET
+# matching the same variable in /etc/elephantbroker/env. A mismatch causes
+# callbacks to fail silently with 401 responses, leaving approvals in pending.
+# =============================================================================
+
+[Unit]
+Description=ElephantBroker HITL Middleware
+Documentation=https://github.com/elephant-broker/elephant-broker
+# HITL is called by the runtime — runtime must come up first so the
+# health check at the end of HITL startup can verify connectivity back.
+After=elephantbroker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- Identity (same user as the main runtime) ---
+User=elephantbroker
+Group=elephantbroker
+
+# --- Filesystem ---
+WorkingDirectory=/var/lib/elephantbroker
+EnvironmentFile=/etc/elephantbroker/hitl.env
+ExecStart=/opt/elephantbroker/venv/bin/python -m hitl_middleware
+
+# --- Restart policy ---
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=elephantbroker-hitl
+
+# --- Filesystem hardening (same as main runtime) ---
+ProtectSystem=strict
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+# --- Privilege hardening ---
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# --- Kernel & namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# --- File creation mask ---
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
