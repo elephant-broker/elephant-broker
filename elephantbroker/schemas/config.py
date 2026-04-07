@@ -321,6 +321,192 @@ class BlockerExtractionConfig(BaseModel):
     recent_messages_window: int = Field(default=10, ge=1)
 
 
+# =============================================================================
+# Environment variable override registry
+# =============================================================================
+#
+# This list defines EVERY env var that overrides a YAML field when loading via
+# `ElephantBrokerConfig.from_yaml()`. The contract is: if `from_env()` reads an
+# env var, that same env var must appear here so it also overrides YAML.
+#
+# Each entry is `(env_var_name, dotted_config_path, type_coercer)`:
+#   - env_var_name: e.g. "EB_LLM_MAX_TOKENS"
+#   - dotted_config_path: e.g. "llm.max_tokens" — supports nesting (e.g. "infra.trace.otel_logs_enabled")
+#   - type_coercer: one of "str", "int", "float", "bool", "str_or_none"
+#
+# DO NOT remove entries without bumping a major version — operators may rely
+# on env vars overriding YAML, and removing a binding silently breaks them.
+#
+# Special fallback chains (api_key inheritance) are applied separately in
+# `_apply_api_key_fallbacks()` after this registry is processed.
+# -----------------------------------------------------------------------------
+
+ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
+    # --- Identity (gateway, org, team, default profile) ---
+    ("EB_GATEWAY_ID", "gateway.gateway_id", "str"),
+    ("EB_GATEWAY_SHORT_NAME", "gateway.gateway_short_name", "str"),
+    ("EB_ORG_ID", "gateway.org_id", "str_or_none"),
+    ("EB_TEAM_ID", "gateway.team_id", "str_or_none"),
+    ("EB_AGENT_AUTHORITY_LEVEL", "gateway.agent_authority_level", "int"),
+    ("EB_DEFAULT_PROFILE", "default_profile", "str"),
+
+    # --- Cognee (Neo4j + Qdrant + Embedding) ---
+    ("EB_NEO4J_URI", "cognee.neo4j_uri", "str"),
+    ("EB_NEO4J_USER", "cognee.neo4j_user", "str"),
+    ("EB_NEO4J_PASSWORD", "cognee.neo4j_password", "str"),
+    ("EB_QDRANT_URL", "cognee.qdrant_url", "str"),
+    ("EB_DEFAULT_DATASET", "cognee.default_dataset", "str"),
+    ("EB_EMBEDDING_PROVIDER", "cognee.embedding_provider", "str"),
+    ("EB_EMBEDDING_MODEL", "cognee.embedding_model", "str"),
+    ("EB_EMBEDDING_ENDPOINT", "cognee.embedding_endpoint", "str"),
+    ("EB_EMBEDDING_API_KEY", "cognee.embedding_api_key", "str"),
+    ("EB_EMBEDDING_DIMENSIONS", "cognee.embedding_dimensions", "int"),
+
+    # --- LLM (primary extraction/classification/summarization) ---
+    ("EB_LLM_MODEL", "llm.model", "str"),
+    ("EB_LLM_ENDPOINT", "llm.endpoint", "str"),
+    ("EB_LLM_API_KEY", "llm.api_key", "str"),
+    ("EB_LLM_MAX_TOKENS", "llm.max_tokens", "int"),
+    ("EB_LLM_TEMPERATURE", "llm.temperature", "float"),
+    ("EB_LLM_EXTRACTION_MAX_INPUT_TOKENS", "llm.extraction_max_input_tokens", "int"),
+    ("EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS", "llm.extraction_max_output_tokens", "int"),
+    ("EB_LLM_EXTRACTION_MAX_FACTS", "llm.extraction_max_facts_per_batch", "int"),
+    ("EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS", "llm.summarization_max_output_tokens", "int"),
+    ("EB_LLM_SUMMARIZATION_MIN_CHARS", "llm.summarization_min_artifact_chars", "int"),
+    ("EB_INGEST_BATCH_SIZE", "llm.ingest_batch_size", "int"),
+    ("EB_INGEST_BATCH_TIMEOUT", "llm.ingest_batch_timeout_seconds", "float"),
+    ("EB_INGEST_BUFFER_TTL", "llm.ingest_buffer_ttl_seconds", "int"),
+    ("EB_EXTRACTION_CONTEXT_FACTS", "llm.extraction_context_facts", "int"),
+    ("EB_EXTRACTION_CONTEXT_TTL", "llm.extraction_context_ttl_seconds", "int"),
+
+    # --- Compaction LLM (separate cheaper model for compaction summaries) ---
+    ("EB_COMPACTION_LLM_MODEL", "compaction_llm.model", "str"),
+    ("EB_COMPACTION_LLM_ENDPOINT", "compaction_llm.endpoint", "str"),
+    ("EB_COMPACTION_LLM_API_KEY", "compaction_llm.api_key", "str"),
+
+    # --- Reranker ---
+    ("EB_RERANKER_ENDPOINT", "reranker.endpoint", "str"),
+    ("EB_RERANKER_API_KEY", "reranker.api_key", "str"),
+    ("EB_RERANKER_MODEL", "reranker.model", "str"),
+
+    # --- Infra (Redis + OTEL + log level + metrics) ---
+    ("EB_REDIS_URL", "infra.redis_url", "str"),
+    ("EB_OTEL_ENDPOINT", "infra.otel_endpoint", "str_or_none"),
+    ("EB_LOG_LEVEL", "infra.log_level", "str"),
+    ("EB_METRICS_TTL_SECONDS", "infra.metrics_ttl_seconds", "int"),
+
+    # --- Trace ledger (nested under infra.trace) ---
+    ("EB_TRACE_OTEL_LOGS_ENABLED", "infra.trace.otel_logs_enabled", "bool"),
+    ("EB_TRACE_MEMORY_MAX_EVENTS", "infra.trace.memory_max_events", "int"),
+
+    # --- ClickHouse (nested under infra.clickhouse) ---
+    ("EB_CLICKHOUSE_ENABLED", "infra.clickhouse.enabled", "bool"),
+    ("EB_CLICKHOUSE_HOST", "infra.clickhouse.host", "str"),
+    ("EB_CLICKHOUSE_PORT", "infra.clickhouse.port", "int"),
+    ("EB_CLICKHOUSE_DATABASE", "infra.clickhouse.database", "str"),
+
+    # --- Embedding cache ---
+    ("EB_EMBEDDING_CACHE_ENABLED", "embedding_cache.enabled", "bool"),
+    ("EB_EMBEDDING_CACHE_TTL", "embedding_cache.ttl_seconds", "int"),
+
+    # --- Working set scoring ---
+    ("EB_SCORING_SNAPSHOT_TTL", "scoring.snapshot_ttl_seconds", "int"),
+    ("EB_SESSION_GOALS_TTL", "scoring.session_goals_ttl_seconds", "int"),
+
+    # --- HITL ---
+    ("EB_HITL_CALLBACK_SECRET", "hitl.callback_hmac_secret", "str"),
+
+    # --- Successful-use feedback (Phase 9, off by default) ---
+    ("EB_SUCCESSFUL_USE_ENABLED", "successful_use.enabled", "bool"),
+    ("EB_SUCCESSFUL_USE_ENDPOINT", "successful_use.endpoint", "str"),
+    ("EB_SUCCESSFUL_USE_API_KEY", "successful_use.api_key", "str"),
+    ("EB_SUCCESSFUL_USE_MODEL", "successful_use.model", "str"),
+    ("EB_SUCCESSFUL_USE_BATCH_SIZE", "successful_use.batch_size", "int"),
+
+    # --- Blocker extraction (Phase 9, off by default) ---
+    ("EB_BLOCKER_EXTRACTION_ENABLED", "blocker_extraction.enabled", "bool"),
+    ("EB_BLOCKER_EXTRACTION_ENDPOINT", "blocker_extraction.endpoint", "str"),
+    ("EB_BLOCKER_EXTRACTION_API_KEY", "blocker_extraction.api_key", "str"),
+    ("EB_BLOCKER_EXTRACTION_MODEL", "blocker_extraction.model", "str"),
+    ("EB_BLOCKER_EXTRACTION_EVERY_N_TURNS", "blocker_extraction.run_every_n_turns", "int"),
+
+    # --- Top-level toggles & global limits ---
+    ("EB_ENABLE_TRACE_LEDGER", "enable_trace_ledger", "bool"),
+    ("EB_ENABLE_GUARDS", "enable_guards", "bool"),
+    ("EB_MAX_CONCURRENT_SESSIONS", "max_concurrent_sessions", "int"),
+    ("EB_CONSOLIDATION_MIN_RETENTION_SECONDS", "consolidation_min_retention_seconds", "int"),
+]
+
+
+def _coerce_env_value(raw: str, coercer: str) -> object:
+    """Convert a raw env var string to the target type. Raises ValueError on bad input."""
+    if coercer == "str":
+        return raw
+    if coercer == "str_or_none":
+        return raw if raw else None
+    if coercer == "int":
+        return int(raw)
+    if coercer == "float":
+        return float(raw)
+    if coercer == "bool":
+        return raw.strip().lower() in ("true", "1", "yes", "on")
+    raise ValueError(f"Unknown coercer: {coercer!r}")
+
+
+def _set_nested(target: dict, dotted_path: str, value: object) -> None:
+    """Set a value at a dotted path in a nested dict, creating intermediate dicts as needed."""
+    parts = dotted_path.split(".")
+    cur = target
+    for part in parts[:-1]:
+        if part not in cur or not isinstance(cur[part], dict):
+            cur[part] = {}
+        cur = cur[part]
+    cur[parts[-1]] = value
+
+
+def _apply_env_overrides(yaml_data: dict) -> None:
+    """Mutate ``yaml_data`` to apply every env var present in ``ENV_OVERRIDE_BINDINGS``.
+
+    For each binding, if the env var is set in ``os.environ`` (any value, including
+    empty string for ``str_or_none``), the YAML field at the dotted path is replaced
+    with the coerced env value. Type coercion failures (e.g. ``int("foo")``) raise
+    ``ValueError`` and propagate to the caller.
+    """
+    for env_var, dotted_path, coercer in ENV_OVERRIDE_BINDINGS:
+        if env_var not in os.environ:
+            continue
+        raw = os.environ[env_var]
+        value = _coerce_env_value(raw, coercer)
+        _set_nested(yaml_data, dotted_path, value)
+
+
+def _apply_api_key_fallbacks(yaml_data: dict) -> None:
+    """Apply secret inheritance chains so operators don't have to duplicate keys.
+
+    Mirrors ``from_env()`` fallback semantics:
+      1. ``llm.api_key`` ← ``cognee.embedding_api_key`` (if llm.api_key empty)
+      2. ``compaction_llm.api_key`` / ``successful_use.api_key`` /
+         ``blocker_extraction.api_key`` ← ``llm.api_key`` (each only if its own value is empty)
+
+    The fallbacks fire only when the target field is empty after env override
+    application — explicit YAML or env values are always respected.
+    """
+    cognee = yaml_data.setdefault("cognee", {})
+    llm = yaml_data.setdefault("llm", {})
+
+    # Tier 1: llm.api_key ← cognee.embedding_api_key
+    if not llm.get("api_key") and cognee.get("embedding_api_key"):
+        llm["api_key"] = cognee["embedding_api_key"]
+
+    # Tier 2: derived LLMs (compaction / successful_use / blocker_extraction) ← llm.api_key
+    llm_key = llm.get("api_key", "")
+    if llm_key:
+        for section in ("compaction_llm", "successful_use", "blocker_extraction"):
+            sec = yaml_data.setdefault(section, {})
+            if not sec.get("api_key"):
+                sec["api_key"] = llm_key
+
+
 class ElephantBrokerConfig(BaseModel):
     """Top-level runtime configuration."""
     cognee: CogneeConfig = Field(default_factory=CogneeConfig)
@@ -370,60 +556,33 @@ class ElephantBrokerConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: str) -> ElephantBrokerConfig:
-        """Load config from YAML file, then apply environment variable overrides.
+        """Load config from a YAML file, then apply environment variable overrides.
 
-        Resolution order: env var (if set) > yaml value > model default.
-        The YAML file contains literal defaults — no string interpolation.
+        Resolution order: env var (if set) > YAML value > schema default.
+
+        EVERY env var that ``from_env()`` reads also overrides YAML — see
+        ``ENV_OVERRIDE_BINDINGS`` for the complete registry. Adding a new env
+        var to ``from_env()`` REQUIRES adding the matching binding here, or
+        operators will silently lose the ability to override that field when
+        loading via YAML.
+
+        After env overrides are applied, ``_apply_api_key_fallbacks()`` runs
+        to mirror ``from_env()``'s secret inheritance chains.
+
+        The merged dict is re-validated through ``cls.model_validate()`` so any
+        type or constraint violation (e.g. ``EB_EMBEDDING_DIMENSIONS=0`` would
+        violate ``ge=1``) raises a ``ValidationError`` at load time.
         """
         import yaml  # requires pyyaml
         with open(path) as f:
             data = yaml.safe_load(f) or {}
-        # Build base config from YAML
+        # Validate the YAML payload first so any malformed YAML fails before
+        # we touch env vars (clearer error reporting).
         yaml_config = cls(**data)
-        # Build env config (will have defaults for unset vars)
-        env_config = cls.from_env()
-        # Merge: for top-level fields, if an EB_* env var is explicitly SET,
-        # use the env value. Otherwise keep YAML value.
-        # We check a curated set of env vars rather than all fields.
-        env_overrides: dict = {}
-        if os.environ.get("EB_GATEWAY_ID"):
-            env_overrides.setdefault("gateway", {})["gateway_id"] = os.environ["EB_GATEWAY_ID"]
-        if os.environ.get("EB_ORG_ID"):
-            env_overrides.setdefault("gateway", {})["org_id"] = os.environ["EB_ORG_ID"]
-        if os.environ.get("EB_TEAM_ID"):
-            env_overrides.setdefault("gateway", {})["team_id"] = os.environ["EB_TEAM_ID"]
-        if os.environ.get("EB_NEO4J_URI"):
-            env_overrides.setdefault("cognee", {})["neo4j_uri"] = os.environ["EB_NEO4J_URI"]
-        if os.environ.get("EB_QDRANT_URL"):
-            env_overrides.setdefault("cognee", {})["qdrant_url"] = os.environ["EB_QDRANT_URL"]
-        if os.environ.get("EB_REDIS_URL"):
-            env_overrides.setdefault("infra", {})["redis_url"] = os.environ["EB_REDIS_URL"]
-        if os.environ.get("EB_OTEL_ENDPOINT"):
-            env_overrides.setdefault("infra", {})["otel_endpoint"] = os.environ["EB_OTEL_ENDPOINT"]
-        if os.environ.get("EB_EMBEDDING_API_KEY"):
-            env_overrides.setdefault("cognee", {})["embedding_api_key"] = os.environ["EB_EMBEDDING_API_KEY"]
-        if os.environ.get("EB_LLM_API_KEY"):
-            env_overrides.setdefault("llm", {})["api_key"] = os.environ["EB_LLM_API_KEY"]
-        if os.environ.get("EB_LLM_MODEL"):
-            env_overrides.setdefault("llm", {})["model"] = os.environ["EB_LLM_MODEL"]
-        if os.environ.get("EB_LLM_ENDPOINT"):
-            env_overrides.setdefault("llm", {})["endpoint"] = os.environ["EB_LLM_ENDPOINT"]
-        if os.environ.get("EB_RERANKER_ENDPOINT"):
-            env_overrides.setdefault("reranker", {})["endpoint"] = os.environ["EB_RERANKER_ENDPOINT"]
-        if os.environ.get("EB_RERANKER_API_KEY"):
-            env_overrides.setdefault("reranker", {})["api_key"] = os.environ["EB_RERANKER_API_KEY"]
-        if os.environ.get("EB_HITL_CALLBACK_SECRET"):
-            env_overrides.setdefault("hitl", {})["callback_hmac_secret"] = os.environ["EB_HITL_CALLBACK_SECRET"]
-        # Apply env overrides on top of YAML config
-        if env_overrides:
-            yaml_data = yaml_config.model_dump()
-            for section, overrides in env_overrides.items():
-                if section in yaml_data and isinstance(yaml_data[section], dict):
-                    yaml_data[section].update(overrides)
-                else:
-                    yaml_data[section] = overrides
-            return cls.model_validate(yaml_data)
-        return yaml_config
+        yaml_data = yaml_config.model_dump()
+        _apply_env_overrides(yaml_data)
+        _apply_api_key_fallbacks(yaml_data)
+        return cls.model_validate(yaml_data)
 
     @classmethod
     def from_env(cls) -> ElephantBrokerConfig:
