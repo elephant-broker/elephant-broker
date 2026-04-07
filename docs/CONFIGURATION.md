@@ -1862,35 +1862,41 @@ def main():
 #### Build Stages
 
 ```dockerfile
-## Stage 1: Builder
+## Stage 1: Builder — copies the uv binary from Astral's official image
 FROM python:3.11-slim AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
+
 WORKDIR /app
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock ./
 COPY elephantbroker/ elephantbroker/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir . && \
-    pip install --no-cache-dir --force-reinstall --no-deps 'mistralai>=1.0'
+
+# uv sync --frozen installs EXACTLY what uv.lock specifies
+RUN uv sync --frozen --no-dev
 
 ## Stage 2: Runtime
 FROM python:3.11-slim AS runtime
-WORKDIR /app
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /app/elephantbroker /app/elephantbroker
-COPY elephantbroker/config/default.yaml /app/config/default.yaml
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/elephantbroker /app/elephantbroker
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY elephantbroker/config/default.yaml /etc/elephantbroker/default.yaml
+
+ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8420
-ENTRYPOINT ["elephantbroker", "serve", "--config", "/app/config/default.yaml"]
+ENTRYPOINT ["elephantbroker", "serve", "--config", "/etc/elephantbroker/default.yaml"]
 ```
 
 **Key details:**
 - **Base image:** `python:3.11-slim` (both stages)
-- **Two-stage build:** builder installs deps, runtime copies only installed packages
-- **mistralai workaround:** Force-reinstalled `--no-deps` to fix broken namespace package from cognee transitive dep
-- **Baked-in config:** `elephantbroker/config/default.yaml` copied to `/app/config/default.yaml`
+- **Package manager:** uv (Astral's `ghcr.io/astral-sh/uv:0.11.3` image), not pip — same as the native install path. Bit-for-bit identical environments between Docker and bare-metal deployments.
+- **Lockfile-driven:** `uv sync --frozen` installs exactly what `uv.lock` specifies. No transitive drift.
+- **No mistralai workaround needed:** uv's holistic resolver picks `mistralai==1.12.4` (a working modern version) automatically. The pip-era `--force-reinstall --no-deps 'mistralai>=1.0'` hack has been removed.
+- **Baked-in config:** `elephantbroker/config/default.yaml` copied to `/etc/elephantbroker/default.yaml`
 - **Required env var at runtime:** `EB_GATEWAY_ID` (must be set when running the container)
 - **Optional env vars:** `EB_ORG_ID`, `EB_TEAM_ID`, `EB_ACTOR_ID`, `EB_NEO4J_URI`, `EB_QDRANT_URL`, `EB_REDIS_URL`
-- **NOTE:** DEPLOYMENT.md states the Dockerfile has unresolved dep issues and the runtime should run as a native Python venv, not Docker
+- **NOTE:** Per `CLAUDE.md`, the Dockerfile is for dev/CI only — production deployments use `deploy/install.sh` on a real host.
 
 ---
 
@@ -2155,46 +2161,62 @@ All core infra ports are remapped to 1xxxx range to avoid conflicts with other s
 
 #### systemd Unit Configuration
 
-Two systemd units for production operation:
+Two systemd units for production operation. Versioned in `deploy/systemd/`
+and installed by `deploy/install.sh`. Both run under the dedicated
+`elephantbroker` system user (created by the installer) with strict
+systemd hardening directives — see `deploy/systemd/elephantbroker.service`
+for the full list (`ProtectSystem=strict`, `NoNewPrivileges=true`,
+`PrivateTmp=true`, `PrivateDevices=true`, etc.).
 
 **elephantbroker.service:**
-- `Type=simple`, `User=dbadmin`
+- `Type=simple`, `User=elephantbroker`, `Group=elephantbroker`
 - `WorkingDirectory=/var/lib/elephantbroker`
-- `EnvironmentFile=/etc/elephantbroker/env`
-- `ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420`
+- `EnvironmentFile=/etc/elephantbroker/env` (mode 640 root:elephantbroker)
+- `ExecStart=/opt/elephantbroker/.venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420`
+- `ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker`
 - `Restart=on-failure`, `RestartSec=5`
 
 **elephantbroker-hitl.service:**
-- `Type=simple`, `User=dbadmin`
+- `Type=simple`, `User=elephantbroker`, `Group=elephantbroker`
 - `After=elephantbroker.service`
-- `EnvironmentFile=/etc/elephantbroker/hitl.env`
-- `ExecStart=/opt/elephant-broker/venv/bin/python -m hitl_middleware`
+- `EnvironmentFile=/etc/elephantbroker/hitl.env` (mode 640 root:elephantbroker)
+- `ExecStart=/opt/elephantbroker/.venv/bin/python -m hitl_middleware`
+- Same hardening directives as the main runtime
 - `Restart=on-failure`, `RestartSec=5`
 
 #### Dependencies (`pyproject.toml`)
 
+All direct dependencies are pinned to exact versions for reproducible builds.
+Full transitive lock lives in `uv.lock` (committed alongside `pyproject.toml`).
+See `deploy/UPDATING-DEPS.md` for the upgrade workflow.
+
 ```
-pydantic>=2.0,<3.0
+pydantic==2.12.5
 cognee[neo4j]==0.5.3
-cognee-community-vector-adapter-qdrant>=0.2.2
-httpx>=0.27
-qdrant-client>=1.7
-redis>=5.0
-fastapi>=0.110
-uvicorn[standard]>=0.29
-opentelemetry-api>=1.24
-opentelemetry-sdk>=1.24
-opentelemetry-instrumentation-fastapi>=0.45b0
-click>=8.1
-prometheus_client>=0.21
-pyyaml>=6.0
-clickhouse-connect>=0.7
-mistralai>=1.0
+cognee-community-vector-adapter-qdrant==0.2.2
+httpx==0.28.1
+qdrant-client==1.17.1
+redis==7.4.0
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+opentelemetry-api==1.40.0
+opentelemetry-sdk==1.40.0
+opentelemetry-instrumentation-fastapi==0.61b0
+click==8.3.2
+prometheus_client==0.24.1
+pyyaml==6.0.3
+clickhouse-connect==0.15.1
 ```
 
-Dev dependencies: `pytest>=7.0`, `pytest-asyncio>=0.21`, `ruff>=0.4`, `tiktoken>=0.7`, `websockets>=13.0`.
+Dev dependencies (also pinned): `pytest==9.0.2`, `pytest-asyncio==1.3.0`,
+`ruff==0.15.9`, `tiktoken==0.12.0`, `websockets==15.0.1`, `PyNaCl==1.6.2`.
 
-Python target: `>=3.11` (3.12 tested). Ruff line length: 120 characters.
+Python target: `>=3.11,<3.13` (3.11 and 3.12 supported). Ruff line length: 120 characters.
+
+Package manager: [`uv`](https://docs.astral.sh/uv/) (Astral). Install/update
+scripts use `uv sync --frozen` to install exactly what `uv.lock` specifies.
+The previous `mistralai>=1.0` direct dependency was removed — uv's holistic
+resolver picks `mistralai==1.12.4` automatically as a transitive of cognee.
 
 
 ---
@@ -2678,14 +2700,15 @@ export EB_RUNTIME_URL="http://10.10.0.10:8420"
 export EB_GATEWAY_SHORT_NAME="prod"
 
 ## 2. Symlink plugins
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-memory \
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory \
       ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-context \
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context \
       ~/.openclaw/extensions/elephantbroker-context
 
-## 3. Install deps
-cd ~/.openclaw/extensions/elephantbroker-memory && npm install
-cd ~/.openclaw/extensions/elephantbroker-context && npm install
+## 3. Install deps from the committed lockfile (npm ci, NOT npm install)
+##    Requires Node 24+ — pinned via engines.node in each plugin's package.json
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 
 ## 4. Configure openclaw.json (see Section 3 for full example)
 
@@ -5950,9 +5973,11 @@ No guidance on hardware requirements for any component:
 
 ###### 7.1 Runtime Upgrade
 
-DEPLOYMENT.md documents `pip install --no-deps .` for code-only updates but is missing:
+DEPLOYMENT.md and `deploy/UPDATING-DEPS.md` document the `deploy/update.sh`
+flow (`uv sync --frozen` for code-only updates, `--upgrade` to regenerate
+the lockfile against pyproject.toml). Still missing:
 - Schema migration procedure (the `elephantbroker migrate` CLI command exists per CONFIGURATION.md line 3666, but no documentation of what migrations exist or how to run them pre-upgrade)
-- Rollback procedure (how to revert to previous version)
+- Rollback procedure (how to revert to previous version — git checkout the previous commit + `update.sh` works but is undocumented)
 - Pre-upgrade checklist (backup state, drain sessions, verify health)
 - Zero-downtime upgrade strategy (not possible with single-worker uvicorn)
 - Changelog or breaking-change notification mechanism
@@ -5982,7 +6007,7 @@ DEPLOYMENT.md documents `pip install --no-deps .` for code-only updates but is m
 - Cognee is pinned to `==0.5.3` -- what breaks if upgraded?
 - No documented breaking changes between Cognee 0.5.x versions
 - No migration path for Cognee's internal state databases
-- The mistralai workaround may change with different Cognee versions
+- The mistralai workaround is no longer needed when using uv (uv resolves cleanly), but if Cognee changes its transitive dep tree, the install.sh belt-and-suspenders cleanup may need updating
 
 ###### 7.6 Multi-Gateway Migration
 
@@ -8830,54 +8855,66 @@ CONTAINER/PROCESS
 
 ### 6.1 Dockerfile Improvements
 
-Current `Dockerfile` issues:
-- Runs as root (no `USER` directive)
-- No `HEALTHCHECK` instruction
-- No read-only filesystem
-- Copies entire site-packages (includes dev tools)
-- No `.dockerignore` audit for secrets
+> **STATUS: PARTIALLY IMPLEMENTED.** The `Dockerfile` was rewritten to use
+> `uv sync --frozen` (matching the native install path) and the broken
+> `pip install --force-reinstall mistralai` hack was removed. However, the
+> Dockerfile is still labeled as dev/CI-only per `CLAUDE.md` — production
+> deployments use `deploy/install.sh` on a real host with the dedicated
+> `elephantbroker` system user.
+>
+> Remaining gaps for hardening the Dockerfile (if you want to run the
+> container in production):
+> - No `USER` directive (runs as root inside the container)
+> - No `HEALTHCHECK` instruction
+> - No read-only filesystem
+> - No `.dockerignore` audit for secrets
+>
+> The Recommended Dockerfile below shows what a fully-hardened version
+> would look like — it builds on the current uv-based Dockerfile and adds
+> a non-root user and HEALTHCHECK. Apply only if you intend to run the
+> container in production despite the CLAUDE.md guidance.
 
-**Recommended Dockerfile:**
+**Recommended Dockerfile (extends the current uv-based one):**
 ```dockerfile
 FROM python:3.11-slim AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
+
 WORKDIR /app
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock ./
 COPY elephantbroker/ elephantbroker/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir . && \
-    pip install --no-cache-dir --force-reinstall --no-deps 'mistralai>=1.0'
+
+RUN uv sync --frozen --no-dev
 
 FROM python:3.11-slim AS runtime
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 
 # Create non-root user
-RUN groupadd -r ebruntime && useradd -r -g ebruntime -d /app -s /sbin/nologin ebruntime
+RUN groupadd -r elephantbroker && useradd -r -g elephantbroker -d /app -s /sbin/nologin elephantbroker
 
 WORKDIR /app
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /app/elephantbroker /app/elephantbroker
-COPY elephantbroker/config/default.yaml /app/config/default.yaml
-
-# Cognee writable directories (owned by non-root user)
-RUN mkdir -p /app/data /app/config && \
-    chown -R ebruntime:ebruntime /app
+COPY --from=builder --chown=elephantbroker:elephantbroker /app/.venv /app/.venv
+COPY --from=builder --chown=elephantbroker:elephantbroker /app/elephantbroker /app/elephantbroker
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --chown=elephantbroker:elephantbroker elephantbroker/config/default.yaml /etc/elephantbroker/default.yaml
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8420/health/')" || exit 1
 
-USER ebruntime
+USER elephantbroker
+ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8420
 
 # Read-only root filesystem (data volume mounted separately)
 # Use --read-only flag in docker run / compose
 
-ENTRYPOINT ["elephantbroker", "serve", "--config", "/app/config/default.yaml"]
+ENTRYPOINT ["elephantbroker", "serve", "--config", "/etc/elephantbroker/default.yaml"]
 ```
 
 ### 6.2 HITL Middleware Dockerfile
 
-Current `hitl-middleware/Dockerfile` has the same issues. Apply identical hardening (non-root user, HEALTHCHECK, minimal base).
+`hitl-middleware/Dockerfile` has the same hardening gaps. Apply identical
+hardening (non-root user, HEALTHCHECK, minimal base) if running in production.
 
 ### 6.3 Docker Compose Network Isolation
 
@@ -8912,63 +8949,70 @@ services:
 
 ### 6.4 systemd Hardening Directives
 
-The current `elephantbroker.service` unit file lacks security hardening. Add these directives:
+> **STATUS: IMPLEMENTED.** The systemd unit files in `deploy/systemd/` ship
+> with full security hardening directives. They are installed by
+> `deploy/install.sh` and run under the dedicated `elephantbroker` system
+> user (no shell, no interactive login). The list below documents the
+> directives that are actually applied — see `deploy/systemd/elephantbroker.service`
+> for the canonical source.
 
 ```ini
 [Service]
 Type=simple
-User=ebruntime
-Group=ebruntime
+User=elephantbroker
+Group=elephantbroker
 WorkingDirectory=/var/lib/elephantbroker
 
 EnvironmentFile=/etc/elephantbroker/env
-ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
+ExecStart=/opt/elephantbroker/.venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
 
 Restart=on-failure
 RestartSec=5
 
-# Security hardening
-NoNewPrivileges=yes
+# Filesystem hardening
 ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-MemoryDenyWriteExecute=yes
-LockPersonality=yes
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
 
-# Allow writes only to data directory and Cognee dirs
-ReadWritePaths=/var/lib/elephantbroker/data
-ReadWritePaths=/opt/elephant-broker/venv/lib/python3.12/site-packages/cognee/.cognee_system
-ReadWritePaths=/opt/elephant-broker/venv/lib/python3.12/site-packages/cognee/.data_storage
+# Privilege hardening
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
 
-# Restrict network to only needed ports
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Kernel & namespace hardening
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
-# Resource limits
-LimitNOFILE=65536
-LimitNPROC=4096
+# File creation mask (640 by default instead of 644)
+UMask=0027
 ```
 
-Apply identical hardening to `elephantbroker-hitl.service`.
+`elephantbroker-hitl.service` ships with the same hardening directives —
+both unit files share identical security configuration since they run as the
+same service user against the same filesystem layout.
 
 ### 6.5 Cognee Writable Directories
 
-The current deployment guide sets `chmod -R 777` on Cognee's package directory. This is an overly broad permission. Instead:
+> **STATUS: IMPLEMENTED.** `deploy/install.sh` pre-creates Cognee's writable
+> state directories and the final `chown -R elephantbroker:elephantbroker /opt/elephantbroker`
+> makes them owned by the service user. The old `chmod -R 777` workaround
+> from earlier docs has been removed — it was wrong (left Cognee state
+> world-writable). The current approach uses dedicated user ownership instead.
 
 ```bash
-# Create Cognee state dirs owned by service user (not world-writable)
-mkdir -p venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
-mkdir -p venv/lib/python3.*/site-packages/cognee/.data_storage
-chown -R ebruntime:ebruntime venv/lib/python3.*/site-packages/cognee/.cognee_system
-chown -R ebruntime:ebruntime venv/lib/python3.*/site-packages/cognee/.data_storage
-chmod -R 750 venv/lib/python3.*/site-packages/cognee/.cognee_system
-chmod -R 750 venv/lib/python3.*/site-packages/cognee/.data_storage
+# What deploy/install.sh actually does (step 5b):
+mkdir -p /opt/elephantbroker/.venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
+mkdir -p /opt/elephantbroker/.venv/lib/python3.*/site-packages/cognee/.data_storage
+# (final chown -R in step 7 sets owner to elephantbroker:elephantbroker
+#  for the entire /opt/elephantbroker tree, including these dirs)
 ```
 
 ### 6.6 Error Message Information Leakage

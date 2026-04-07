@@ -89,12 +89,14 @@ docker compose --profile observability up -d
 
 ### 2. Run the install script
 
-The repo ships an idempotent installer at `deploy/install.sh` that creates
-the dedicated `elephantbroker` system user, sets up the canonical directory
-layout, builds the venv, installs the runtime + HITL middleware, applies the
-post-install fixes (mistralai purge, Cognee writable dirs), copies the
-config + env templates into `/etc/elephantbroker/`, and installs the systemd
-unit files. It runs entirely as root via `sudo` — no `sudo -u` switching.
+The repo ships an idempotent installer at `deploy/install.sh` that installs
+[`uv`](https://docs.astral.sh/uv/) (if missing), creates the dedicated
+`elephantbroker` system user, sets up the canonical directory layout, runs
+`uv sync --frozen --no-dev` to install the EXACT pinned dependencies from
+`uv.lock`, installs the HITL middleware, pre-creates Cognee's writable
+state directories, copies the config + env templates into `/etc/elephantbroker/`,
+and installs the systemd unit files. It runs entirely as root via `sudo`
+— no `sudo -u` switching.
 
 The installer expects the repo to be cloned **into** `/opt/elephantbroker`
 (not alongside it). This makes the install dir and the source dir the same
@@ -110,12 +112,13 @@ sudo /opt/elephantbroker/deploy/install.sh
 
 What the installer does, in order:
 
+0. Installs `uv` to `/usr/local/bin` via Astral's official installer (if missing)
 1. Creates the `elephantbroker` system user (no shell, home `/var/lib/elephantbroker`)
 2. Creates `/opt/elephantbroker`, `/etc/elephantbroker`, `/var/lib/elephantbroker` with the ownership/modes from the table above
-3. Runs `uv sync --frozen --no-dev` — builds the venv at `/opt/elephantbroker/.venv` and installs the EXACT pinned versions from `uv.lock`
-4. `pip install` the runtime and HITL middleware into the venv
-5. Applies post-install fixes:
-   - Removes the `mistralai` ghost package (broken cognee 0.5.3 transitive dep)
+3. Runs `uv sync --frozen --no-dev` — builds the venv at `/opt/elephantbroker/.venv` and installs the EXACT pinned versions from `uv.lock` (187 packages, all transitive deps locked)
+4. `uv pip install` the HITL middleware into the same venv
+5. Belt-and-suspenders post-install fixes (only matter if someone bypasses uv):
+   - Best-effort removal of any old `mistralai` namespace package directory left by a previous pip install (uv resolves to `mistralai==1.12.4` automatically — a working version — so this is a no-op on uv-only installs)
    - Pre-creates `cognee/.cognee_system/databases` and `cognee/.data_storage` writable subdirs
    - Touches the `cognee/.anon_id` telemetry file (telemetry is disabled at import time anyway)
 6. Copies `default.yaml` from the repo into `/etc/elephantbroker/`
@@ -302,23 +305,27 @@ See docs/OPENCLAW-SETUP.md for tool definitions and agent prompt instructions.
 ### DB VM (runtime + HITL)
 
 The repo ships an idempotent updater at `deploy/update.sh`. It pulls from
-the current branch, reinstalls into the venv (using `--no-deps` by default
-to preserve the mistralai workaround), re-chowns the install tree, and
+the current branch, runs `uv sync --frozen --no-dev` to install exactly
+what `uv.lock` specifies (zero drift), re-chowns the install tree, and
 restarts both systemd services.
 
 ```bash
 sudo /opt/elephantbroker/deploy/update.sh
 ```
 
-If you added a new dependency to `pyproject.toml`, use `--full` to do a
-full reinstall and re-apply the post-install fixes:
+The default path uses `--frozen` mode, which **errors out if `pyproject.toml`
+has been modified since the last `uv lock`** — preventing accidental dep drift
+on production hosts. If you intentionally want to upgrade dependencies, use
+`--upgrade` to regenerate `uv.lock` from the current `pyproject.toml`:
 
 ```bash
-sudo /opt/elephantbroker/deploy/update.sh --full
+sudo /opt/elephantbroker/deploy/update.sh --upgrade
 ```
 
 The updater refuses to run on a dirty git tree — commit or stash any local
-changes first. See `deploy/update.sh --help` for all flags.
+changes first. See `deploy/update.sh --help` for all flags, and
+[`deploy/UPDATING-DEPS.md`](../deploy/UPDATING-DEPS.md) for the full
+dependency upgrade workflow.
 
 ### Gateway VM (plugins)
 
@@ -337,14 +344,14 @@ openclaw gateway restart
 
 ## Known Deployment Gotchas
 
-1. **mistralai ghost package** — `cognee==0.5.3` pulls in a broken `mistralai` namespace package that crashes `instructor`. The installer (`deploy/install.sh`) and updater (`deploy/update.sh --full`) remove it automatically. The fast `update.sh` path uses `pip install --no-deps .` to avoid re-pulling it.
+1. **mistralai ghost package (legacy pip path only)** — `cognee==0.5.3` ships a broken `mistralai` namespace package as a transitive dep that conflicts with `instructor`. With `uv` (the supported install path), this is NOT an issue: uv's holistic resolver picks `mistralai==1.12.4` (a working modern version) automatically. The installer keeps a belt-and-suspenders cleanup step in case someone bypasses uv and runs `pip install` against the venv by habit.
 2. **Cognee writable dirs** — Cognee creates `.cognee_system/` and `.data_storage/` inside its own site-packages directory at runtime. The installer pre-creates these dirs and the final `chown -R elephantbroker:elephantbroker /opt/elephantbroker` makes them writable by the service user. Earlier docs recommended `chmod -R 777 venv/.../cognee/` as a workaround — that was wrong (world-writable Cognee state). Use the dedicated service user instead.
 3. **LLM model prefix** — Cognee needs `openai/gemini/gemini-2.5-pro`. Without `openai/` prefix, Cognee hangs on LLM connection test.
 4. **Embedding model + tiktoken** — Cognee tokenizes via tiktoken which only knows OpenAI model names. If you set `EB_EMBEDDING_MODEL` to a non-OpenAI model name (e.g. `gemini/text-embedding-004`), the runtime will crash at first embedding call with `KeyError: Could not automatically map ... to a tokeniser`. Stick to `openai/text-embedding-3-large` (1024 dim) unless you have verified your specific model works with tiktoken.
 5. **Health endpoint trailing slash** — `/health` returns 307 redirect, use `/health/`.
 6. **HITL log level** — Does not support `verbose`. Use `info` or `debug`.
-7. **venv portability** — Shebangs in `.venv/bin/` are absolute paths. If you move/copy the venv, run `uv sync` to rebuild in place. The installer always creates the venv at `/opt/elephantbroker/.venv` (uv's default location) so this only matters for unusual deployments.
+7. **venv portability** — Shebangs in `.venv/bin/` are absolute paths. If you move/copy the venv, run `uv sync --frozen` to rebuild in place. The installer always creates the venv at `/opt/elephantbroker/.venv` (uv's default location) so this only matters for unusual deployments.
 8. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose -f infrastructure/docker-compose.yml down -v` and retry.
-9. **`pip install .` vs `pip install --no-deps .`** — Full install re-resolves all deps and re-pulls mistralai. The updater's default fast path uses `--no-deps` for code-only updates; use `update.sh --full` when bumping a dependency.
+9. **`uv sync --frozen` errors on lockfile drift** — If `pyproject.toml` has been modified since the last `uv lock`, `update.sh` will refuse to install. Run `update.sh --upgrade` to regenerate the lockfile, OR commit a fresh `uv lock` from a dev machine first. See `deploy/UPDATING-DEPS.md` for the full upgrade workflow.
 10. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml`. If upgrading the client, update both compose files to match.
 11. **Service user ownership** — Files inside `/opt/elephantbroker`, `/etc/elephantbroker`, and `/var/lib/elephantbroker` must be owned by `elephantbroker:elephantbroker` (with `root:elephantbroker` for the env files specifically). If you copy files in manually, follow up with `sudo chown -R elephantbroker:elephantbroker <path>` or the systemd unit will fail to read them.

@@ -157,7 +157,7 @@ fi
 # =============================================================================
 log "Step 3/4: re-apply ownership across $PREFIX"
 # =============================================================================
-# Files written by the pip install (during root execution above) may have root
+# Files written by `uv sync` (during root execution above) may have root
 # ownership. Re-chown the whole tree to the service user so the systemd unit
 # can read everything.
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX"
