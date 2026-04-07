@@ -36,22 +36,39 @@ Both plugins use OpenClaw's flat extension layout — all `.ts` files at root. O
 
 > **Deployment mode:** Installing **both** plugins (`elephantbroker-memory` + `elephantbroker-context`) configures **FULL mode** — the recommended operating mode for ~90% of deployments. FULL mode enables the complete stack: durable memory (Neo4j + Qdrant-backed), working set scoring (11-dimension), context assembly, compaction, and guards. Installing only `elephantbroker-memory` puts the runtime in MEMORY_ONLY mode (memory storage without context lifecycle). For all standard deployments, install both.
 
+**Prerequisite:** Node.js **24+** (pinned via `engines.node` in each plugin's
+`package.json`). Earlier versions (20, 22) may run but are not supported by
+the lockfiles committed in the repo.
+
 **1. Clone repo and symlink plugins into OpenClaw extensions:**
 
 ```bash
 # Clone the repo on the gateway host
-git clone https://github.com/<your-org>/elephant-broker.git /opt/elephant-broker
+git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
 # Symlink plugins — OpenClaw loads .ts files directly via jiti (no build step)
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies in each plugin directory
-cd ~/.openclaw/extensions/elephantbroker-memory && npm install
-cd ~/.openclaw/extensions/elephantbroker-context && npm install
+# Install dependencies — `npm ci` reads the committed package-lock.json and
+# installs EXACTLY those versions. Errors out if the lockfile is missing or
+# out of sync with package.json. This is the npm equivalent of
+# `uv sync --frozen` on the DB VM and the only supported install command
+# for production gateways.
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 ```
 
-Symlinks make updates easy — `git pull` in `/opt/elephant-broker` updates both plugins. No need to re-copy files.
+> **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
+> ranges to whatever's latest today, regenerates the lockfile if needed, and
+> can silently install different versions on different hosts. `npm ci` is
+> bit-for-bit reproducible — it reads the committed `package-lock.json` and
+> installs exactly the same tree every time. Use `npm install` only when
+> intentionally bumping a dep (and commit the regenerated lockfile).
+
+Symlinks make updates easy — `git pull` in `/opt/elephantbroker` updates both
+plugins. After pulling, re-run `npm ci` in each plugin directory to pick up
+any lockfile changes.
 
 **2. Add to `~/.openclaw/openclaw.json`:**
 

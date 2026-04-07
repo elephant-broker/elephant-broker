@@ -222,25 +222,33 @@ describe("TestLifecycleMethods", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("dispose calls endpoint and clears state", async () => {
+  // GF-15 (PR #11): OpenClaw calls dispose() after every run, not just at
+  // session end. So dispose() must NOT call /context/dispose on the runtime
+  // (that endpoint is for session teardown, not engine teardown). The fix
+  // restricts dispose() to clearing per-turn transient state only.
+  it("dispose does NOT call client.dispose endpoint (engine teardown only)", async () => {
     engine.setSessionContext("agent:main:main", "sid-1");
     await engine.dispose();
-    expect(client.dispose).toHaveBeenCalledWith("agent:main:main", "sid-1");
+    expect(client.dispose).not.toHaveBeenCalled();
   });
 
-  // M1: dispose clears lastTurnMessages buffer
-  it("dispose clears lastTurnMessages buffer", async () => {
+  // PR #12: TS dispose race fix. dispose() previously wiped lastTurnMessages
+  // before afterTurn could consume them, breaking successful-use tracking.
+  // Fix: dispose() now PRESERVES lastTurnMessages so a subsequent afterTurn
+  // can still send them to the runtime.
+  it("dispose preserves lastTurnMessages buffer (PR #12 dispose-race fix)", async () => {
     engine.setSessionContext("sk", "sid");
     engine.setLastTurnMessages([{ role: "user", content: "lingering" }]);
     await engine.dispose();
-    // After dispose, afterTurn should get empty messages (buffer was cleared)
-    engine.setSessionContext("sk2", "sid2");
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await engine.afterTurn({ sessionId: "sid2" });
+    // After dispose, afterTurn should STILL receive the lingering message
+    // because dispose preserves the buffer (the comment in src/engine.ts
+    // line 223 explicitly lists lastTurnMessages as PRESERVED).
+    await engine.afterTurn({ sessionId: "sid" });
     expect(client.afterTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ messages: [] }),
+      expect.objectContaining({
+        messages: [{ role: "user", content: "lingering" }],
+      }),
     );
-    warnSpy.mockRestore();
   });
 
   it("prepareSubagentSpawn maps childSessionId", async () => {

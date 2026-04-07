@@ -22,7 +22,7 @@ DB VM                                    OpenClaw VM
 - Python 3.11 or 3.12 (pinned via `requires-python = ">=3.11,<3.13"` in pyproject.toml)
 - [`uv`](https://docs.astral.sh/uv/) — installed automatically by `deploy/install.sh` if missing
 - Docker + Docker Compose (for the Neo4j / Qdrant / Redis infrastructure)
-- Node.js 18+ (OpenClaw VM only)
+- **Node.js 24+** on the OpenClaw VM (pinned via `engines.node` in each plugin's package.json — earlier versions may run but are not supported)
 - LiteLLM proxy or OpenAI-compatible endpoint for LLM + embeddings
 - Root access to the DB VM (install runs via `sudo`)
 
@@ -227,10 +227,21 @@ git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbr
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies in each plugin directory
-cd ~/.openclaw/extensions/elephantbroker-memory && npm install
-cd ~/.openclaw/extensions/elephantbroker-context && npm install
+# Install dependencies — use `npm ci` (NOT `npm install`).
+# `npm ci` is the lockfile-driven install: it reads package-lock.json and
+# installs EXACTLY those versions, errors out if the lockfile is missing or
+# out of sync with package.json. This is the npm equivalent of
+# `uv sync --frozen` on the DB VM.
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 ```
+
+> **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
+> ranges to whatever's latest today, regenerates the lockfile if needed, and
+> can silently install different versions on different hosts. `npm ci` reads
+> the committed `package-lock.json` and installs bit-for-bit the same tree
+> every time. Use it for any production deployment, CI run, or anywhere you
+> care about reproducibility.
 
 ### 2. Environment
 
@@ -315,9 +326,10 @@ changes first. See `deploy/update.sh --help` for all flags.
 cd /opt/elephantbroker
 git pull origin main
 
-# Re-install npm deps if package.json changed
-cd openclaw-plugins/elephantbroker-memory && npm install
-cd ../elephantbroker-context && npm install
+# Re-install npm deps from the committed lockfile (use `npm ci`, NOT
+# `npm install`, so the install is reproducible — same as the DB VM).
+cd openclaw-plugins/elephantbroker-memory && npm ci
+cd ../elephantbroker-context && npm ci
 
 # Restart gateway to reload plugins
 openclaw gateway restart
