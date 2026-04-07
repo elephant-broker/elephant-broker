@@ -723,12 +723,22 @@ class ElephantBrokerConfig(_StrictBase):
         import yaml  # requires pyyaml
         with open(path) as f:
             data = yaml.safe_load(f) or {}
-        # Validate the YAML payload first so any malformed YAML fails before
-        # we touch env vars (clearer error reporting).
+        # Two-pass validation. First pass validates the raw YAML payload so
+        # any malformed YAML or operator typo fails before we touch env vars
+        # (clearer error reporting). Thanks to ``extra="forbid"`` on every
+        # config submodel (Bucket A2 — see ``_StrictBase.model_config``),
+        # this first pass catches typos like ``guards: enabld: true`` at YAML
+        # parse time instead of silently leaving the field at its default —
+        # G3 (TODO-3-016) confirmed this naturally resolves the BLR concern
+        # about the two-pass pattern's value depending on strict schemas.
         yaml_config = cls(**data)
         yaml_data = yaml_config.model_dump()
         _apply_env_overrides(yaml_data)
         _apply_inheritance_fallbacks(yaml_data)
+        # Second pass re-validates after env overrides + inheritance fallbacks,
+        # so any constraint violation introduced by an env override
+        # (e.g. ``EB_EMBEDDING_DIMENSIONS=0`` would violate ``ge=1``) raises
+        # a ``ValidationError`` at load time rather than at first use.
         return cls.model_validate(yaml_data)
 
     @classmethod

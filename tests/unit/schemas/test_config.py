@@ -627,13 +627,80 @@ compaction_llm:
         """
         from elephantbroker.schemas.config import ENV_OVERRIDE_BINDINGS, ElephantBrokerConfig
 
-        # Probe values that satisfy ALL field constraints in the bindings list:
-        #   - int=4096   tightest range is consolidation.batch_size (ge=50, le=5000)
-        #                AND consolidation_min_retention_seconds (ge=3600), so the
-        #                probe must sit inside [3600, 5000]. 4096 is the cleanest fit.
-        #   - float=1.5  temperature ge=0.0/le=2.0 AND ingest_batch_timeout ge=1.0 — 1.5 OK
-        #   - bool=true
-        #   - str="probe-{var.lower()}"  unique per var so we can verify the right value lands in the right field
+        # G2 (TODO-3-501) — probe value contract.
+        #
+        # The probe values below are chosen to satisfy EVERY field constraint
+        # currently active on a binding in ENV_OVERRIDE_BINDINGS, so that one
+        # bulk loop can verify all 70+ bindings without per-binding special
+        # cases. Each probe is selected to land inside the *intersection* of
+        # all constraints attached to fields of its type.
+        #
+        # ----- Active constraint summary (audit before adding new bindings) -----
+        #
+        # int probes (probe value = 4096):
+        #   Tightest active range is the intersection of:
+        #     - `consolidation.batch_size`             ge=50,   le=5000
+        #     - `consolidation_min_retention_seconds`  ge=3600
+        #   → valid window is [3600, 5000]. 4096 is the cleanest fit.
+        #   Other int constraints currently in scope (all looser than the
+        #   intersection above):
+        #     - `infra.metrics_ttl_seconds`            ge=60
+        #     - `infra.trace.memory_max_events`        ge=100
+        #     - `llm.max_tokens`, `llm.extraction_max_*`, `llm.summarization_*`,
+        #       `llm.ingest_*`                          ge=1
+        #     - `cognee.embedding_dimensions`          ge=1   (also gated by F9
+        #                                              cross-validator — see note
+        #                                              below)
+        #     - `successful_use.batch_size`            ge=1
+        #     - `blocker_extraction.run_every_n_turns` ge=1
+        #     - `max_concurrent_sessions`              ge=1
+        #
+        # float probes (probe value = 1.5):
+        #   Tightest active range is the intersection of:
+        #     - `llm.temperature`                      ge=0.0, le=2.0
+        #     - `llm.ingest_batch_timeout_seconds`     ge=1.0
+        #   → valid window is [1.0, 2.0]. 1.5 is the midpoint.
+        #
+        # bool probes (probe value = "true"): no constraints possible.
+        #
+        # str probes (probe value = f"probe-{env_var.lower()}"):
+        #   Unique per env var so we can verify the right value lands in the
+        #   right field (catches accidentally-cross-wired bindings). No length
+        #   or pattern constraints currently active on any string binding.
+        #
+        # str_or_none probes: same as str — coercer accepts any non-empty
+        #   string and we never use empty here, so the field always lands as
+        #   the probe value rather than None.
+        #
+        # ----- Maintainer warning -----
+        #
+        # If you ADD a new binding whose target field has a tighter constraint
+        # than the active intersection above (e.g. an int field with ge=10000,
+        # or a float field with le=1.0, or a string field with a regex/length
+        # constraint), this bulk test will start failing with a Pydantic
+        # ValidationError on the affected field. The fix is NOT to relax the
+        # field constraint — it is to either:
+        #   (a) tighten the probe value to fit the new intersection (and update
+        #       this comment block to document the new tightest constraint), or
+        #   (b) move the new binding to a per-binding test case in the section
+        #       above (`test_*_overrides_*`) where it can use a custom probe
+        #       value, and skip it in this bulk loop.
+        # See `tests/unit/schemas/test_config.py` git history for prior tightenings.
+        #
+        # F9 cross-validator caveat: `cognee.embedding_dimensions` is also
+        # gated by `_check_embedding_dimensions_match_known_model`, which
+        # rejects probe value 4096 against any model in `KNOWN_EMBEDDING_DIMS`.
+        # The bulk loop avoids this because the test fixture YAML
+        # (`yaml_path` above) sets `cognee.embedding_model: "yaml-embed-model"`,
+        # an unknown name that the F9 cross-validator passes through. The
+        # bulk loop then overrides `EB_EMBEDDING_MODEL` with its own probe
+        # value (`probe-eb_embedding_model`), which is also unknown to F9.
+        # If you ever change the test fixture YAML or the probe strategy
+        # to use an OpenAI/Gemini model name from `KNOWN_EMBEDDING_DIMS`,
+        # this test will start failing on the embedding_dimensions probe
+        # with a `ValidationError` from the F9 cross-validator and you
+        # will need to special-case the dim probe to match the chosen
+        # model's expected dimension.
         expected: list[tuple[str, object]] = []
         for env_var, dotted_path, coercer in ENV_OVERRIDE_BINDINGS:
             if coercer == "int":
