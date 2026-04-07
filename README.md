@@ -235,9 +235,24 @@ docker compose --profile observability up -d  # + ClickHouse, Jaeger, Grafana (o
 
 ### Runtime
 
+ElephantBroker uses [uv](https://github.com/astral-sh/uv) for reproducible installs from a pinned `uv.lock`. See [deploy/UPDATING-DEPS.md](deploy/UPDATING-DEPS.md) for the dep upgrade procedure and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production deployments via `deploy/install.sh`.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[all]"
+# Install uv (one-time setup)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and install
+git clone https://github.com/elephant-broker/elephant-broker
+cd elephant-broker
+
+# Production install (no dev/test deps) — installs EXACTLY what uv.lock specifies
+uv sync --frozen --no-dev
+
+# OR: dev install with pytest, ruff, scenario deps
+uv sync --frozen --extra dev --extra scenario
+
+# Activate the venv (uv puts it at .venv/)
+source .venv/bin/activate
 
 export EB_GATEWAY_ID="my-gateway"
 export EB_NEO4J_URI="bolt://localhost:17687"
