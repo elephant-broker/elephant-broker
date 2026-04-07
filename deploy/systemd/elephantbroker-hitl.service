@@ -40,7 +40,7 @@ Group=elephantbroker
 # --- Filesystem ---
 WorkingDirectory=/var/lib/elephantbroker
 EnvironmentFile=/etc/elephantbroker/hitl.env
-ExecStart=/opt/elephantbroker/venv/bin/python -m hitl_middleware
+ExecStart=/opt/elephantbroker/.venv/bin/python -m hitl_middleware
 
 # --- Restart policy ---
 Restart=on-failure

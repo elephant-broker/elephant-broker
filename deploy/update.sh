@@ -4,22 +4,34 @@
 # =============================================================================
 #
 # In-place upgrade for an existing install. Pulls the latest source from git,
-# reinstalls the runtime + HITL middleware (without re-pulling broken
-# transitive deps unless --full is given), restarts both services.
+# syncs the venv to match the lockfile via `uv sync`, re-chowns the install
+# tree, and restarts both systemd services.
 #
 # Usage:
-#   sudo /opt/elephantbroker/deploy/update.sh           # fast: --no-deps install
-#   sudo /opt/elephantbroker/deploy/update.sh --full    # full reinstall + post-install fixes
+#   sudo /opt/elephantbroker/deploy/update.sh           # default: uv sync --frozen
+#   sudo /opt/elephantbroker/deploy/update.sh --upgrade # regenerate uv.lock first
 #
 # This script is idempotent and runs entirely as root (no sudo -u switching).
 # It refuses to run on a dirty git tree so the operator does not lose
 # uncommitted local changes.
 #
+# Default behavior (no --upgrade flag):
+#   - git pull --ff-only origin <current-branch>
+#   - uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
+#   - chown -R + restart services
+#
+# With --upgrade:
+#   - git pull
+#   - uv lock --upgrade (regenerates uv.lock from current pyproject.toml,
+#     picking the latest versions allowed by the constraints)
+#   - uv sync --no-dev (installs the new lockfile)
+#   - This is the path for "I bumped a version in pyproject.toml" workflows.
+#     See deploy/UPDATING-DEPS.md for the full upgrade procedure.
+#
 # Flags:
-#   --full           Run a full reinstall (pip install . without --no-deps) and
-#                    re-apply the post-install fixes (mistralai purge, Cognee
-#                    writable dirs). Use this when a new dependency was added
-#                    to pyproject.toml.
+#   --upgrade        Regenerate uv.lock before syncing. Use when a new
+#                    dependency was added or a version was bumped in
+#                    pyproject.toml.
 #   --no-restart     Do not restart systemd services after install (useful for
 #                    multi-step upgrades, or when running on a host with no
 #                    systemd units installed).
@@ -33,13 +45,13 @@ set -euo pipefail
 PREFIX="/opt/elephantbroker"
 SERVICE_USER="elephantbroker"
 SERVICE_GROUP="elephantbroker"
-FULL_INSTALL=0
+UPGRADE_LOCK=0
 RESTART=1
 
 # --- Parse flags ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --full) FULL_INSTALL=1; shift ;;
+        --upgrade) UPGRADE_LOCK=1; shift ;;
         --no-restart) RESTART=0; shift ;;
         --prefix) PREFIX="$2"; shift 2 ;;
         --help|-h)
@@ -47,22 +59,31 @@ while [[ $# -gt 0 ]]; do
 ElephantBroker DB-VM updater
 
 Usage:
-  sudo ./update.sh [--full] [--no-restart] [--prefix PATH]
+  sudo ./update.sh [--upgrade] [--no-restart] [--prefix PATH]
 
 Flags:
-  --full           Full reinstall (pip install .) + re-run post-install fixes.
-                   Use when a new dependency was added to pyproject.toml.
+  --upgrade        Regenerate uv.lock before syncing. Use when a new dependency
+                   was added or a version was bumped in pyproject.toml. WITHOUT
+                   --upgrade, the script installs EXACTLY what uv.lock specifies
+                   (frozen mode) — the safe default for in-place updates.
   --no-restart     Do not restart systemd services after install.
   --prefix PATH    Override install prefix (default: /opt/elephantbroker)
   --help, -h       Show this message
 
-Default behavior:
-  - git pull origin <current-branch>
-  - pip install --no-deps .  (preserves the mistralai workaround)
+Default behavior (no --upgrade):
+  - git pull --ff-only origin <current-branch>
+  - uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
   - chown -R elephantbroker:elephantbroker /opt/elephantbroker
   - systemctl restart elephantbroker elephantbroker-hitl
 
+With --upgrade:
+  - git pull --ff-only origin <current-branch>
+  - uv lock --upgrade (regenerate the lockfile)
+  - uv sync --no-dev (install the new lockfile)
+  - chown + restart
+
 The script refuses to run on a dirty git tree.
+See deploy/UPDATING-DEPS.md for the full dep upgrade procedure.
 HELP
             exit 0
             ;;
@@ -82,7 +103,8 @@ die()  { printf "\033[1;31mXX\033[0m  %s\n" "$*" >&2; exit 1; }
 # --- Pre-flight ---
 [[ $EUID -eq 0 ]] || die "must run as root (use sudo)"
 [[ -d "$PREFIX/.git" ]] || die "$PREFIX is not a git working tree — was the repo cloned in place?"
-[[ -f "$PREFIX/venv/bin/pip" ]] || die "$PREFIX/venv not found — run install.sh first"
+[[ -d "$PREFIX/.venv" ]] || die "$PREFIX/.venv not found — run install.sh first"
+command -v uv &>/dev/null || die "uv not found in PATH — run install.sh first (it installs uv)"
 
 cd "$PREFIX"
 
@@ -110,25 +132,26 @@ else
 fi
 
 # =============================================================================
-log "Step 2/4: pip install"
+log "Step 2/4: uv sync"
 # =============================================================================
-if [[ "$FULL_INSTALL" -eq 1 ]]; then
-    log "  --full flag: full reinstall (will re-apply post-install fixes)"
-    "$PREFIX/venv/bin/pip" install --quiet "$PREFIX"
-    "$PREFIX/venv/bin/pip" install --quiet "$PREFIX/hitl-middleware"
-
-    # Re-apply post-install fixes (full install re-pulls broken transitive deps)
-    log "  applying post-install fixes (mistralai purge + Cognee dirs)"
-    "$PREFIX/venv/bin/pip" uninstall -y mistralai 2>/dev/null || true
-    MISTRAL_DIR=$(find "$PREFIX/venv/lib" -type d -name mistralai -prune 2>/dev/null | head -n 1 || true)
-    [[ -n "$MISTRAL_DIR" ]] && rm -rf "$MISTRAL_DIR" && log "    removed mistralai ghost: $MISTRAL_DIR"
-
-    COGNEE_DIR=$(find "$PREFIX/venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1)
-    [[ -n "$COGNEE_DIR" ]] && mkdir -p "$COGNEE_DIR/.cognee_system/databases" "$COGNEE_DIR/.data_storage"
+if [[ "$UPGRADE_LOCK" -eq 1 ]]; then
+    log "  --upgrade flag: regenerating uv.lock from pyproject.toml"
+    uv lock --upgrade
+    log "  uv sync --no-dev"
+    uv sync --no-dev
 else
-    log "  fast path: pip install --no-deps . (preserves mistralai workaround)"
-    "$PREFIX/venv/bin/pip" install --quiet --no-deps "$PREFIX"
-    "$PREFIX/venv/bin/pip" install --quiet --no-deps "$PREFIX/hitl-middleware"
+    log "  uv sync --frozen --no-dev (installs exactly what uv.lock specifies)"
+    uv sync --frozen --no-dev
+fi
+
+# Re-install HITL middleware (it lives outside the lockfile, in a sub-package)
+log "  uv pip install hitl-middleware"
+uv pip install --quiet "$PREFIX/hitl-middleware"
+
+# Cognee writable directories: re-create in case a fresh sync wiped them
+COGNEE_DIR=$(find "$PREFIX/.venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1 || true)
+if [[ -n "$COGNEE_DIR" ]]; then
+    mkdir -p "$COGNEE_DIR/.cognee_system/databases" "$COGNEE_DIR/.data_storage"
 fi
 
 # =============================================================================

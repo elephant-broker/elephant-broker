@@ -4,14 +4,24 @@
 # =============================================================================
 #
 # Sets up a fresh DB VM for ElephantBroker:
+#   0. Installs uv (Astral's Python package manager) if missing
 #   1. Creates the dedicated `elephantbroker` system user
 #   2. Creates /opt/elephantbroker, /etc/elephantbroker, /var/lib/elephantbroker
-#   3. Builds the Python venv at /opt/elephantbroker/venv
-#   4. Installs the runtime + HITL middleware
-#   5. Applies post-install fixes (mistralai purge, Cognee writable dirs, etc.)
+#   3. Runs `uv sync --extra dev` — installs the venv at /opt/elephantbroker/.venv
+#      with the EXACT versions pinned in pyproject.toml + uv.lock
+#   4. Installs the HITL middleware into the same venv (uv pip install)
+#   5. Applies belt-and-suspenders post-install fixes (Cognee writable dirs)
 #   6. Copies default.yaml + env.example + hitl.env.example into /etc/elephantbroker
 #   7. Installs the systemd units (unless --no-systemd)
 #   8. Sets ownership/permissions per the canonical layout
+#
+# Why uv (not pip):
+#   - The lockfile (uv.lock) is mandatory by default — `uv sync` always uses it.
+#   - Reproducible builds: bit-for-bit identical installs across machines.
+#   - 10-100x faster than pip.
+#   - Resolves cognee 0.5.3 + mistralai cleanly without the force-reinstall hack
+#     pip needed (uv's holistic resolver picks a working mistralai version).
+#   - See deploy/UPDATING-DEPS.md for the dep upgrade workflow.
 #
 # Usage (typical):
 #   sudo git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
@@ -103,11 +113,31 @@ PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.
 log "Python version: $PYTHON_VERSION"
 case "$PYTHON_VERSION" in
     3.11|3.12) ;;
-    *) warn "Python $PYTHON_VERSION is not 3.11 or 3.12 (the tested versions). Continuing anyway." ;;
+    *) warn "Python $PYTHON_VERSION is not 3.11 or 3.12 (the supported versions per pyproject.toml). Continuing anyway." ;;
 esac
 
 # =============================================================================
-log "Step 1/8: create system user '$SERVICE_USER'"
+log "Step 0/9: install uv (Astral's Python package manager)"
+# =============================================================================
+# uv is a single static binary, ~30MB, no Python dependencies. We install it
+# system-wide to /usr/local/bin so the systemd service user can also find it
+# if needed for ad-hoc operations.
+if command -v uv &>/dev/null; then
+    log "  uv already installed: $(uv --version)"
+else
+    log "  uv not found — installing via Astral's official installer"
+    # UV_INSTALL_DIR forces install to /usr/local/bin (default is ~/.local/bin)
+    # so the binary is on PATH for all users including the service user.
+    UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 \
+        sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null
+    if ! command -v uv &>/dev/null; then
+        die "uv install completed but binary not on PATH — check /usr/local/bin"
+    fi
+    log "  installed: $(uv --version)"
+fi
+
+# =============================================================================
+log "Step 1/9: create system user '$SERVICE_USER'"
 # =============================================================================
 if id "$SERVICE_USER" &>/dev/null; then
     log "  user '$SERVICE_USER' already exists — skipping"
@@ -122,7 +152,7 @@ else
 fi
 
 # =============================================================================
-log "Step 2/8: create directories"
+log "Step 2/9: create directories"
 # =============================================================================
 # install -d is idempotent and sets owner/group/mode in one call.
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 755 "$PREFIX"
@@ -133,67 +163,80 @@ log "  $CONFIG_DIR  (750 $SERVICE_USER:$SERVICE_GROUP)"
 log "  $DATA_DIR    (750 $SERVICE_USER:$SERVICE_GROUP)"
 
 # =============================================================================
-log "Step 3/8: create or reuse Python venv at $PREFIX/venv"
+log "Step 3/9: install ElephantBroker runtime via uv sync"
 # =============================================================================
-if [[ -f "$PREFIX/venv/bin/python" ]]; then
-    log "  venv already exists — skipping creation"
-else
-    python3 -m venv "$PREFIX/venv"
-    log "  created venv with python3 ($PYTHON_VERSION)"
-fi
-
-# Always upgrade pip (cheap, ensures lockfile-style installs work later)
-"$PREFIX/venv/bin/pip" install --quiet --upgrade pip
-
-# =============================================================================
-log "Step 4/8: install ElephantBroker runtime + HITL middleware"
-# =============================================================================
-log "  pip install $REPO_DIR (this can take a few minutes)"
-"$PREFIX/venv/bin/pip" install --quiet "$REPO_DIR"
-
-log "  pip install $REPO_DIR/hitl-middleware"
-"$PREFIX/venv/bin/pip" install --quiet "$REPO_DIR/hitl-middleware"
+# `uv sync` does ALL of these in one command:
+#   - Creates $REPO_DIR/.venv if missing (with the Python version pinned in
+#     pyproject.toml requires-python)
+#   - Reads pyproject.toml + uv.lock and installs the EXACT pinned versions
+#   - Removes any packages not in the lockfile (full sync = zero drift)
+#   - Installs the project itself in editable mode
+#
+# We pass `--frozen` to refuse to modify uv.lock at install time. If the
+# lockfile is missing or out of sync with pyproject.toml, the operator must
+# regenerate it via `uv lock` BEFORE running install.sh. This prevents
+# accidental dep drift on production hosts.
+cd "$REPO_DIR"
+log "  uv sync --frozen --no-dev (production install, no test deps)"
+uv sync --frozen --no-dev
 
 # =============================================================================
-log "Step 5/8: apply post-install fixes (mistralai + Cognee writable dirs)"
+log "Step 4/9: install HITL middleware into the same venv"
+# =============================================================================
+# The HITL middleware is a separate package in hitl-middleware/ that shares
+# the runtime venv. uv pip install adds it without touching the lockfile.
+log "  uv pip install $REPO_DIR/hitl-middleware"
+uv pip install --quiet "$REPO_DIR/hitl-middleware"
+
+# =============================================================================
+log "Step 5/9: post-install fixes (Cognee writable dirs + mistralai safety net)"
 # =============================================================================
 
-# 5a) mistralai ghost package
-# cognee==0.5.3 pulls in a broken `mistralai` namespace package that conflicts
-# with `instructor`. We don't use Mistral, so the safe fix is to remove it.
-"$PREFIX/venv/bin/pip" uninstall -y mistralai 2>/dev/null || true
-MISTRAL_DIR=$(find "$PREFIX/venv/lib" -type d -name mistralai -prune 2>/dev/null | head -n 1 || true)
+# 5a) mistralai cleanup (belt-and-suspenders, only matters for the pip path)
+# cognee==0.5.3 ships a broken `mistralai` namespace package as a transitive
+# dep. With uv (the supported install path) this is NOT an issue — uv's
+# holistic resolver picks mistralai 1.12.4 (a working modern version). But
+# if anyone runs `pip install` against this venv (e.g. by habit), pip's
+# greedy resolver may install the broken namespace package.
+#
+# This cleanup is a defensive safety net for the pip path. With uv it's a
+# no-op (mistralai is the modern version, not a namespace package).
+uv pip uninstall mistralai 2>/dev/null || true
+MISTRAL_DIR=$(find "$REPO_DIR/.venv/lib" -type d -name mistralai -prune 2>/dev/null | head -n 1 || true)
 if [[ -n "$MISTRAL_DIR" ]]; then
-    rm -rf "$MISTRAL_DIR"
-    log "  removed mistralai ghost package: $MISTRAL_DIR"
-else
-    log "  mistralai already absent"
+    # Only remove if it's the broken namespace-package shape (no METADATA file)
+    if [[ ! -f "$(dirname "$MISTRAL_DIR")"/mistralai-*.dist-info/METADATA ]]; then
+        rm -rf "$MISTRAL_DIR"
+        log "  removed mistralai ghost package (pip safety net): $MISTRAL_DIR"
+    fi
 fi
 
 # 5b) Cognee writable directories
 # Cognee creates `.cognee_system/` and `.data_storage/` inside its own
-# site-packages directory at runtime — these need to exist and be writable
-# by the service user. We pre-create them so the first run doesn't fail.
-COGNEE_DIR=$(find "$PREFIX/venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1)
+# site-packages directory at runtime. We pre-create them so first-run
+# doesn't fail. Final chown -R later in step 7 makes them owned by the
+# service user (no chmod 777 hack needed — that was the wrong fix).
+COGNEE_DIR=$(find "$REPO_DIR/.venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1)
 if [[ -z "$COGNEE_DIR" ]]; then
-    die "could not locate cognee site-packages dir under $PREFIX/venv/lib — did pip install fail?"
+    die "could not locate cognee site-packages dir under $REPO_DIR/.venv/lib — did uv sync fail?"
 fi
 mkdir -p "$COGNEE_DIR/.cognee_system/databases"
 mkdir -p "$COGNEE_DIR/.data_storage"
 log "  cognee writable dirs ready: $COGNEE_DIR/{.cognee_system,.data_storage}"
 
 # 5c) Cognee anonymous-telemetry id file
-# Cognee writes a uuid here on first run for opt-in telemetry. We create the
-# file empty so the runtime user has somewhere to write (avoids permission
-# warnings). The runtime also sets COGNEE_DISABLE_TELEMETRY=true at import
-# time, so this file is mostly cosmetic — but pre-creating avoids noise.
-ANON_ID_PATH=$(find "$PREFIX/venv/lib" -maxdepth 3 -type d -name site-packages | head -n 1)/.anon_id
+# Cognee writes a uuid here on first run for opt-in telemetry. We pre-create
+# it empty so the runtime user has a writable target (avoids permission
+# warnings). The runtime sets COGNEE_DISABLE_TELEMETRY=true at import time
+# anyway (elephantbroker/__init__.py), so this file stays empty — but
+# pre-creating it avoids log noise.
+ANON_ID_PATH=$(find "$REPO_DIR/.venv/lib" -maxdepth 3 -type d -name site-packages | head -n 1)/.anon_id
 touch "$ANON_ID_PATH"
 chmod 644 "$ANON_ID_PATH"
 log "  cognee anon_id touched: $ANON_ID_PATH"
 
 # =============================================================================
-log "Step 6/8: install config files into $CONFIG_DIR"
+log "Step 6/9: install config files into $CONFIG_DIR"
 # =============================================================================
 # default.yaml: always overwrite (it's the structural template; secrets and
 # operator overrides live in env). Owner eb:eb mode 640.
@@ -223,7 +266,7 @@ else
 fi
 
 # =============================================================================
-log "Step 7/8: ensure ownership across $PREFIX (final pass)"
+log "Step 7/9: ensure ownership across $PREFIX (final pass)"
 # =============================================================================
 # All operations above run as root, which means files inside the venv may have
 # root ownership. Final chown -R sets the whole install tree to the service
@@ -233,7 +276,7 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX"
 log "  chowned $PREFIX → $SERVICE_USER:$SERVICE_GROUP (recursive)"
 
 # =============================================================================
-log "Step 8/8: install systemd unit files"
+log "Step 8/9: install systemd unit files"
 # =============================================================================
 if [[ "$INSTALL_SYSTEMD" -eq 0 ]]; then
     log "  --no-systemd flag set — skipping"
@@ -251,6 +294,21 @@ else
 
     systemctl enable elephantbroker elephantbroker-hitl >/dev/null 2>&1 || true
     log "  systemctl enable elephantbroker elephantbroker-hitl"
+fi
+
+# =============================================================================
+log "Step 9/9: verify install"
+# =============================================================================
+# Quick smoke test: invoke the elephantbroker entry point with --help to
+# confirm the venv is functional and the binary is on the right path.
+if [[ -x "$REPO_DIR/.venv/bin/elephantbroker" ]]; then
+    if "$REPO_DIR/.venv/bin/elephantbroker" --help >/dev/null 2>&1; then
+        log "  elephantbroker entry point works ✓"
+    else
+        warn "  elephantbroker --help returned non-zero — check the install"
+    fi
+else
+    warn "  elephantbroker binary not found at $REPO_DIR/.venv/bin/elephantbroker"
 fi
 
 # =============================================================================

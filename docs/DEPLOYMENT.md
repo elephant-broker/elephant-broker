@@ -19,11 +19,19 @@ DB VM                                    OpenClaw VM
 
 ## Prerequisites
 
-- Python 3.11+ (3.12 tested)
-- Docker + Docker Compose
+- Python 3.11 or 3.12 (pinned via `requires-python = ">=3.11,<3.13"` in pyproject.toml)
+- [`uv`](https://docs.astral.sh/uv/) — installed automatically by `deploy/install.sh` if missing
+- Docker + Docker Compose (for the Neo4j / Qdrant / Redis infrastructure)
 - Node.js 18+ (OpenClaw VM only)
 - LiteLLM proxy or OpenAI-compatible endpoint for LLM + embeddings
 - Root access to the DB VM (install runs via `sudo`)
+
+> **About uv:** ElephantBroker uses [`uv`](https://docs.astral.sh/uv/) instead of
+> plain `pip` for reproducible builds. The lockfile (`uv.lock` at the repo root)
+> pins every dependency — direct and transitive — to exact versions and integrity
+> hashes. `uv sync --frozen` (the install path) always installs exactly what the
+> lockfile specifies. See [`deploy/UPDATING-DEPS.md`](../deploy/UPDATING-DEPS.md)
+> for the dep-upgrade workflow.
 
 ## Service User and Directory Layout
 
@@ -35,7 +43,7 @@ exists.
 | Path | Owner | Mode | Purpose |
 |---|---|---|---|
 | `/opt/elephantbroker` | `elephantbroker:elephantbroker` | 755 | Source repo + venv install |
-| `/opt/elephantbroker/venv` | `elephantbroker:elephantbroker` | 755 | Python virtual environment |
+| `/opt/elephantbroker/.venv` | `elephantbroker:elephantbroker` | 755 | Python virtual environment (uv-managed) |
 | `/etc/elephantbroker` | `elephantbroker:elephantbroker` | 750 | Config directory |
 | `/etc/elephantbroker/default.yaml` | `elephantbroker:elephantbroker` | 640 | Non-secret config (template) |
 | `/etc/elephantbroker/env` | `root:elephantbroker` | 640 | Runtime secrets (root writes, service reads) |
@@ -104,7 +112,7 @@ What the installer does, in order:
 
 1. Creates the `elephantbroker` system user (no shell, home `/var/lib/elephantbroker`)
 2. Creates `/opt/elephantbroker`, `/etc/elephantbroker`, `/var/lib/elephantbroker` with the ownership/modes from the table above
-3. Builds the venv at `/opt/elephantbroker/venv`
+3. Runs `uv sync --frozen --no-dev` — builds the venv at `/opt/elephantbroker/.venv` and installs the EXACT pinned versions from `uv.lock`
 4. `pip install` the runtime and HITL middleware into the venv
 5. Applies post-install fixes:
    - Removes the `mistralai` ghost package (broken cognee 0.5.3 transitive dep)
@@ -171,7 +179,7 @@ Without the prefix, Cognee hangs at startup on the LLM connection test.
 ### 5. Bootstrap your org/team/admin
 
 ```bash
-sudo -u elephantbroker /opt/elephantbroker/venv/bin/ebrun \
+sudo -u elephantbroker /opt/elephantbroker/.venv/bin/ebrun \
   --runtime-url http://localhost:8420 bootstrap \
   --org-name "YourOrg" \
   --team-name "YourTeam" \
@@ -323,7 +331,7 @@ openclaw gateway restart
 4. **Embedding model + tiktoken** — Cognee tokenizes via tiktoken which only knows OpenAI model names. If you set `EB_EMBEDDING_MODEL` to a non-OpenAI model name (e.g. `gemini/text-embedding-004`), the runtime will crash at first embedding call with `KeyError: Could not automatically map ... to a tokeniser`. Stick to `openai/text-embedding-3-large` (1024 dim) unless you have verified your specific model works with tiktoken.
 5. **Health endpoint trailing slash** — `/health` returns 307 redirect, use `/health/`.
 6. **HITL log level** — Does not support `verbose`. Use `info` or `debug`.
-7. **venv portability** — Shebangs in `venv/bin/` are absolute paths. If you move/copy the venv, recreate it in place. The installer always creates the venv at `/opt/elephantbroker/venv` so this only matters for unusual deployments.
+7. **venv portability** — Shebangs in `.venv/bin/` are absolute paths. If you move/copy the venv, run `uv sync` to rebuild in place. The installer always creates the venv at `/opt/elephantbroker/.venv` (uv's default location) so this only matters for unusual deployments.
 8. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose -f infrastructure/docker-compose.yml down -v` and retry.
 9. **`pip install .` vs `pip install --no-deps .`** — Full install re-resolves all deps and re-pulls mistralai. The updater's default fast path uses `--no-deps` for code-only updates; use `update.sh --full` when bumping a dependency.
 10. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml`. If upgrading the client, update both compose files to match.
