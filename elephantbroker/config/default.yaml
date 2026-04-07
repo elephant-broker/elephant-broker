@@ -93,10 +93,12 @@ infra:
   # When enabled, trace events flow OTEL Collector → ClickHouse for querying via /trace API.
   # Required for Phase 9 consolidation Stage 7 (procedure pattern detection from history).
   clickhouse:
-    enabled: false                      # (off) without this, /trace queries are limited to in-memory ring buffer only
-    host: "localhost"
-    port: 8123
-    database: "otel"
+    enabled: false                      # env: EB_CLICKHOUSE_ENABLED — (off) without this, /trace queries are limited to in-memory ring buffer only
+    host: "localhost"                   # env: EB_CLICKHOUSE_HOST
+    port: 8123                          # env: EB_CLICKHOUSE_PORT
+    database: "otel"                    # env: EB_CLICKHOUSE_DATABASE
+    user: "default"                     # env: EB_CLICKHOUSE_USER — managed clusters (Aiven, ClickHouse Cloud, Altinity) require non-default users
+    password: ""                        # env: EB_CLICKHOUSE_PASSWORD — REQUIRED on any auth-enabled cluster; leave empty for unauthenticated local dev
     logs_table: "otel_logs"
 
 
@@ -138,7 +140,7 @@ llm:
 
 compaction_llm:
   model: "gemini/gemini-2.5-flash"      # cheaper, faster than the primary extraction model
-  endpoint: "http://localhost:8811/v1"
+  endpoint: ""                          # F7 — empty inherits llm.endpoint at load time; set explicitly only if compaction targets a different LiteLLM proxy
   api_key: ""                           # falls back to llm.api_key if empty
   max_tokens: 2000                      # compaction summaries are short
   temperature: 0.2

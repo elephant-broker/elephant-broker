@@ -487,6 +487,8 @@ class RuntimeContainer:
                 from elephantbroker.runtime.consolidation.otel_trace_query_client import OtelTraceQueryClient
                 c.trace_query_client = OtelTraceQueryClient(
                     getattr(config.infra, "clickhouse", None),
+                    trace_ledger=c.trace_ledger,
+                    metrics=c.metrics_ctx,
                 )
             except Exception:
                 pass

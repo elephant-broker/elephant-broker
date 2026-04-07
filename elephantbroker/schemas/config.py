@@ -95,6 +95,13 @@ class ClickHouseConfig(_StrictBase):
     host: str = "localhost"
     port: int = 8123
     database: str = "otel"
+    # F5: ClickHouse auth — historically hardcoded to the bare host/port/database
+    # tuple, which silently broke whenever an operator pointed at a managed
+    # ClickHouse cluster (Altinity, Aiven, ClickHouse Cloud) that requires auth.
+    # Defaults match clickhouse-connect's own defaults so unauthenticated local
+    # dev still works without operator intervention.
+    user: str = "default"
+    password: str = ""
     logs_table: str = "otel_logs"
 
 
@@ -337,7 +344,12 @@ class HitlConfig(_StrictBase):
 class CompactionLLMConfig(_StrictBase):
     """LLM configuration for compaction summarization."""
     model: str = "gemini/gemini-2.5-flash"
-    endpoint: str = "http://localhost:8811/v1"
+    # F7 (TODO-3-609): empty string is the inheritance sentinel — when left
+    # empty (default or explicit ""), `_apply_inheritance_fallbacks()` copies
+    # `llm.endpoint` into this field at load time. This matches the existing
+    # `api_key` inheritance behavior and removes the operator footgun where
+    # setting EB_LLM_ENDPOINT silently left compaction pinned to localhost.
+    endpoint: str = ""
     api_key: str = ""
     max_tokens: int = Field(default=2000, ge=100)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
@@ -372,8 +384,8 @@ class BlockerExtractionConfig(_StrictBase):
 # DO NOT remove entries without bumping a major version — operators may rely
 # on env vars overriding YAML, and removing a binding silently breaks them.
 #
-# Special fallback chains (api_key inheritance) are applied separately in
-# `_apply_api_key_fallbacks()` after this registry is processed.
+# Special fallback chains (api_key + endpoint inheritance) are applied separately in
+# `_apply_inheritance_fallbacks()` after this registry is processed.
 # -----------------------------------------------------------------------------
 
 ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
@@ -445,6 +457,9 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_CLICKHOUSE_HOST", "infra.clickhouse.host", "str"),
     ("EB_CLICKHOUSE_PORT", "infra.clickhouse.port", "int"),
     ("EB_CLICKHOUSE_DATABASE", "infra.clickhouse.database", "str"),
+    # F5: managed ClickHouse clusters require auth — these were missing.
+    ("EB_CLICKHOUSE_USER", "infra.clickhouse.user", "str"),
+    ("EB_CLICKHOUSE_PASSWORD", "infra.clickhouse.password", "str"),
 
     # --- Embedding cache ---
     ("EB_EMBEDDING_CACHE_ENABLED", "embedding_cache.enabled", "bool"),
@@ -534,13 +549,20 @@ def _apply_env_overrides(yaml_data: dict) -> None:
         _set_nested(yaml_data, dotted_path, value)
 
 
-def _apply_api_key_fallbacks(yaml_data: dict) -> None:
-    """Apply secret inheritance chains so operators don't have to duplicate keys.
+def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
+    """Apply secret + endpoint inheritance chains so operators don't have to duplicate values.
+
+    Renamed from ``_apply_api_key_fallbacks`` (F7, TODO-3-609) when endpoint
+    inheritance was added — the original name is no longer accurate. Operators
+    repeatedly hit the footgun of setting ``EB_LLM_ENDPOINT`` to a remote
+    LiteLLM proxy and finding compaction pinned to ``localhost`` because the
+    derived endpoints didn't share the inheritance pattern with api_key.
 
     Inheritance tiers:
       1. ``llm.api_key`` ← ``cognee.embedding_api_key`` (if llm.api_key empty)
       2. ``compaction_llm.api_key`` / ``successful_use.api_key`` /
          ``blocker_extraction.api_key`` ← ``llm.api_key`` (each only if its own value is empty)
+      3. ``compaction_llm.endpoint`` ← ``llm.endpoint`` (if compaction_llm.endpoint empty)
 
     The fallbacks fire only when the target field is empty after env override
     application — explicit YAML or env values are always respected.
@@ -559,6 +581,17 @@ def _apply_api_key_fallbacks(yaml_data: dict) -> None:
             sec = yaml_data.setdefault(section, {})
             if not sec.get("api_key"):
                 sec["api_key"] = llm_key
+
+    # Tier 3 (F7): compaction_llm.endpoint ← llm.endpoint
+    # Only compaction_llm participates in endpoint inheritance for now —
+    # successful_use and blocker_extraction still default to host.docker.internal
+    # and have their own per-host overrides via env. F8 fixes those defaults
+    # to localhost; widening endpoint inheritance to them is a follow-up.
+    llm_endpoint = llm.get("endpoint", "")
+    if llm_endpoint:
+        compaction = yaml_data.setdefault("compaction_llm", {})
+        if not compaction.get("endpoint"):
+            compaction["endpoint"] = llm_endpoint
 
 
 class ElephantBrokerConfig(_StrictBase):
@@ -617,10 +650,11 @@ class ElephantBrokerConfig(_StrictBase):
         relying on the env var path, so the registry doubles as the
         contract test target (see ``test_every_binding_applies``).
 
-        After env overrides are applied, ``_apply_api_key_fallbacks()`` runs
+        After env overrides are applied, ``_apply_inheritance_fallbacks()`` runs
         to populate empty derived secrets (compaction_llm, successful_use,
-        blocker_extraction) from ``llm.api_key``, and to populate
-        ``llm.api_key`` from ``cognee.embedding_api_key`` if both are empty.
+        blocker_extraction) from ``llm.api_key``, populate ``llm.api_key`` from
+        ``cognee.embedding_api_key`` if both are empty, and copy ``llm.endpoint``
+        into ``compaction_llm.endpoint`` when the latter is empty (F7).
 
         The merged dict is re-validated through ``cls.model_validate()`` so any
         type or constraint violation (e.g. ``EB_EMBEDDING_DIMENSIONS=0`` would
@@ -634,7 +668,7 @@ class ElephantBrokerConfig(_StrictBase):
         yaml_config = cls(**data)
         yaml_data = yaml_config.model_dump()
         _apply_env_overrides(yaml_data)
-        _apply_api_key_fallbacks(yaml_data)
+        _apply_inheritance_fallbacks(yaml_data)
         return cls.model_validate(yaml_data)
 
     @classmethod
