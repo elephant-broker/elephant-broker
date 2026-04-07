@@ -144,9 +144,11 @@ else
     uv sync --frozen --no-dev
 fi
 
-# Re-install HITL middleware (it lives outside the lockfile, in a sub-package)
-log "  uv pip install hitl-middleware"
-uv pip install --quiet "$PREFIX/hitl-middleware"
+# Workspace mode: hitl-middleware is a [tool.uv.workspace] member of the
+# root pyproject.toml, so the `uv sync` above already covers it. Before
+# the workspace conversion this script ran a separate `uv pip install` —
+# that bypassed the lockfile entirely and let the HITL service drift
+# from the runtime on every update.
 
 # Cognee writable directories: re-create in case a fresh sync wiped them
 COGNEE_DIR=$(find "$PREFIX/.venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1 || true)

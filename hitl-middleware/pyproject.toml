@@ -2,8 +2,15 @@
 name = "hitl-middleware"
 version = "0.1.0"
 description = "Human-in-the-Loop middleware for ElephantBroker guard approval workflows"
-requires-python = ">=3.11"
+# Match the root project's Python range exactly. uv workspace members must
+# resolve against the same Python version as the root or `uv lock` rejects
+# the workspace as inconsistent.
+requires-python = ">=3.11,<3.13"
 license = "AGPL-3.0-only"
+# Floor-only constraints — the root uv.lock is authoritative for the actual
+# resolved versions in workspace mode. These floors only matter if someone
+# installs hitl-middleware standalone (outside the workspace), which our
+# deploy scripts no longer do.
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -12,6 +19,12 @@ dependencies = [
     "opentelemetry-api>=1.24",
     "opentelemetry-sdk>=1.24",
 ]
+
+[project.scripts]
+# Console script entry point — installed into .venv/bin/hitl-middleware
+# by `uv sync`. The systemd unit calls this binary directly instead of
+# `python -m hitl_middleware` (resolves TODO-3-323 / TODO-3-610).
+hitl-middleware = "hitl_middleware.__main__:main"
 
 [project.optional-dependencies]
 dev = [

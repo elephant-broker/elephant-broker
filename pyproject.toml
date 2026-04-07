@@ -48,6 +48,20 @@ scenario = [
     "PyNaCl==1.6.2",
 ]
 
+[tool.uv]
+# Explicit declaration that this project is uv-managed (default for projects
+# with a uv.lock, but stating it makes the workspace mode unambiguous).
+managed = true
+
+[tool.uv.workspace]
+# hitl-middleware is a sibling package in the same monorepo. Declaring it
+# as a workspace member makes the root uv.lock authoritative for BOTH
+# packages — `uv sync --frozen` covers them in one atomic operation.
+# Before this change, install.sh / update.sh ran a separate `uv pip install`
+# against hitl-middleware/, which bypassed the lockfile entirely and let
+# the HITL service drift from the runtime on every install.
+members = ["hitl-middleware"]
+
 [tool.setuptools.packages.find]
 include = ["elephantbroker*"]
 

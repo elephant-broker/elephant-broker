@@ -40,7 +40,13 @@ Group=elephantbroker
 # --- Filesystem ---
 WorkingDirectory=/var/lib/elephantbroker
 EnvironmentFile=/etc/elephantbroker/hitl.env
-ExecStart=/opt/elephantbroker/.venv/bin/python -m hitl_middleware
+# Console script entry point installed by `uv sync` from
+# hitl-middleware/pyproject.toml [project.scripts]. The previous form
+# (`python -m hitl_middleware`) worked but bypassed the entry point machinery
+# and made the unit harder to introspect (`systemctl cat` showed only `python`,
+# not the actual binary). Use the binary form for clarity and consistency
+# with the main runtime unit which uses /opt/elephantbroker/.venv/bin/elephantbroker.
+ExecStart=/opt/elephantbroker/.venv/bin/hitl-middleware
 
 # --- Restart policy ---
 Restart=on-failure

@@ -29,6 +29,59 @@ always**. Never commit one without the other.
 
 ---
 
+## Workspace structure
+
+This repository is a **uv workspace** with two member packages:
+
+| Package | Path | Role |
+|---|---|---|
+| `elephantbroker` | `/` (root `pyproject.toml`) | Main runtime — FastAPI server, Cognee adapters, working set, etc. |
+| `hitl-middleware` | `hitl-middleware/pyproject.toml` | Human-in-the-loop approval service (separate process, port 8421) |
+
+The workspace is declared in the **root** `pyproject.toml`:
+
+```toml
+[tool.uv]
+managed = true
+
+[tool.uv.workspace]
+members = ["hitl-middleware"]
+```
+
+**The root `uv.lock` is the single source of truth for both packages.**
+A single `uv sync --frozen --no-dev` installs both into the same `.venv`,
+with versions that satisfy both packages' constraints simultaneously. This
+gives bit-for-bit reproducibility across the entire monorepo.
+
+### What this means for dep upgrades
+
+- **Adding/bumping a dep used by `elephantbroker`** — edit the root
+  `pyproject.toml`, run `uv lock`, commit both root files. Same flow as
+  before workspaces existed.
+- **Adding/bumping a dep used by `hitl-middleware`** — edit
+  `hitl-middleware/pyproject.toml`, run `uv lock` from the **repo root**
+  (NOT from inside `hitl-middleware/`), commit BOTH `hitl-middleware/pyproject.toml`
+  AND the root `uv.lock`. The lockfile lives at the root regardless of
+  which member's deps changed.
+- **Never run `uv pip install` against `hitl-middleware/`** — that
+  bypasses the lockfile and reintroduces the dependency-drift bug the
+  workspace conversion was meant to fix. The deploy scripts (`install.sh`,
+  `update.sh`) used to do this and have been corrected.
+- **`uv sync --frozen --no-dev` is the production install command** for
+  both packages — no separate install step for HITL.
+
+### Why workspaces (not separate lockfiles)
+
+`hitl-middleware` and `elephantbroker` share several runtime dependencies
+(`fastapi`, `httpx`, `pydantic`, `opentelemetry-*`). Without workspaces,
+each package would have its own `uv.lock` and the two could resolve to
+different versions of the shared deps — meaning the HITL service running
+in the same `.venv` as the runtime would be testing against fastapi 0.110
+while the runtime ran against 0.135. Workspaces force a single resolution
+over the union of all members' constraints, eliminating that drift.
+
+---
+
 ## Why uv (not pip)
 
 Reproducible builds and dependency hygiene. The reasoning:
