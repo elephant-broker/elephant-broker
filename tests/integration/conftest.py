@@ -21,6 +21,13 @@ os.environ.setdefault("EB_NEO4J_USER", "neo4j")
 os.environ.setdefault("EB_NEO4J_PASSWORD", "testpassword")
 os.environ.setdefault("EB_QDRANT_URL", "http://localhost:16333")
 os.environ.setdefault("EB_REDIS_URL", "redis://localhost:16379")
+# Pin embedding model + dims to known-working OpenAI values regardless of
+# what the schema default happens to be at any given time. Cognee uses tiktoken
+# for tokenization and tiktoken only knows OpenAI model names — passing it a
+# Gemini model name (e.g. text-embedding-004) raises KeyError at engine init.
+# Tests must be deterministic, so we pin to a tiktoken-mappable name.
+os.environ.setdefault("EB_EMBEDDING_MODEL", "openai/text-embedding-3-large")
+os.environ.setdefault("EB_EMBEDDING_DIMENSIONS", "1024")
 
 
 @pytest.fixture(scope="session")
