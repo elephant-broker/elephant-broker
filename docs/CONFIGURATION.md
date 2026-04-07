@@ -37,13 +37,14 @@ EB_NEO4J_PASSWORD=elephant_dev
 EB_QDRANT_URL=http://localhost:6333
 EB_REDIS_URL=redis://localhost:6379
 
-# LLM (required)
-EB_LLM_MODEL=openai/gemini-2.5-pro
+# LLM (required) — openai/ prefix REQUIRED (Cognee strips it before sending to LiteLLM)
+EB_LLM_MODEL=openai/gemini/gemini-2.5-pro
 EB_LLM_API_KEY=your-api-key-here
 EB_LLM_ENDPOINT=http://localhost:8811/v1  # LiteLLM proxy
 
-# Embedding (required)
-EB_EMBEDDING_MODEL=openai/text-embedding-3-large
+# Embedding (required) — must match what your LiteLLM proxy serves
+EB_EMBEDDING_MODEL=gemini/text-embedding-004
+EB_EMBEDDING_DIMENSIONS=768
 EB_EMBEDDING_API_KEY=your-api-key-here
 
 # Gateway identity (required)
@@ -128,7 +129,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
 |----------|----------|---------|------|---------|----------------|---------|----------------------|
 | `EB_LLM_API_KEY` | **Yes** (if endpoint needs auth) | `""` (falls back to `EB_EMBEDDING_API_KEY`) | string | Python runtime | API key | **Yes** | Yes |
-| `EB_LLM_MODEL` | No | `"gemini/gemini-2.5-pro"` | string | Python runtime | `openai/gemini/gemini-2.5-pro`, `openai/gpt-4o` | No | Yes |
+| `EB_LLM_MODEL` | No | `"openai/gemini/gemini-2.5-pro"` | string | Python runtime | `openai/gemini/gemini-2.5-pro`, `openai/gpt-4o` | No | Yes |
 | `EB_LLM_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | `http://litellm:8811/v1` | No | Yes |
 | `EB_LLM_MAX_TOKENS` | No | `8192` | int | Python runtime | `8192`, `16384` | No | No |
 | `EB_LLM_TEMPERATURE` | No | `0.1` | float | Python runtime | `0.1`, `0.3` | No | No |
@@ -144,9 +145,9 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 |----------|----------|---------|------|---------|----------------|---------|----------------------|
 | `EB_EMBEDDING_API_KEY` | No | `""` | string | Python runtime | API key | **Yes** | Yes |
 | `EB_EMBEDDING_PROVIDER` | No | `"openai"` | string | Python runtime | `openai` | No | No |
-| `EB_EMBEDDING_MODEL` | No | `"openai/text-embedding-3-large"` | string | Python runtime | `openai/text-embedding-3-large` | No | No |
+| `EB_EMBEDDING_MODEL` | No | `"gemini/text-embedding-004"` | string | Python runtime | `gemini/text-embedding-004`, `openai/text-embedding-3-large` | No | No |
 | `EB_EMBEDDING_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | `http://litellm:8811/v1` | No | No |
-| `EB_EMBEDDING_DIMENSIONS` | No | `1024` | int | Python runtime | `1024`, `3072` | No | No |
+| `EB_EMBEDDING_DIMENSIONS` | No | `768` | int | Python runtime | `768`, `1024`, `3072` | No | No |
 | `EB_EMBEDDING_CACHE_ENABLED` | No | `true` | bool | Python runtime | `true`, `false` | No | No |
 | `EB_EMBEDDING_CACHE_TTL` | No | `3600` | int (seconds) | Python runtime | `3600`, `7200` | No | No |
 
@@ -341,12 +342,12 @@ cognee:
   qdrant_url: http://qdrant:6333
 
 llm:
-  model: openai/gemini-2.5-pro
+  model: openai/gemini/gemini-2.5-pro
   api_key: your-api-key-here
   endpoint: http://litellm:8811/v1
 
 embedding:
-  model: openai/text-embedding-3-large
+  model: gemini/text-embedding-004
 
 redis:
   url: redis://redis:6379
@@ -427,13 +428,13 @@ cognee:
   qdrant_url: "http://10.10.0.10:6333"
   default_dataset: elephantbroker
   embedding_provider: openai
-  embedding_model: "openai/text-embedding-3-large"
+  embedding_model: "gemini/text-embedding-004"
   embedding_endpoint: "http://10.10.0.10:8811/v1"
   embedding_api_key: ""
-  embedding_dimensions: 1024
+  embedding_dimensions: 768
 
 llm:
-  model: "gemini/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://10.10.0.10:8811/v1"
   api_key: ""
   max_tokens: 8192
@@ -492,10 +493,10 @@ Path prefix: `cognee.*`
 | `cognee.qdrant_url` | `str` | `"http://localhost:6333"` | `EB_QDRANT_URL` | -- | Qdrant vector store HTTP URL for embedding storage and similarity search | Wrong URL = no vector search; retrieval degrades to graph-only | `http://localhost:6333` / `http://qdrant-staging:6333` / `http://qdrant-prod:6333` |
 | `cognee.default_dataset` | `str` | `"elephantbroker"` | `EB_DEFAULT_DATASET` | -- | Default Cognee dataset name (prefixed with `{gateway_id}__` at runtime) | Wrong name = data isolation issues between deployments | `elephantbroker` / `elephantbroker` / `elephantbroker` |
 | `cognee.embedding_provider` | `str` | `"openai"` | `EB_EMBEDDING_PROVIDER` | -- | Embedding provider name passed to Cognee config; must be `"openai"` for LiteLLM-compatible endpoints | Wrong provider = embedding calls fail | `openai` / `openai` / `openai` |
-| `cognee.embedding_model` | `str` | `"openai/text-embedding-3-large"` | `EB_EMBEDDING_MODEL` | -- | Embedding model name (must include `openai/` prefix for Cognee compatibility via LiteLLM) | Missing `openai/` prefix causes Cognee to route to wrong provider; wrong model = dimension mismatch or API errors | `openai/text-embedding-3-large` / same / same |
+| `cognee.embedding_model` | `str` | `"gemini/text-embedding-004"` | `EB_EMBEDDING_MODEL` | -- | Embedding model name routed by LiteLLM. Provider-prefixed (`gemini/`, `openai/`, etc.). Cognee uses the OpenAI client style regardless of backend. | Wrong model = dimension mismatch or API errors; must match what your LiteLLM proxy actually serves | `gemini/text-embedding-004` / same / `openai/text-embedding-3-large` |
 | `cognee.embedding_endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_EMBEDDING_ENDPOINT` | -- | OpenAI-compatible embedding API endpoint (typically LiteLLM proxy) | Wrong endpoint = all embedding operations fail, no vector search, no dedup | `http://localhost:8811/v1` / `http://litellm-staging:8811/v1` / `http://litellm-prod:8811/v1` |
 | `cognee.embedding_api_key` | `str` | `""` | `EB_EMBEDDING_API_KEY` | -- | API key for embedding endpoint; also used as fallback for `llm.api_key` in `from_env()` | Missing key = 401 from embedding endpoint (unless endpoint is unauthenticated) | `""` (local) / `sk-...` / `sk-...` |
-| `cognee.embedding_dimensions` | `int` | `1024` | `EB_EMBEDDING_DIMENSIONS` | `ge=1` | Embedding vector dimensionality; must match model's actual output dimensions | Mismatch = Qdrant collection creation failure or corrupted similarity scores | `1024` / `1024` / `1024` |
+| `cognee.embedding_dimensions` | `int` | `768` | `EB_EMBEDDING_DIMENSIONS` | `ge=1` | Embedding vector dimensionality; MUST match the configured `embedding_model`'s actual output dimensions | Mismatch = Qdrant collection creation failure or corrupted similarity scores. Changing this on existing data orphans the Qdrant collections — requires re-cognify | `768` (gemini/text-embedding-004) / same / `1024` (openai/text-embedding-3-large) |
 
 ---
 
@@ -505,7 +506,7 @@ Path prefix: `llm.*`
 
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
-| `llm.model` | `str` | `"gemini/gemini-2.5-pro"` | `EB_LLM_MODEL` | -- | Primary LLM model name for fact extraction, memory class classification, supersession detection, goal refinement | Wrong model = API errors or poor extraction quality | `gemini/gemini-2.5-pro` / same / same |
+| `llm.model` | `str` | `"openai/gemini/gemini-2.5-pro"` | `EB_LLM_MODEL` | -- | Primary LLM model name for fact extraction, memory class classification, supersession detection, goal refinement. **MUST keep `openai/` prefix** — Cognee requires it for routing through its OpenAI-compatible client and strips it internally before sending to LiteLLM (LiteLLM sees `gemini/gemini-2.5-pro`). | Without `openai/` prefix, Cognee hangs at startup on the LLM connection test. Wrong model = API errors or poor extraction quality | `openai/gemini/gemini-2.5-pro` / same / same |
 | `llm.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_LLM_ENDPOINT` | -- | OpenAI-compatible LLM API endpoint (LiteLLM proxy) | Wrong endpoint = all LLM-based pipelines fail (extraction, classification, summarization) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
 | `llm.api_key` | `str` | `""` | `EB_LLM_API_KEY` | -- | API key for LLM endpoint; in `from_env()`, falls back to `EB_EMBEDDING_API_KEY` if empty | Missing key = 401 from LLM endpoint | `""` (local) / `sk-...` / `sk-...` |
 | `llm.max_tokens` | `int` | `8192` | `EB_LLM_MAX_TOKENS` | `ge=1` | Max output tokens for general LLM calls | Too low = truncated responses; too high = wasted tokens/cost | `8192` / `8192` / `8192` |
@@ -996,9 +997,9 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` | `str` | `""` |
 | `EB_EMBEDDING_CACHE_ENABLED` | `embedding_cache.enabled` | `bool` | `true` |
 | `EB_EMBEDDING_CACHE_TTL` | `embedding_cache.ttl_seconds` | `int` | `3600` |
-| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `int` | `1024` |
+| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `int` | `768` |
 | `EB_EMBEDDING_ENDPOINT` | `cognee.embedding_endpoint` | `str` | `http://localhost:8811/v1` |
-| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `str` | `openai/text-embedding-3-large` |
+| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `str` | `gemini/text-embedding-004` |
 | `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `str` | `openai` |
 | `EB_ENABLE_GUARDS` | `enable_guards` | `bool` | `true` |
 | `EB_ENABLE_TRACE_LEDGER` | `enable_trace_ledger` | `bool` | `true` |
@@ -1016,7 +1017,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` | `llm.extraction_max_input_tokens` | `int` | `4000` |
 | `EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS` | `llm.extraction_max_output_tokens` | `int` | `16384` |
 | `EB_LLM_MAX_TOKENS` | `llm.max_tokens` | `int` | `8192` |
-| `EB_LLM_MODEL` | `llm.model` | `str` | `gemini/gemini-2.5-pro` |
+| `EB_LLM_MODEL` | `llm.model` | `str` | `openai/gemini/gemini-2.5-pro` |
 | `EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS` | `llm.summarization_max_output_tokens` | `int` | `200` |
 | `EB_LLM_SUMMARIZATION_MIN_CHARS` | `llm.summarization_min_artifact_chars` | `int` | `500` |
 | `EB_LLM_TEMPERATURE` | `llm.temperature` | `float` | `0.1` |
@@ -1935,8 +1936,8 @@ The `ElephantBrokerConfig` Pydantic model contains 25+ config sections. Top-leve
 | Section | Purpose | Key Defaults |
 |---------|---------|-------------|
 | `gateway` | Gateway/agent/org identity | `gateway_id: "local"`, `agent_authority_level: 0` |
-| `cognee` | Neo4j + Qdrant + Embedding config | `embedding_model: "openai/text-embedding-3-large"`, `embedding_dimensions: 1024` |
-| `llm` | LLM for extraction/classification | `model: "gemini/gemini-2.5-pro"`, `temperature: 0.1`, `max_tokens: 8192` |
+| `cognee` | Neo4j + Qdrant + Embedding config | `embedding_model: "gemini/text-embedding-004"`, `embedding_dimensions: 768` |
+| `llm` | LLM for extraction/classification | `model: "openai/gemini/gemini-2.5-pro"`, `temperature: 0.1`, `max_tokens: 8192` |
 | `reranker` | Cross-encoder reranking | `model: "Qwen/Qwen3-Reranker-4B"`, `endpoint: "http://localhost:1235"`, `timeout: 10s` |
 | `infra` | Redis + OTEL + ClickHouse | `redis_url: "redis://localhost:6379"` |
 | `scoring` | Working set scoring pipeline | `neutral_use_prior: 0.5`, `cheap_prune_max_candidates: 80` |
@@ -2788,7 +2789,7 @@ One exception: the **embedding cache** is globally scoped (`eb:emb_cache:{hash}`
 
 | # | Key Pattern | Data Type | TTL | Written By | Read By | Size Estimate | Eviction Impact |
 |---|-------------|-----------|-----|------------|---------|---------------|-----------------|
-| 20 | `eb:emb_cache:{sha256_hash_32}` | STRING (JSON float array) | `embedding_cache.ttl_seconds` default 3600s (1h) | `CachedEmbeddingService.embed_text()` and `.embed_batch()` via `setex` / pipeline `setex` | `CachedEmbeddingService.embed_text()` / `.embed_batch()` via `get` / `mget` | 4-8 KB per entry (1024-dimension float array as JSON; text-embedding-3-large produces 1024 dims at default config) | Cache miss; triggers a call to the embedding API. Increases latency by ~50-200ms per miss. Fully self-healing. |
+| 20 | `eb:emb_cache:{sha256_hash_32}` | STRING (JSON float array) | `embedding_cache.ttl_seconds` default 3600s (1h) | `CachedEmbeddingService.embed_text()` and `.embed_batch()` via `setex` / pipeline `setex` | `CachedEmbeddingService.embed_text()` / `.embed_batch()` via `get` / `mget` | ~3-6 KB per entry at 768 dims (gemini/text-embedding-004 default); ~4-8 KB at 1024 dims (openai/text-embedding-3-large) | Cache miss; triggers a call to the embedding API. Increases latency by ~50-200ms per miss. Fully self-healing. |
 
 ### 4. TTL Summary
 
@@ -3300,19 +3301,19 @@ Collections are auto-created by Cognee's `add_data_points()` from the `metadata.
 
 | Collection | DataPoint Class | Field | Dimension | Distance | Usage |
 |------------|----------------|-------|-----------|----------|-------|
-| `FactDataPoint_text` | FactDataPoint | text | 1024 | Cosine (Cognee default) | Primary fact search, dedup, direct vector fallback |
-| `ActorDataPoint_display_name` | ActorDataPoint | display_name | 1024 | Cosine | Actor discovery |
-| `GoalDataPoint_title` | GoalDataPoint | title | 1024 | Cosine | Goal search |
-| `GoalDataPoint_description` | GoalDataPoint | description | 1024 | Cosine | Goal search |
-| `ProcedureDataPoint_name` | ProcedureDataPoint | name | 1024 | Cosine | Procedure discovery |
-| `ProcedureDataPoint_description` | ProcedureDataPoint | description | 1024 | Cosine | Procedure discovery |
-| `ClaimDataPoint_claim_text` | ClaimDataPoint | claim_text | 1024 | Cosine | Claim search |
-| `EvidenceDataPoint_ref_value` | EvidenceDataPoint | ref_value | 1024 | Cosine | Evidence search |
-| `ArtifactDataPoint_summary` | ArtifactDataPoint | summary | 1024 | Cosine | Artifact search |
-| `OrganizationDataPoint_name` | OrganizationDataPoint | name | 1024 | Cosine | Org discovery |
-| `TeamDataPoint_name` | TeamDataPoint | name | 1024 | Cosine | Team discovery |
+| `FactDataPoint_text` | FactDataPoint | text | 768 | Cosine (Cognee default) | Primary fact search, dedup, direct vector fallback |
+| `ActorDataPoint_display_name` | ActorDataPoint | display_name | 768 | Cosine | Actor discovery |
+| `GoalDataPoint_title` | GoalDataPoint | title | 768 | Cosine | Goal search |
+| `GoalDataPoint_description` | GoalDataPoint | description | 768 | Cosine | Goal search |
+| `ProcedureDataPoint_name` | ProcedureDataPoint | name | 768 | Cosine | Procedure discovery |
+| `ProcedureDataPoint_description` | ProcedureDataPoint | description | 768 | Cosine | Procedure discovery |
+| `ClaimDataPoint_claim_text` | ClaimDataPoint | claim_text | 768 | Cosine | Claim search |
+| `EvidenceDataPoint_ref_value` | EvidenceDataPoint | ref_value | 768 | Cosine | Evidence search |
+| `ArtifactDataPoint_summary` | ArtifactDataPoint | summary | 768 | Cosine | Artifact search |
+| `OrganizationDataPoint_name` | OrganizationDataPoint | name | 768 | Cosine | Org discovery |
+| `TeamDataPoint_name` | TeamDataPoint | name | 768 | Cosine | Team discovery |
 
-Dimension is set by `CogneeConfig.embedding_dimensions` (default 1024, matching `text-embedding-3-large` with truncation). Distance metric is Cognee's default (cosine similarity).
+Dimension is set by `CogneeConfig.embedding_dimensions` (default 768, matching `gemini/text-embedding-004`). If you switch to `openai/text-embedding-3-large`, set dimensions to 1024 (or 3072 for full output). Distance metric is Cognee's default (cosine similarity).
 
 #### Directly Referenced Collections
 
@@ -3397,7 +3398,7 @@ async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = 
 ```python
 cognee.config.set_llm_config({
     "llm_provider": "openai",
-    "llm_model": llm_config.model,       # default: "gemini/gemini-2.5-pro"
+    "llm_model": llm_config.model,       # default: "openai/gemini/gemini-2.5-pro"
     "llm_endpoint": llm_config.endpoint,  # default: "http://localhost:8811/v1"
     "llm_api_key": llm_config.api_key,
 })
@@ -3406,9 +3407,9 @@ cognee.config.set_llm_config({
 **Embedding configuration (for chunk/triplet embedding during `cognify()`):**
 
 ```python
-embedding_cfg.embedding_provider = config.embedding_provider    # "openai"
-embedding_cfg.embedding_model = config.embedding_model          # "openai/text-embedding-3-large"
-embedding_cfg.embedding_dimensions = config.embedding_dimensions # 1024
+embedding_cfg.embedding_provider = config.embedding_provider    # "openai" (API client style, not vendor)
+embedding_cfg.embedding_model = config.embedding_model          # "gemini/text-embedding-004"
+embedding_cfg.embedding_dimensions = config.embedding_dimensions # 768
 embedding_cfg.embedding_endpoint = config.embedding_endpoint     # "http://localhost:8811/v1"
 embedding_cfg.embedding_api_key = config.embedding_api_key
 ```
@@ -3455,7 +3456,7 @@ The `EmbeddingService` (`elephantbroker/runtime/adapters/cognee/embeddings.py`) 
 
 ```python
 POST {endpoint}/embeddings
-{"model": "openai/text-embedding-3-large", "input": texts}
+{"model": "gemini/text-embedding-004", "input": texts}  # whatever EB_EMBEDDING_MODEL is set to
 ```
 
 - Timeout: 30 seconds
@@ -4017,11 +4018,11 @@ cognee:
   neo4j_password: "elephant_dev"                     # EB_NEO4J_PASSWORD
   qdrant_url: "http://localhost:6333"                # EB_QDRANT_URL
   default_dataset: "elephantbroker"                  # EB_DEFAULT_DATASET
-  embedding_provider: "openai"                       # EB_EMBEDDING_PROVIDER
-  embedding_model: "openai/text-embedding-3-large"   # EB_EMBEDDING_MODEL
+  embedding_provider: "openai"                       # EB_EMBEDDING_PROVIDER (API client style, not vendor)
+  embedding_model: "gemini/text-embedding-004"       # EB_EMBEDDING_MODEL
   embedding_endpoint: "http://localhost:8811/v1"      # EB_EMBEDDING_ENDPOINT
   embedding_api_key: ""                              # EB_EMBEDDING_API_KEY
-  embedding_dimensions: 1024                         # EB_EMBEDDING_DIMENSIONS
+  embedding_dimensions: 768                          # EB_EMBEDDING_DIMENSIONS — must match model output
 
 ## --- LLM (extraction, classification, summarization) ---
 llm:
@@ -4280,11 +4281,11 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `from
 | `EB_QDRANT_URL` | `cognee.qdrant_url` | `"http://localhost:6333"` |
 | `EB_DEFAULT_DATASET` | `cognee.default_dataset` | `"elephantbroker"` |
 | `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `"openai"` |
-| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `"openai/text-embedding-3-large"` |
+| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `"gemini/text-embedding-004"` |
 | `EB_EMBEDDING_ENDPOINT` | `cognee.embedding_endpoint` | `"http://localhost:8811/v1"` |
 | `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` | `""` |
-| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `1024` |
-| `EB_LLM_MODEL` | `llm.model` | `"gemini/gemini-2.5-pro"` |
+| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `768` |
+| `EB_LLM_MODEL` | `llm.model` | `"openai/gemini/gemini-2.5-pro"` |
 | `EB_LLM_ENDPOINT` | `llm.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_LLM_API_KEY` | `llm.api_key` | `""` |
 | `EB_LLM_MAX_TOKENS` | `llm.max_tokens` | `8192` |
@@ -4898,9 +4899,9 @@ These are the canonical defaults set in `ElephantBrokerConfig.from_env()` and th
 | config.py:11 | `"bolt://localhost:7687"` | Neo4j connection URI | Dev default, `EB_NEO4J_URI` overrides | None -- connection fails if wrong |
 | config.py:13 | `"elephant_dev"` | Neo4j password | Dev default, `EB_NEO4J_PASSWORD` overrides | Security risk if deployed with default |
 | config.py:14 | `"http://localhost:6333"` | Qdrant URL | Dev default, `EB_QDRANT_URL` overrides | None -- connection fails |
-| config.py:17 | `"openai/text-embedding-3-large"` | Embedding model name | Required by Cognee SDK (must keep `openai/` prefix) | Wrong model = wrong dimensions |
-| config.py:20 | `1024` | Embedding vector dimensions | Must match the model. `EB_EMBEDDING_DIMENSIONS` overrides | Mismatch = Qdrant errors |
-| config.py:25 | `"gemini/gemini-2.5-pro"` | LLM model for extraction | `EB_LLM_MODEL` overrides | Affects extraction quality and cost |
+| config.py:17 | `"gemini/text-embedding-004"` | Embedding model name | LiteLLM-routed; `openai/` provider prefix optional, depends on model | Wrong model = wrong dimensions |
+| config.py:20 | `768` | Embedding vector dimensions | Must match the embedding model's output dim. `EB_EMBEDDING_DIMENSIONS` overrides | Mismatch = Qdrant errors |
+| config.py:29 | `"openai/gemini/gemini-2.5-pro"` | LLM model for extraction | `EB_LLM_MODEL` overrides; `openai/` prefix is REQUIRED by Cognee | Without prefix, Cognee hangs at startup |
 | config.py:28 | `8192` | LLM max output tokens | `EB_LLM_MAX_TOKENS` overrides | Too low = truncated responses |
 | config.py:29 | `0.1` | LLM temperature | `EB_LLM_TEMPERATURE` overrides | >0.5 = non-deterministic extraction |
 | config.py:30 | `4000` | Max input tokens for fact extraction prompt | `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` overrides | Too low = truncated context |
@@ -6670,7 +6671,7 @@ The `from_yaml()` path does NOT implement this fallback. Keys must be explicitly
 
 | Combination | Symptom | Root cause |
 |---|---|---|
-| `cognee.embedding_dimensions: 3072` + existing Qdrant collections at 1024 | Qdrant `400 Bad Request` on vector insert/search | Qdrant collection was created with 1024-dim vectors; new embeddings are 3072-dim. Requires dropping and recreating collections. |
+| `cognee.embedding_dimensions: 1024` + existing Qdrant collections at 768 | Qdrant `400 Bad Request` on vector insert/search | Qdrant collection was created with 768-dim vectors; new embeddings are 1024-dim. Requires dropping and recreating collections. Same applies whenever `embedding_model` changes to one with different output dim. |
 | `infra.redis_url` pointing to nonexistent Redis | Runtime starts but all session state, caching, goals, ingest buffering, working set snapshots, guard history, and HITL queues fail. Most operations log warnings but return degraded results. | Redis is a soft dependency at the container level (line 160-170 of `container.py`), but nearly every feature depends on it at runtime. |
 | `llm.model: "gemini-2.5-pro"` (without `openai/` prefix via LiteLLM) | LLM calls fail silently or route to wrong provider | `LLMClient` strips `openai/` before passing to LiteLLM. If the model name doesn't have the prefix and isn't a valid LiteLLM model spec, calls fail. But Cognee requires `openai/` for its own routing. |
 | `cognee.embedding_model` changed after data exists | New embeddings have different dimensionality or distribution; cosine similarity between old and new vectors is meaningless | Similarity searches return garbage results; dedup detection breaks; retrieval quality collapses. Requires re-indexing all data. |
@@ -6712,7 +6713,7 @@ cognee:
   qdrant_url: "http://localhost:6333"
 
 llm:
-  model: "openai/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://localhost:8811/v1"
   api_key: "your-litellm-key"
 
@@ -6758,10 +6759,11 @@ cognee:
   neo4j_uri: "bolt://neo4j-staging:7687"
   neo4j_password: "staging-secure-pw"
   qdrant_url: "http://qdrant-staging:6333"
-  embedding_dimensions: 1024
+  embedding_model: "gemini/text-embedding-004"
+  embedding_dimensions: 768
 
 llm:
-  model: "openai/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://litellm-staging:8811/v1"
 
 reranker:
@@ -6809,10 +6811,11 @@ cognee:
   neo4j_uri: "bolt://neo4j-prod:7687"
   # neo4j_password via EB_NEO4J_PASSWORD env var (secret)
   qdrant_url: "http://qdrant-prod:6333"
-  embedding_dimensions: 1024
+  embedding_model: "gemini/text-embedding-004"
+  embedding_dimensions: 768
 
 llm:
-  model: "openai/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://litellm-prod:8811/v1"
   # api_key via EB_LLM_API_KEY env var (secret)
   extraction_max_facts_per_batch: 15
@@ -7057,9 +7060,9 @@ The `RuntimeContainer.from_config()` method handles database connection failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| **Cognee operations hang or fail.** `cognee.cognify()` calls Cognee's internal LLM for entity/relationship extraction. Cognee uses the model name as-is from `cognee.config.set_llm_config()`. Without the `openai/` prefix, Cognee may hang trying to route the model. | `EB_LLM_MODEL` set to `gemini-2.5-pro` instead of `openai/gemini-2.5-pro`. Cognee expects the `openai/` prefix for OpenAI-compatible endpoints. | Always use the `openai/` prefix: `EB_LLM_MODEL=openai/gemini-2.5-pro`. |
+| **Cognee operations hang or fail.** `cognee.cognify()` calls Cognee's internal LLM for entity/relationship extraction. Cognee uses the model name as-is from `cognee.config.set_llm_config()`. Without the `openai/` prefix, Cognee may hang trying to route the model. | `EB_LLM_MODEL` set to `gemini/gemini-2.5-pro` instead of `openai/gemini/gemini-2.5-pro`. Cognee expects the `openai/` prefix for OpenAI-compatible endpoints. | Always use the `openai/` prefix: `EB_LLM_MODEL=openai/gemini/gemini-2.5-pro`. |
 | **Direct `LLMClient` calls work fine** even without the prefix | `LLMClient.__init__()` strips the `openai/` prefix before sending to LiteLLM (line 24: `if model.startswith("openai/"): model = model[len("openai/"):]`). So the LLMClient works either way. | The prefix is required for Cognee, optional for LLMClient. Always include it. |
-| **Embedding model similarly needs `openai/` prefix** | `configure_cognee()` passes `config.embedding_model` directly to `embedding_cfg.embedding_model`. Cognee's embedding pipeline also uses the model name for provider routing. | Use `EB_EMBEDDING_MODEL=openai/text-embedding-3-large`. |
+| **Embedding model — `openai/` prefix is OPTIONAL, depends on backend** | `configure_cognee()` passes `config.embedding_model` directly to Cognee's `embedding_cfg.embedding_model`. Unlike the LLM model, the embedding model name is just routed by LiteLLM — `gemini/text-embedding-004` works without prefix because LiteLLM recognizes the `gemini/` provider prefix. | Use the model name your LiteLLM proxy actually serves, e.g. `EB_EMBEDDING_MODEL=gemini/text-embedding-004` (default) or `openai/text-embedding-3-large`. |
 
 #### Wrong LLM Endpoint
 
@@ -7133,7 +7136,7 @@ The `RuntimeContainer.from_config()` method handles database connection failures
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ValidationError: Input should be a valid integer` at startup | YAML value is a string where int is expected (e.g., `max_tokens: "eight thousand"`). Pydantic v2 strict mode is not enabled, so `"8192"` (string of digits) is coerced to `8192`, but `"eight thousand"` fails. | Use numeric values without quotes in YAML. `max_tokens: 8192` not `max_tokens: "eight thousand"`. |
-| `ValidationError: Input should be greater than or equal to 1` at startup | Value violates a Pydantic `Field` constraint. For example, `embedding_dimensions: 0` fails because `Field(default=1024, ge=1)`. | Check the `ge`, `le`, and value constraints defined in `schemas/config.py`. |
+| `ValidationError: Input should be greater than or equal to 1` at startup | Value violates a Pydantic `Field` constraint. For example, `embedding_dimensions: 0` fails because `Field(default=768, ge=1)`. | Check the `ge`, `le`, and value constraints defined in `schemas/config.py`. |
 | Boolean field gets unexpected value | YAML `true`/`false` are native booleans. But `"true"` (quoted) is a string. Pydantic coerces `"true"` -> `True` in non-strict mode, but `"yes"` may not coerce. | Use unquoted `true`/`false` in YAML. |
 | Float field loses precision | YAML float `0.1` is parsed as Python float. This is standard floating-point behavior, not a config error. | Not a problem in practice. |
 

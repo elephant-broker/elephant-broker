@@ -32,7 +32,9 @@ def client(config):
 class TestLLMClientInit:
     def test_init_creates_client(self, client):
         assert client._client is not None
-        assert client._config.model == "gemini/gemini-2.5-pro"
+        # Default LLMConfig.model is "openai/gemini/gemini-2.5-pro" — Cognee requires
+        # the prefix; LLMClient strips it before sending to LiteLLM (see _model).
+        assert client._config.model == "openai/gemini/gemini-2.5-pro"
 
     def test_init_sets_auth_header(self, client):
         assert client._client.headers["authorization"] == "Bearer test-key"

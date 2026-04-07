@@ -16,10 +16,10 @@ class TestCogneeConfig:
     def test_embedding_defaults(self):
         c = CogneeConfig()
         assert c.embedding_provider == "openai"
-        assert c.embedding_model == "openai/text-embedding-3-large"
+        assert c.embedding_model == "gemini/text-embedding-004"
         assert c.embedding_endpoint == "http://localhost:8811/v1"
         assert c.embedding_api_key == ""
-        assert c.embedding_dimensions == 1024
+        assert c.embedding_dimensions == 768
 
     def test_embedding_dimensions_must_be_positive(self):
         from pydantic import ValidationError
@@ -30,7 +30,7 @@ class TestCogneeConfig:
 class TestLLMConfig:
     def test_defaults(self):
         c = LLMConfig()
-        assert c.model == "gemini/gemini-2.5-pro"
+        assert c.model == "openai/gemini/gemini-2.5-pro"
         assert c.endpoint == "http://localhost:8811/v1"
         assert c.api_key == ""
         assert c.max_tokens == 8192
@@ -71,7 +71,7 @@ class TestElephantBrokerConfig:
         c = ElephantBrokerConfig()
         assert c.llm is not None
         assert isinstance(c.llm, LLMConfig)
-        assert c.llm.model == "gemini/gemini-2.5-pro"
+        assert c.llm.model == "openai/gemini/gemini-2.5-pro"
 
     def test_max_sessions_minimum(self):
         with pytest.raises(ValidationError):
@@ -111,7 +111,7 @@ class TestElephantBrokerConfig:
         try:
             c = ElephantBrokerConfig.from_env()
             assert c.llm is not None
-            assert c.llm.model == "gemini/gemini-2.5-pro"
+            assert c.llm.model == "openai/gemini/gemini-2.5-pro"
         finally:
             os.environ.update(saved)
 

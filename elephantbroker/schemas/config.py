@@ -13,16 +13,20 @@ class CogneeConfig(BaseModel):
     neo4j_password: str = "elephant_dev"  # dev/test default — override via EB_NEO4J_PASSWORD in production
     qdrant_url: str = "http://localhost:6333"
     default_dataset: str = "elephantbroker"  # DANGER: changing this orphans all existing Cognee data
-    embedding_provider: str = "openai"
-    embedding_model: str = "openai/text-embedding-3-large"
+    embedding_provider: str = "openai"  # API client style — openai SDK shape works for any LiteLLM-routed backend
+    embedding_model: str = "gemini/text-embedding-004"
     embedding_endpoint: str = "http://localhost:8811/v1"
     embedding_api_key: str = ""
-    embedding_dimensions: int = Field(default=1024, ge=1)
+    embedding_dimensions: int = Field(default=768, ge=1)  # must match embedding_model output dim
 
 
 class LLMConfig(BaseModel):
     """LLM configuration for extraction, classification, and summarization."""
-    model: str = "gemini/gemini-2.5-pro"
+    # Cognee requires the "openai/" prefix to route through its OpenAI-compatible
+    # client. Cognee strips the prefix internally before sending to LiteLLM, so
+    # LiteLLM sees "gemini/gemini-2.5-pro". Without the prefix, Cognee hangs on
+    # the LLM connection test at startup.
+    model: str = "openai/gemini/gemini-2.5-pro"
     endpoint: str = "http://localhost:8811/v1"
     api_key: str = ""
     max_tokens: int = Field(default=8192, ge=1)
@@ -431,15 +435,15 @@ class ElephantBrokerConfig(BaseModel):
             qdrant_url=os.environ.get("EB_QDRANT_URL", "http://localhost:6333"),
             default_dataset=os.environ.get("EB_DEFAULT_DATASET", "elephantbroker"),
             embedding_provider=os.environ.get("EB_EMBEDDING_PROVIDER", "openai"),
-            embedding_model=os.environ.get("EB_EMBEDDING_MODEL", "openai/text-embedding-3-large"),
+            embedding_model=os.environ.get("EB_EMBEDDING_MODEL", "gemini/text-embedding-004"),
             embedding_endpoint=os.environ.get("EB_EMBEDDING_ENDPOINT", "http://localhost:8811/v1"),
             embedding_api_key=os.environ.get("EB_EMBEDDING_API_KEY", ""),
-            embedding_dimensions=int(os.environ.get("EB_EMBEDDING_DIMENSIONS", "1024")),
+            embedding_dimensions=int(os.environ.get("EB_EMBEDDING_DIMENSIONS", "768")),
         )
         embedding_api_key = os.environ.get("EB_EMBEDDING_API_KEY", "")
         llm_api_key = os.environ.get("EB_LLM_API_KEY", "") or embedding_api_key
         llm = LLMConfig(
-            model=os.environ.get("EB_LLM_MODEL", "gemini/gemini-2.5-pro"),
+            model=os.environ.get("EB_LLM_MODEL", "openai/gemini/gemini-2.5-pro"),
             endpoint=os.environ.get("EB_LLM_ENDPOINT", "http://localhost:8811/v1"),
             api_key=llm_api_key,
             max_tokens=int(os.environ.get("EB_LLM_MAX_TOKENS", "8192")),
