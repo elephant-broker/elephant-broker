@@ -152,7 +152,7 @@ compaction_llm:
 # server (vLLM, TEI, etc.) hosting the model.
 
 reranker:
-  enabled: true                         # set false if you don't have a Qwen3-Reranker server — retrieval will fall back to scoring-only ranking
+  enabled: true                         # env: EB_RERANKER_ENABLED — set false if you don't have a Qwen3-Reranker server; retrieval falls back to scoring-only ranking
   endpoint: "http://localhost:1235"     # env: EB_RERANKER_ENDPOINT
   api_key: ""                           # env: EB_RERANKER_API_KEY (secret)
   model: "Qwen/Qwen3-Reranker-4B"
@@ -339,7 +339,7 @@ guards:
 # -----------------------------------------------------------------------------
 
 hitl:
-  enabled: false                        # (off) when on, the runtime POSTs approval requests to the HITL middleware service for human review before high-risk actions proceed. Requires hitl-middleware running on default_url
+  enabled: false                        # (off) env: EB_HITL_ENABLED — when on, the runtime POSTs approval requests to the HITL middleware service for human review before high-risk actions proceed. Requires hitl-middleware running on default_url
   default_url: "http://localhost:8421"  # HITL middleware base URL (the runtime calls THIS, not the TS plugin)
   timeout_seconds: 10.0                 # HTTP timeout per call to HITL middleware
   approval_default_timeout_seconds: 300 # how long the runtime waits for a human approval before timing out
@@ -403,6 +403,22 @@ audit:
 
 profile_cache:
   ttl_seconds: 300                      # 5 min — too low = SQLite hammered every request; too high = stale org overrides
+
+
+# -----------------------------------------------------------------------------
+# Consolidation pipeline (Phase 9 — "sleep")
+# -----------------------------------------------------------------------------
+# Two of the most operator-relevant ConsolidationConfig knobs are exposed
+# here as overridable env vars. The full ConsolidationConfig schema lives in
+# elephantbroker/schemas/consolidation.py and additional fields can be added
+# to this section by name (cluster_similarity_threshold, decay_*, etc.) when
+# they need per-deployment tuning. F4 (TODO-3-009): before this section
+# existed, these two vars were read directly from os.environ inside a
+# property, bypassing the registry and the inverse contract test.
+
+consolidation:
+  batch_size: 500                       # env: EB_CONSOLIDATION_BATCH_SIZE — facts loaded per batch from Neo4j during consolidation; ge=50, le=5000
+  dev_auto_trigger_interval: "0"        # env: EB_DEV_CONSOLIDATION_AUTO_TRIGGER — "0" = disabled; supports "1m"/"5m"/"1h"/"1d" for dev. ENABLE IN PRODUCTION ONLY IF YOU WANT THE PIPELINE TO RUN ON A TIMER
 
 
 # -----------------------------------------------------------------------------

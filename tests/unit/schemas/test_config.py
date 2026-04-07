@@ -614,20 +614,22 @@ compaction_llm:
         verify the value reaches the corresponding config field.
 
         This is the contract test: if anyone removes a binding without removing
-        the corresponding from_env() read, this test will fail because that env
-        var stops overriding YAML.
+        the corresponding source-code env var read, this test will fail because
+        that env var stops overriding YAML.
         """
         from elephantbroker.schemas.config import ENV_OVERRIDE_BINDINGS, ElephantBrokerConfig
 
         # Probe values that satisfy ALL field constraints in the bindings list:
-        #   - int=12345  (smallest constraint is ge=0, largest is ge=3600 — 12345 OK)
-        #   - float=1.5  (temperature constraint 0.0-2.0 AND ingest_batch_timeout >=1.0 — 1.5 OK)
+        #   - int=4096   tightest range is consolidation.batch_size (ge=50, le=5000)
+        #                AND consolidation_min_retention_seconds (ge=3600), so the
+        #                probe must sit inside [3600, 5000]. 4096 is the cleanest fit.
+        #   - float=1.5  temperature ge=0.0/le=2.0 AND ingest_batch_timeout ge=1.0 — 1.5 OK
         #   - bool=true
-        #   - str="probe-{var.lower()}"  (unique per var so we can verify the right value lands in the right field)
+        #   - str="probe-{var.lower()}"  unique per var so we can verify the right value lands in the right field
         expected: list[tuple[str, object]] = []
         for env_var, dotted_path, coercer in ENV_OVERRIDE_BINDINGS:
             if coercer == "int":
-                raw, exp = "12345", 12345
+                raw, exp = "4096", 4096
             elif coercer == "float":
                 raw, exp = "1.5", 1.5
             elif coercer == "bool":
@@ -661,3 +663,126 @@ compaction_llm:
         valid = {"str", "int", "float", "bool", "str_or_none"}
         for env_var, _, coercer in ENV_OVERRIDE_BINDINGS:
             assert coercer in valid, f"{env_var}: unknown coercer {coercer!r}"
+
+
+# =============================================================================
+# Inverse contract — env vars referenced in source code MUST be in the registry
+# =============================================================================
+#
+# F1 (TODO-3-312/208/607). The forward contract test above (`test_every_binding_applies`)
+# verifies every entry in ENV_OVERRIDE_BINDINGS actually overrides its target
+# field. The reverse direction is just as important: every `EB_*` env var the
+# runtime *reads* from the environment MUST appear in the registry — otherwise
+# operators get inconsistent behavior between vars that override YAML and vars
+# that don't, and adding a new env var becomes invisible to the rest of the
+# config system.
+#
+# The walker below greps the `elephantbroker/` source tree for `os.environ[*]`
+# and `os.getenv(*)` reads, extracts the EB_* var names, and asserts each one
+# is either in ENV_OVERRIDE_BINDINGS or in the explicit NON_CONFIG_ENV_VARS
+# allowlist below. The allowlist is for orthogonal vars that legitimately
+# don't belong in the config schema (CLI client args, runtime safety guards,
+# etc.) — keeping it small and explicit is the point.
+
+# Env vars that are intentionally NOT in ENV_OVERRIDE_BINDINGS because they
+# don't configure ElephantBrokerConfig — they're CLI helpers, dev escape
+# hatches, or runtime safety guards. Adding a var here is a deliberate
+# decision: it must come with a code comment in the source explaining why
+# the var lives outside the registry.
+NON_CONFIG_ENV_VARS: set[str] = {
+    # CLI client-side helpers — used by the `ebrun` command to talk to the
+    # runtime, NOT by the runtime itself. They never reach ElephantBrokerConfig.
+    "EB_ACTOR_ID",
+    "EB_RUNTIME_URL",
+    # Runtime safety escape hatches — checked once at bootstrap, not stored
+    # in the config object. These bypass the strict-defaults safety guard
+    # added in Bucket A. Documented in CLAUDE.md (Gateway Identity section).
+    "EB_ALLOW_DEFAULT_GATEWAY_ID",
+    "EB_DEV_MODE",
+    "EB_ALLOW_DATASET_CHANGE",
+}
+
+
+class TestEnvVarRegistryCompleteness:
+    """Inverse contract: every EB_* env var read by the runtime MUST be either
+    in ENV_OVERRIDE_BINDINGS or in NON_CONFIG_ENV_VARS. Drift in either
+    direction is a registry bug."""
+
+    @staticmethod
+    def _walk_source_for_env_vars() -> set[str]:
+        """Walk elephantbroker/ source files and extract every EB_* env var
+        name that appears inside an `os.environ[...]`, `os.environ.get(...)`,
+        or `os.getenv(...)` call.
+
+        Implementation note: a naive `EB_[A-Z0-9_]+` grep would also catch
+        documentation strings and Python identifiers — we anchor specifically
+        on the os.environ/os.getenv access patterns to avoid false positives.
+        """
+        import re
+        from pathlib import Path
+
+        # Anchor pattern: literal `os.environ` or `os.getenv` followed by an
+        # access that contains a quoted EB_* identifier. We allow whitespace
+        # and any chars between the access opener and the var name so calls
+        # like `os.environ.get("EB_FOO", "default")` and `os.environ["EB_BAR"]`
+        # both match. ``re.DOTALL`` is intentionally NOT set — env reads stay
+        # on a single line in this codebase, so we keep `.` line-bounded.
+        pattern = re.compile(
+            r"""os\.(?:environ(?:\.get)?|getenv)\s*[\[\(]\s*['"](EB_[A-Z0-9_]+)['"]"""
+        )
+
+        # Resolve elephantbroker/ relative to this test file so the test still
+        # works under tox / pytest invocation from any cwd.
+        root = Path(__file__).resolve().parent.parent.parent.parent / "elephantbroker"
+        assert root.is_dir(), f"could not locate elephantbroker/ source root at {root}"
+
+        found: set[str] = set()
+        for py_file in root.rglob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for match in pattern.finditer(text):
+                found.add(match.group(1))
+        return found
+
+    def test_no_unregistered_env_var_in_source(self):
+        """Every EB_* env var read in elephantbroker/ source MUST be in either
+        ENV_OVERRIDE_BINDINGS or NON_CONFIG_ENV_VARS. Adding a new EB_* var
+        without updating one of those lists is a registry bug."""
+        from elephantbroker.schemas.config import ENV_OVERRIDE_BINDINGS
+
+        registered = {b[0] for b in ENV_OVERRIDE_BINDINGS}
+        allowed = registered | NON_CONFIG_ENV_VARS
+
+        found_in_source = self._walk_source_for_env_vars()
+        unregistered = found_in_source - allowed
+
+        assert not unregistered, (
+            "The following EB_* env vars are read in elephantbroker/ source "
+            "but are NOT in ENV_OVERRIDE_BINDINGS or NON_CONFIG_ENV_VARS:\n"
+            + "\n".join(f"  - {v}" for v in sorted(unregistered))
+            + "\n\nFix: add the var to ENV_OVERRIDE_BINDINGS in schemas/config.py "
+            "(if it should override a YAML field), or add it to NON_CONFIG_ENV_VARS "
+            "in this test file with a comment explaining why."
+        )
+
+    def test_allowlist_vars_actually_referenced_in_source(self):
+        """Sanity check on the allowlist: every var in NON_CONFIG_ENV_VARS must
+        actually appear somewhere in the source. If a var was removed from
+        the source, the allowlist entry should be removed too — orphan
+        entries hide future bugs."""
+        found_in_source = self._walk_source_for_env_vars()
+        orphans = NON_CONFIG_ENV_VARS - found_in_source
+        assert not orphans, (
+            "The following NON_CONFIG_ENV_VARS entries are no longer referenced "
+            "in elephantbroker/ source — remove them from the allowlist:\n"
+            + "\n".join(f"  - {v}" for v in sorted(orphans))
+        )
+
+    def test_no_overlap_between_registry_and_allowlist(self):
+        """A var should be in ENV_OVERRIDE_BINDINGS XOR NON_CONFIG_ENV_VARS,
+        never both. Overlap means an unintentional duplication of intent."""
+        from elephantbroker.schemas.config import ENV_OVERRIDE_BINDINGS
+        registered = {b[0] for b in ENV_OVERRIDE_BINDINGS}
+        overlap = registered & NON_CONFIG_ENV_VARS
+        assert not overlap, (
+            f"vars listed in BOTH ENV_OVERRIDE_BINDINGS and NON_CONFIG_ENV_VARS: {overlap}"
+        )

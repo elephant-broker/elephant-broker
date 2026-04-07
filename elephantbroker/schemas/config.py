@@ -5,6 +5,13 @@ import os
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Imported at module top for the new `consolidation` regular field (F4 fix).
+# The previous code used a `@property` with a lazy import, claiming a circular
+# dependency — that claim was wrong: schemas/consolidation.py imports nothing
+# from schemas/config.py, so the top-level import here is safe and lets
+# Pydantic discover the field for env-binding application.
+from elephantbroker.schemas.consolidation import ConsolidationConfig
+
 
 class _StrictBase(BaseModel):
     """Base class for every config submodel.
@@ -416,6 +423,12 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_RERANKER_ENDPOINT", "reranker.endpoint", "str"),
     ("EB_RERANKER_API_KEY", "reranker.api_key", "str"),
     ("EB_RERANKER_MODEL", "reranker.model", "str"),
+    # F10 (TODO-3-608): the reranker.enabled toggle was unbound, leaving
+    # operators without a runtime kill-switch when their Qwen3-Reranker
+    # service is unavailable. Adding the binding lets `EB_RERANKER_ENABLED=false`
+    # downgrade retrieval to scoring-only ranking without restarting with a
+    # tuned YAML.
+    ("EB_RERANKER_ENABLED", "reranker.enabled", "bool"),
 
     # --- Infra (Redis + OTEL + log level + metrics) ---
     ("EB_REDIS_URL", "infra.redis_url", "str"),
@@ -442,6 +455,10 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_SESSION_GOALS_TTL", "scoring.session_goals_ttl_seconds", "int"),
 
     # --- HITL ---
+    # F10 (TODO-3-608): same fix as EB_RERANKER_ENABLED — operators need a
+    # runtime toggle for the HITL middleware integration so they can disable
+    # human-in-the-loop without redeploying with a different YAML.
+    ("EB_HITL_ENABLED", "hitl.enabled", "bool"),
     ("EB_HITL_CALLBACK_SECRET", "hitl.callback_hmac_secret", "str"),
 
     # --- Successful-use feedback (Phase 9, off by default) ---
@@ -457,6 +474,15 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_BLOCKER_EXTRACTION_API_KEY", "blocker_extraction.api_key", "str"),
     ("EB_BLOCKER_EXTRACTION_MODEL", "blocker_extraction.model", "str"),
     ("EB_BLOCKER_EXTRACTION_EVERY_N_TURNS", "blocker_extraction.run_every_n_turns", "int"),
+
+    # --- Consolidation pipeline (Phase 9) ---
+    # F4 (TODO-3-009): the two vars below were previously read directly from
+    # os.environ inside an `ElephantBrokerConfig.consolidation` @property —
+    # invisible to this registry, untestable by the contract test, and
+    # racy if the caller mutated the env between bootstrap and first access.
+    # Routing them through the registry kills both bugs.
+    ("EB_DEV_CONSOLIDATION_AUTO_TRIGGER", "consolidation.dev_auto_trigger_interval", "str"),
+    ("EB_CONSOLIDATION_BATCH_SIZE", "consolidation.batch_size", "int"),
 
     # --- Top-level toggles & global limits ---
     ("EB_ENABLE_TRACE_LEDGER", "enable_trace_ledger", "bool"),
@@ -569,17 +595,15 @@ class ElephantBrokerConfig(_StrictBase):
     profile_cache: ProfileCacheConfig = Field(default_factory=ProfileCacheConfig)
     # Phase 9 config sections
     blocker_extraction: BlockerExtractionConfig = Field(default_factory=BlockerExtractionConfig)
-
-    @property
-    def consolidation(self):
-        """Lazy import to avoid circular dependency with schemas/consolidation.py."""
-        from elephantbroker.schemas.consolidation import ConsolidationConfig
-        if not hasattr(self, "_consolidation_cache"):
-            object.__setattr__(self, "_consolidation_cache", ConsolidationConfig(
-                dev_auto_trigger_interval=os.environ.get("EB_DEV_CONSOLIDATION_AUTO_TRIGGER", "0"),
-                batch_size=int(os.environ.get("EB_CONSOLIDATION_BATCH_SIZE", "500")),
-            ))
-        return self._consolidation_cache
+    # F4 (TODO-3-009): consolidation was previously a `@property` that read
+    # EB_DEV_CONSOLIDATION_AUTO_TRIGGER + EB_CONSOLIDATION_BATCH_SIZE directly
+    # from os.environ on first access and cached the result. That created two
+    # bugs: (1) a TOCTOU race — env vars set after the first access were
+    # silently ignored — and (2) the env vars were invisible to
+    # ENV_OVERRIDE_BINDINGS, the registry, and the inverse contract test.
+    # Making it a regular field routes both vars through the standard
+    # registry path so they behave like every other binding.
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
 
     @classmethod
     def from_yaml(cls, path: str) -> ElephantBrokerConfig:
