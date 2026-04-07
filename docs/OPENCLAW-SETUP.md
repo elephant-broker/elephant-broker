@@ -61,7 +61,6 @@ Symlinks make updates easy — `git pull` in `/opt/elephant-broker` updates both
     "vars": {
       "EB_GATEWAY_ID": "gw-prod",
       "EB_RUNTIME_URL": "http://DB_VM_IP:8420",
-      "EB_HITL_URL": "http://DB_VM_IP:8421",
       "EB_GATEWAY_SHORT_NAME": "prod"
     }
   },

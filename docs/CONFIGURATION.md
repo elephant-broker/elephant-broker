@@ -242,7 +242,6 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_GATEWAY_ID` | **Yes** | None (fail if missing) | string | TS Memory + Context plugins | `gw-prod`, `gw-prod-assistant` | No | N/A (TS-only) |
 | `EB_GATEWAY_SHORT_NAME` | No | First 8 chars of `EB_GATEWAY_ID` | string | TS Memory + Context plugins | `prod` | No | N/A (TS-only) |
 | `EB_RUNTIME_URL` | No | `"http://localhost:8420"` | string | TS plugins, `ebrun` CLI, HITL middleware | `http://10.10.0.10:8420` | No | N/A (TS-only) |
-| `EB_HITL_URL` | No | `"http://localhost:8421"` | string | TS plugins (documented), OpenClaw config | `http://10.10.0.10:8421` | No | N/A (TS-only) |
 | `EB_PROFILE` | No | `"coding"` | string | TS Memory + Context plugins | `coding`, `research` | No | N/A (TS-only) |
 
 ### 15. HITL Middleware (separate service)
@@ -2278,7 +2277,6 @@ Critical fields:
 | `EB_RUNTIME_URL` | Both plugins | `http://localhost:8420` | ElephantBroker Python runtime base URL |
 | `EB_GATEWAY_SHORT_NAME` | Both plugins | `EB_GATEWAY_ID.substring(0, 8)` | Human-friendly label for logs/traces |
 | `EB_PROFILE` | Both plugins | `coding` | Profile preset name |
-| `EB_HITL_URL` | OPENCLAW-SETUP ref | `http://localhost:8421` | HITL middleware URL (not directly consumed by TS plugins but documented for workspace) |
 
 #### Config Resolution Order
 
