@@ -29,7 +29,12 @@
 [Unit]
 Description=ElephantBroker Cognitive Runtime
 Documentation=https://github.com/elephant-broker/elephant-broker
-After=network-online.target docker.service
+# D6 (TODO-3-609): docker.service removed from After=. The documented
+# two-VM topology has Docker only on the infra VM (Neo4j/Qdrant/Redis);
+# the runtime VM where this unit lives has no Docker installed at all.
+# systemd silently ignored the missing unit before, but the After= line
+# implied a dependency that does not exist in the supported deployment.
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -54,17 +59,40 @@ RestartSec=5
 TimeoutStartSec=60
 TimeoutStopSec=30
 
+# --- Resource limits ---
+# D2 (TODO-3-322): cap runtime resource usage so a runaway extraction
+# loop, embedding storm, or fork bomb cannot OOM the host and take
+# Neo4j/Qdrant/Redis with it. MemoryMax is the load-bearing one — without
+# it a single bad turn can crash the entire DB VM. Tune per host: the
+# 8G/4-core defaults assume a modest 16G runtime VM; bump CPUQuota and
+# MemoryMax in a /etc/systemd/system/elephantbroker.service.d/ override
+# on larger hosts rather than editing this file in place.
+MemoryMax=8G
+MemoryHigh=6G
+TasksMax=512
+CPUQuota=400%
+LimitNOFILE=65536
+
 # --- Logging ---
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=elephantbroker
 
 # --- Filesystem hardening ---
-# Most of the filesystem is invisible or read-only. Only the runtime's data
-# directory and the venv (where Cognee writes its internal state) are
-# writable. /etc/elephantbroker remains read-only as expected.
+# D1 (TODO-3-311 + TODO-3-605): ReadWritePaths scoped down from the entire
+# /opt/elephantbroker tree to /opt/elephantbroker/.venv/lib. Cognee's only
+# legitimate write targets live under
+# .venv/lib/python*/site-packages/cognee/.cognee_system/ and .data_storage/,
+# both of which are reachable through the .venv/lib root. The previous
+# permissive form re-granted write access to source code, pyproject.toml,
+# uv.lock, every Python module, AND this systemd unit itself — a compromised
+# runtime could rewrite its own code and its own service definition. This
+# pairs with the C3 DAC narrowing (deploy/install.sh keeps /opt/elephantbroker
+# root-owned, only Cognee's writable subdirs chowned to the service user) so
+# the runtime is now write-restricted at BOTH the kernel MAC layer and the
+# DAC ownership layer.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

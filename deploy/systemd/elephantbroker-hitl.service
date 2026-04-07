@@ -27,8 +27,15 @@ Description=ElephantBroker HITL Middleware
 Documentation=https://github.com/elephant-broker/elephant-broker
 # HITL is called by the runtime — runtime must come up first so the
 # health check at the end of HITL startup can verify connectivity back.
+#
+# D5 (TODO-3-015): Wants=elephantbroker.service added (soft dependency,
+# not Requires=). Without this, restarting HITL alone leaves the runtime
+# stopped — the operator hits a silent 401 cascade because callbacks
+# can't reach a non-existent runtime. Wants= triggers the runtime to
+# start when HITL is started, but does NOT cascade-fail HITL if the
+# runtime fails to come up (Requires= would, and that's too strict).
 After=elephantbroker.service network-online.target
-Wants=network-online.target
+Wants=network-online.target elephantbroker.service
 
 [Service]
 Type=simple
@@ -51,17 +58,41 @@ ExecStart=/opt/elephantbroker/.venv/bin/hitl-middleware
 # --- Restart policy ---
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=30
+# D3 (TODO-3-324): bumped from 30s to 60s for symmetry with the main
+# runtime unit (which sits at 60s). The previous asymmetry had no
+# documented justification — HITL imports FastAPI + httpx + pydantic and
+# can take a few seconds longer than expected on a cold uv-synced venv.
+TimeoutStartSec=60
 TimeoutStopSec=15
+
+# --- Resource limits ---
+# D2 (TODO-3-322): HITL is a thin FastAPI service (no Cognee, no embeddings,
+# no LLM in-process), so the caps are an order of magnitude smaller than
+# the main runtime. MemoryMax still matters: a leaky callback handler
+# should not be able to grow without bound and eat into the runtime's
+# headroom on a co-hosted DB VM.
+MemoryMax=512M
+MemoryHigh=384M
+TasksMax=64
+CPUQuota=100%
+LimitNOFILE=4096
 
 # --- Logging ---
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=elephantbroker-hitl
 
-# --- Filesystem hardening (same as main runtime) ---
+# --- Filesystem hardening ---
+# D1 (TODO-3-311 + TODO-3-605): /opt/elephantbroker dropped from
+# ReadWritePaths entirely. The HITL middleware does NOT run Cognee,
+# does NOT touch the embedding store, and has no other legitimate write
+# target inside the install tree. Only /var/lib/elephantbroker stays
+# writable for runtime state (callback ledger, etc.). Source code, the
+# venv, and this unit file are all read-only at the kernel level — a
+# compromised HITL process cannot rewrite the main runtime's binaries
+# or its own service definition.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker
+ReadWritePaths=/var/lib/elephantbroker
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
