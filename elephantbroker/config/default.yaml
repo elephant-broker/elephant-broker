@@ -9,17 +9,22 @@
 # Source schema:  elephantbroker/schemas/config.py
 # Loading:        elephantbroker serve --config /etc/elephantbroker/default.yaml
 #                 (or omit --config to load THIS file as the packaged resource
-#                  via ElephantBrokerConfig.load() — F2/F3 D5 OPERATOR LOCKED)
-# Env overrides:  every binding in `ENV_OVERRIDE_BINDINGS` (schemas/config.py)
-#                 overrides the YAML value at load time. Bindings are tagged
-#                 inline below as `env: EB_*`. The packaged default.yaml is
-#                 the single source of truth — `from_env()` no longer exists,
-#                 and the inverse contract test in tests/unit/schemas pins
-#                 every env var that source code references to a binding here.
-#                 See docs/CONFIGURATION.md §1 for the full env var matrix.
+#                  via ElephantBrokerConfig.load())
+# Env overrides:  Every entry in `ENV_OVERRIDE_BINDINGS` (elephantbroker/schemas/config.py)
+#                 overrides its YAML field at load time — currently 72 bindings.
+#                 After the F2/F3 unification (PR #3), there is exactly one
+#                 config load path: `ElephantBrokerConfig.load()`, which parses
+#                 the YAML, applies env overrides, runs the inheritance fallbacks,
+#                 then validates against the Pydantic schema. The legacy
+#                 `from_env()` and `from_yaml()` methods no longer exist.
+#                 Bindings are tagged inline below as `env: EB_*`. An inverse
+#                 contract test in tests/unit/schemas pins every env var that
+#                 source code references back to a binding here.
+#                 See docs/CONFIGURATION.md §1 for the full env var matrix and
+#                 elephantbroker/config/env.example for a runnable env file.
 #
 # Conventions:
-#   `env: EB_X`   — field is overridable by env var EB_X when loading via from_yaml()
+#   `env: EB_X`   — field is overridable by env var EB_X via ENV_OVERRIDE_BINDINGS
 #   `(secret)`    — value should NOT be committed; set via env on the deployment host
 #   `(off)`       — feature disabled by default; comment explains what enabling it does
 #
@@ -42,13 +47,13 @@
 
 gateway:
   gateway_id: ""                     # env: EB_GATEWAY_ID — REQUIRED. Runtime refuses to boot if empty (set EB_ALLOW_DEFAULT_GATEWAY_ID=true to override for dev/test)
-  gateway_short_name: ""             # human-friendly log/trace label; defaults to first 8 chars of gateway_id
+  gateway_short_name: ""             # env: EB_GATEWAY_SHORT_NAME — human-friendly log/trace label; defaults to first 8 chars of gateway_id
                                      # WARNING: also a TS-plugin env var; keep both VMs in sync to avoid mismatched log labels
   register_agent_identity: true      # auto-register agent self-ActorRef on session_start
   register_agent_actor: true         # create ActorDataPoint for the agent (required for OWNS_GOAL edges)
   org_id: null                       # env: EB_ORG_ID — UUID from `ebrun bootstrap` (required for org-scoped features)
   team_id: null                      # env: EB_TEAM_ID — UUID from `ebrun bootstrap` (required for team-scoped features)
-  agent_authority_level: 0           # 0=worker, higher=more authority for admin operations (see profiles)
+  agent_authority_level: 0           # env: EB_AGENT_AUTHORITY_LEVEL — 0=worker, higher=more authority for admin operations (see profiles)
 
 
 # -----------------------------------------------------------------------------
@@ -60,15 +65,15 @@ gateway:
 
 cognee:
   neo4j_uri: "bolt://localhost:7687"            # env: EB_NEO4J_URI
-  neo4j_user: "neo4j"
-  neo4j_password: ""                            # (secret) REQUIRED via EB_NEO4J_PASSWORD env. Runtime refuses to boot with empty password unless EB_DEV_MODE=true
+  neo4j_user: "neo4j"                           # env: EB_NEO4J_USER
+  neo4j_password: ""                            # env: EB_NEO4J_PASSWORD — (secret) REQUIRED. Runtime refuses to boot with empty password unless EB_DEV_MODE=true
   qdrant_url: "http://localhost:6333"           # env: EB_QDRANT_URL
-  default_dataset: "elephantbroker"             # DANGER: changing this orphans all existing Cognee data
-  embedding_provider: "openai"                  # API client style (openai SDK shape) — works for any LiteLLM-routed backend
-  embedding_model: "gemini/text-embedding-004"  # must match what your LiteLLM proxy actually serves
-  embedding_endpoint: "http://localhost:8811/v1"
+  default_dataset: "elephantbroker"             # env: EB_DEFAULT_DATASET — DANGER: changing this orphans all existing Cognee data
+  embedding_provider: "openai"                  # env: EB_EMBEDDING_PROVIDER — API client style (openai SDK shape) — works for any LiteLLM-routed backend
+  embedding_model: "gemini/text-embedding-004"  # env: EB_EMBEDDING_MODEL — must match what your LiteLLM proxy actually serves
+  embedding_endpoint: "http://localhost:8811/v1" # env: EB_EMBEDDING_ENDPOINT
   embedding_api_key: ""                         # env: EB_EMBEDDING_API_KEY (secret)
-  embedding_dimensions: 768                     # MUST match the embedding_model output dim (gemini/text-embedding-004 = 768; openai/text-embedding-3-large = 1024)
+  embedding_dimensions: 768                     # env: EB_EMBEDDING_DIMENSIONS — MUST match the embedding_model output dim (gemini/text-embedding-004 = 768; openai/text-embedding-3-large = 1024)
 
 
 # -----------------------------------------------------------------------------
@@ -78,16 +83,19 @@ cognee:
 infra:
   redis_url: "redis://localhost:6379"   # env: EB_REDIS_URL — required for nearly every feature (sessions, goals, working set, ingest buffers)
   otel_endpoint: null                   # env: EB_OTEL_ENDPOINT — set to e.g. "http://localhost:4317" to ship spans to Jaeger/Collector. null = @traced spans are no-ops
-  log_level: "INFO"                     # debug | verbose | info | warning | error | critical (verbose = per-item assembly decisions, no DEBUG dumps)
-  metrics_ttl_seconds: 3600             # how long Prometheus counter samples stay in the in-memory store before pruning
+  log_level: "INFO"                     # env: EB_LOG_LEVEL — debug | verbose | info | warning | error | critical (verbose = per-item assembly decisions, no DEBUG dumps; the runtime registers a custom VERBOSE level at level 15 — see runtime/observability.py — note that the HITL middleware uses standard Python logging and does NOT support `verbose`)
+  metrics_ttl_seconds: 3600             # env: EB_METRICS_TTL_SECONDS — how long Prometheus counter samples stay in the in-memory store before pruning
 
   # In-memory TraceLedger retention + OTEL log export.
-  # TraceLedger persists every lifecycle event (FACT_EXTRACTED, ASSEMBLE_COMPLETE, etc.)
+  # TraceLedger persists every lifecycle event (FACT_EXTRACTED, CONTEXT_ASSEMBLED, etc.)
   # for /trace API queries. Higher memory_max_events = better forensics, more RAM.
+  # B9 (TODO-3-103): event name was previously documented as ASSEMBLE_COMPLETE which
+  # is not a valid TraceEventType — the canonical name is CONTEXT_ASSEMBLED
+  # (see elephantbroker/schemas/trace.py TraceEventType enum).
   trace:
-    memory_max_events: 10000            # ring buffer size for in-memory trace events
+    memory_max_events: 10000            # env: EB_TRACE_MEMORY_MAX_EVENTS — ring buffer size for in-memory trace events
     memory_ttl_seconds: 3600            # individual events evicted after this age
-    otel_logs_enabled: false            # bridge trace events to OTEL log exporter (requires otel_endpoint set)
+    otel_logs_enabled: false            # env: EB_TRACE_OTEL_LOGS_ENABLED — bridge trace events to OTEL log exporter (requires otel_endpoint set)
 
   # ClickHouse — durable cross-session analytics for trace events.
   # When enabled, trace events flow OTEL Collector → ClickHouse for querying via /trace API.
@@ -117,18 +125,18 @@ llm:
   model: "openai/gemini/gemini-2.5-pro"          # env: EB_LLM_MODEL
   endpoint: "http://localhost:8811/v1"            # env: EB_LLM_ENDPOINT — your LiteLLM proxy URL
   api_key: ""                                     # env: EB_LLM_API_KEY (secret) — falls back to EB_EMBEDDING_API_KEY if empty
-  max_tokens: 8192                                # max output tokens for general LLM calls
-  temperature: 0.1                                # low = deterministic extraction; >0.5 = nondeterministic/hallucinations
-  extraction_max_input_tokens: 4000               # truncates conversation context fed to extraction prompt
-  extraction_max_output_tokens: 16384             # max JSON payload returned by extraction call
-  extraction_max_facts_per_batch: 10              # how many facts to extract per LLM call; too high = noisy
-  summarization_max_output_tokens: 200            # max length of artifact summaries
-  summarization_min_artifact_chars: 500           # artifacts shorter than this are NOT LLM-summarized (kept verbatim)
-  ingest_batch_size: 6                            # messages buffered before triggering ingest pipeline
-  ingest_batch_timeout_seconds: 60.0              # max wait before forcing ingest on a partial batch
-  ingest_buffer_ttl_seconds: 300                  # Redis TTL for ingest buffer keys (must be >= ingest_batch_timeout_seconds)
-  extraction_context_facts: 20                    # recent existing facts injected into extraction prompt for dedup awareness
-  extraction_context_ttl_seconds: 3600            # how long the extraction context cache stays warm in Redis
+  max_tokens: 8192                                # env: EB_LLM_MAX_TOKENS — max output tokens for general LLM calls
+  temperature: 0.1                                # env: EB_LLM_TEMPERATURE — low = deterministic extraction; >0.5 = nondeterministic/hallucinations
+  extraction_max_input_tokens: 4000               # env: EB_LLM_EXTRACTION_MAX_INPUT_TOKENS — truncates conversation context fed to extraction prompt
+  extraction_max_output_tokens: 16384             # env: EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS — max JSON payload returned by extraction call
+  extraction_max_facts_per_batch: 10              # env: EB_LLM_EXTRACTION_MAX_FACTS — how many facts to extract per LLM call; too high = noisy
+  summarization_max_output_tokens: 200            # env: EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS — max length of artifact summaries
+  summarization_min_artifact_chars: 500           # env: EB_LLM_SUMMARIZATION_MIN_CHARS — artifacts shorter than this are NOT LLM-summarized (kept verbatim)
+  ingest_batch_size: 6                            # env: EB_INGEST_BATCH_SIZE — messages buffered before triggering ingest pipeline
+  ingest_batch_timeout_seconds: 60.0              # env: EB_INGEST_BATCH_TIMEOUT — max wait before forcing ingest on a partial batch
+  ingest_buffer_ttl_seconds: 300                  # env: EB_INGEST_BUFFER_TTL — Redis TTL for ingest buffer keys (must be >= ingest_batch_timeout_seconds)
+  extraction_context_facts: 20                    # env: EB_EXTRACTION_CONTEXT_FACTS — recent existing facts injected into extraction prompt for dedup awareness
+  extraction_context_ttl_seconds: 3600            # env: EB_EXTRACTION_CONTEXT_TTL — how long the extraction context cache stays warm in Redis
 
 
 # -----------------------------------------------------------------------------
@@ -139,9 +147,9 @@ llm:
 # Falls back to llm.endpoint and llm.api_key when these are empty.
 
 compaction_llm:
-  model: "gemini/gemini-2.5-flash"      # cheaper, faster than the primary extraction model
-  endpoint: ""                          # F7 — empty inherits llm.endpoint at load time; set explicitly only if compaction targets a different LiteLLM proxy
-  api_key: ""                           # falls back to llm.api_key if empty
+  model: "gemini/gemini-2.5-flash"      # env: EB_COMPACTION_LLM_MODEL — cheaper, faster than the primary extraction model
+  endpoint: ""                          # env: EB_COMPACTION_LLM_ENDPOINT — F7: empty inherits llm.endpoint at load time; set explicitly only if compaction targets a different LiteLLM proxy
+  api_key: ""                           # env: EB_COMPACTION_LLM_API_KEY (secret) — falls back to llm.api_key if empty
   max_tokens: 2000                      # compaction summaries are short
   temperature: 0.2
 
@@ -157,7 +165,7 @@ reranker:
   enabled: true                         # env: EB_RERANKER_ENABLED — set false if you don't have a Qwen3-Reranker server; retrieval falls back to scoring-only ranking
   endpoint: "http://localhost:1235"     # env: EB_RERANKER_ENDPOINT
   api_key: ""                           # env: EB_RERANKER_API_KEY (secret)
-  model: "Qwen/Qwen3-Reranker-4B"
+  model: "Qwen/Qwen3-Reranker-4B"       # env: EB_RERANKER_MODEL
   timeout_seconds: 10.0                 # too low = transient failures cascade; too high = blocks every retrieval
   batch_size: 32                        # candidates batched per HTTP call; too low = many roundtrips
   max_documents: 100                    # hard cap on candidates sent to reranker per query
@@ -173,8 +181,8 @@ reranker:
 # are deterministic per text+model).
 
 embedding_cache:
-  enabled: true                         # huge cost savings on repeated text; only disable for benchmarks
-  ttl_seconds: 3600                     # 1h is a reasonable default; raise if your text corpus is highly repetitive
+  enabled: true                         # env: EB_EMBEDDING_CACHE_ENABLED — huge cost savings on repeated text; only disable for benchmarks
+  ttl_seconds: 3600                     # env: EB_EMBEDDING_CACHE_TTL — 1h is a reasonable default; raise if your text corpus is highly repetitive
   key_prefix: "eb:emb_cache"            # do not change without flushing existing cache
 
 
@@ -324,7 +332,7 @@ async_analysis:
 # overlay) — they do NOT physically block tool calls (TD-12).
 
 guards:
-  enabled: true                         # master switch for the 6-layer guard pipeline — env: EB_GUARDS_ENABLED
+  enabled: true                         # env: EB_GUARDS_ENABLED — master switch for the 6-layer guard pipeline
   builtin_rules_enabled: true           # ships with 12 builtin red-line patterns; disable to use only your own rules
   history_ttl_seconds: 86400            # how long guard event history stays in Redis per session
   max_history_events: 50                # max guard events kept per session before LRU eviction
@@ -332,8 +340,12 @@ guards:
   llm_escalation_max_tokens: 500        # max tokens for the (optional) Layer-5 LLM escalation call
   llm_escalation_timeout_seconds: 10.0  # timeout for the LLM escalation call
   max_pattern_length: 500               # safety cap on user-supplied rule patterns (regex DoS prevention)
-  # strictness_presets: see schemas/config.py:266 — 3 builtin presets (loose / medium / strict) with 5 fields each.
-  # Override individual preset fields here only if you need to deviate from the builtin tuning.
+  # strictness_presets: see GuardsConfig.strictness_presets in elephantbroker/schemas/config.py
+  # (search for `strictness_presets: dict[str, StrictnessPreset]`) — 3 builtin presets
+  # (loose / medium / strict) with 5 fields each. Override individual preset fields here
+  # only if you need to deviate from the builtin tuning.
+  # B8 (TODO-3-213): line-number reference replaced with a search anchor; the previous
+  # `:266` reference broke after every schema reorganization.
 
 
 # -----------------------------------------------------------------------------
@@ -356,11 +368,11 @@ hitl:
 # -----------------------------------------------------------------------------
 
 successful_use:
-  enabled: false                        # (off) when on, runs an LLM batch evaluation to determine which injected facts actually helped the agent. Used by the consolidation pipeline to strengthen useful facts and decay useless ones. Cost: ~1 LLM call per N turns. Worth enabling for long-running deployments where memory quality matters
-  endpoint: "http://localhost:8811/v1"
-  api_key: ""                           # falls back to llm.api_key if empty
-  model: "gemini/gemini-2.5-flash"      # cheap model is fine
-  batch_size: 5                         # facts evaluated per LLM call
+  enabled: false                        # env: EB_SUCCESSFUL_USE_ENABLED — (off) when on, runs an LLM batch evaluation to determine which injected facts actually helped the agent. Used by the consolidation pipeline to strengthen useful facts and decay useless ones. Cost: ~1 LLM call per N turns. Worth enabling for long-running deployments where memory quality matters
+  endpoint: "http://localhost:8811/v1"  # env: EB_SUCCESSFUL_USE_ENDPOINT
+  api_key: ""                           # env: EB_SUCCESSFUL_USE_API_KEY (secret) — falls back to llm.api_key if empty
+  model: "gemini/gemini-2.5-flash"      # env: EB_SUCCESSFUL_USE_MODEL — cheap model is fine
+  batch_size: 5                         # env: EB_SUCCESSFUL_USE_BATCH_SIZE — facts evaluated per LLM call
   batch_timeout_seconds: 120.0
   feed_last_facts: 20                   # window of recent facts considered per evaluation
   min_confidence: 0.7                   # only evaluate facts above this confidence
@@ -372,11 +384,11 @@ successful_use:
 # -----------------------------------------------------------------------------
 
 blocker_extraction:
-  enabled: false                        # (off) when on, periodically runs an LLM call to detect blockers in recent conversation and auto-add them to active goals. Useful for long debugging/research sessions where the agent doesn't notice it's stuck
-  endpoint: "http://localhost:8811/v1"
-  api_key: ""                           # falls back to llm.api_key if empty
-  model: "gemini/gemini-2.5-flash"
-  run_every_n_turns: 3                  # cadence — every N turns, fire one blocker-detection call
+  enabled: false                        # env: EB_BLOCKER_EXTRACTION_ENABLED — (off) when on, periodically runs an LLM call to detect blockers in recent conversation and auto-add them to active goals. Useful for long debugging/research sessions where the agent doesn't notice it's stuck
+  endpoint: "http://localhost:8811/v1"  # env: EB_BLOCKER_EXTRACTION_ENDPOINT
+  api_key: ""                           # env: EB_BLOCKER_EXTRACTION_API_KEY (secret) — falls back to llm.api_key if empty
+  model: "gemini/gemini-2.5-flash"      # env: EB_BLOCKER_EXTRACTION_MODEL
+  run_every_n_turns: 3                  # env: EB_BLOCKER_EXTRACTION_EVERY_N_TURNS — cadence: every N turns, fire one blocker-detection call
   recent_messages_window: 10            # how many recent messages fed to the blocker prompt
 
 
@@ -427,9 +439,9 @@ consolidation:
 # Top-level toggles & global limits
 # -----------------------------------------------------------------------------
 
-default_profile: "coding"               # which profile governs scoring/retrieval/compaction when no per-session profile is set
+default_profile: "coding"               # env: EB_DEFAULT_PROFILE — which profile governs scoring/retrieval/compaction when no per-session profile is set
                                         # options: coding, research, managerial, worker, personal_assistant
-enable_trace_ledger: true               # disable only for benchmarks — losing trace events removes all forensic visibility
+enable_trace_ledger: true               # env: EB_ENABLE_TRACE_LEDGER — disable only for benchmarks; losing trace events removes all forensic visibility
 # (the master guard switch lives at `guards.enabled` above — env: EB_GUARDS_ENABLED)
-max_concurrent_sessions: 100            # rejection threshold; raise carefully — Redis/Neo4j connection pressure scales with this
-consolidation_min_retention_seconds: 172800   # (48h) min age before consolidation pipeline can decay/archive a fact
+max_concurrent_sessions: 100            # env: EB_MAX_CONCURRENT_SESSIONS — rejection threshold; raise carefully (Redis/Neo4j connection pressure scales with this)
+consolidation_min_retention_seconds: 172800   # env: EB_CONSOLIDATION_MIN_RETENTION_SECONDS — (48h) min age before consolidation pipeline can decay/archive a fact
