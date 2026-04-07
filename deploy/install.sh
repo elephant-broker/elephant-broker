@@ -12,10 +12,14 @@
 #      pyproject.toml + uv.lock. This covers BOTH the elephantbroker runtime
 #      AND the hitl-middleware package, because hitl-middleware is declared
 #      as a uv workspace member in the root pyproject.toml.
-#   4. Applies belt-and-suspenders post-install fixes (Cognee writable dirs)
+#   4. Applies belt-and-suspenders post-install fixes (Cognee writable dirs
+#      + mistralai ghost-package safety net for the pip path)
 #   5. Copies default.yaml + env.example + hitl.env.example into /etc/elephantbroker
-#   6. Installs the systemd units (unless --no-systemd)
-#   7. Sets ownership/permissions per the canonical layout
+#      and auto-generates EB_HITL_CALLBACK_SECRET on first install
+#   6. Sets ownership/permissions across $PREFIX (final pass)
+#   7. Installs the systemd units (unless --no-systemd)
+#   8. Smoke-test: invoke `elephantbroker --help` to verify the venv is
+#      functional and the entry-point binary is on the right path
 #
 # Why uv (not pip):
 #   - The lockfile (uv.lock) is mandatory by default — `uv sync` always uses it.
@@ -37,9 +41,15 @@
 # `chown` after the privileged operations complete.
 #
 # Flags:
-#   --no-systemd     Skip installing systemd unit files
-#   --prefix PATH    Override the install prefix (default: /opt/elephantbroker)
-#   --help           Show this message
+#   --no-systemd            Skip installing systemd unit files
+#   --prefix PATH           Override the install prefix (default: /opt/elephantbroker)
+#   --allow-out-of-tree     Permit running install.sh from a directory other
+#                           than $PREFIX. WITHOUT this flag, the script refuses
+#                           to run unless the source repo IS the prefix — the
+#                           supported workflow is to clone directly into
+#                           /opt/elephantbroker. See C2 (TODO-3-202/602/011)
+#                           for the rationale.
+#   --help                  Show this message
 # =============================================================================
 
 set -euo pipefail
@@ -47,6 +57,7 @@ set -euo pipefail
 # --- Defaults ---
 PREFIX="/opt/elephantbroker"
 INSTALL_SYSTEMD=1
+ALLOW_OOT=0
 SERVICE_USER="elephantbroker"
 SERVICE_GROUP="elephantbroker"
 CONFIG_DIR="/etc/elephantbroker"
@@ -57,17 +68,21 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-systemd) INSTALL_SYSTEMD=0; shift ;;
         --prefix) PREFIX="$2"; shift 2 ;;
+        --allow-out-of-tree) ALLOW_OOT=1; shift ;;
         --help|-h)
             cat <<'HELP'
 ElephantBroker DB-VM installer
 
 Usage:
-  sudo ./install.sh [--no-systemd] [--prefix PATH]
+  sudo ./install.sh [--no-systemd] [--prefix PATH] [--allow-out-of-tree]
 
 Flags:
-  --no-systemd     Skip installing systemd unit files
-  --prefix PATH    Override the install prefix (default: /opt/elephantbroker)
-  --help, -h       Show this message
+  --no-systemd            Skip installing systemd unit files
+  --prefix PATH           Override the install prefix (default: /opt/elephantbroker)
+  --allow-out-of-tree     Permit running install.sh from a directory other than
+                          $PREFIX. WITHOUT this flag, the script refuses to run
+                          unless the source repo IS the prefix. See note below.
+  --help, -h              Show this message
 
 Typical workflow:
   sudo git clone <repo-url> /opt/elephantbroker
@@ -79,6 +94,13 @@ Typical workflow:
 The script is idempotent — safe to re-run on a partially-installed host.
 It runs entirely as root (no sudo -u switching). All ownership is set
 via chown after the privileged operations complete.
+
+Out-of-tree installs (--allow-out-of-tree):
+  uv sync writes the venv to <source-repo>/.venv. The systemd units
+  hardcode /opt/elephantbroker/.venv/bin/elephantbroker. If the source
+  repo is NOT the prefix, the venv lives at the wrong path and systemd
+  startup fails. The --allow-out-of-tree flag exists only as an explicit
+  opt-in for advanced users who know they will fix the venv path themselves.
 HELP
             exit 0
             ;;
@@ -102,12 +124,32 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 log "Source repo:    $REPO_DIR"
 log "Install prefix: $PREFIX"
 
+# C2 (TODO-3-202, TODO-3-602, TODO-3-011): refuse out-of-tree installs by
+# default. uv sync writes the venv to $REPO_DIR/.venv, but the systemd units
+# hardcode $PREFIX/.venv/bin/elephantbroker. If $REPO_DIR != $PREFIX the venv
+# lives at the wrong path and systemd will fail to start the service. The
+# previous code only emitted a warning and proceeded, which routinely produced
+# "install succeeded but `systemctl start` fails" reports from operators who
+# missed the warning in the install log. Hard-fail unless --allow-out-of-tree
+# is explicitly passed.
 if [[ "$REPO_DIR" != "$PREFIX" ]]; then
-    warn "Source repo ($REPO_DIR) is NOT the install prefix ($PREFIX)."
-    warn "The recommended workflow is to clone directly into $PREFIX:"
-    warn "  sudo git clone <repo-url> $PREFIX"
-    warn "  sudo $PREFIX/deploy/install.sh"
-    warn "Continuing anyway — make sure the source repo will not be moved/deleted later."
+    if [[ "$ALLOW_OOT" -eq 1 ]]; then
+        warn "Source repo ($REPO_DIR) is NOT the install prefix ($PREFIX)."
+        warn "--allow-out-of-tree was passed: proceeding, but note that uv sync will"
+        warn "write the venv to $REPO_DIR/.venv NOT $PREFIX/.venv. The systemd units"
+        warn "hardcode $PREFIX/.venv/bin/elephantbroker — startup will fail until you"
+        warn "manually relocate the venv or edit the unit files. You take responsibility."
+    else
+        die "Source repo ($REPO_DIR) is not the install prefix ($PREFIX).
+
+The supported workflow is to clone directly into $PREFIX:
+  sudo git clone <repo-url> $PREFIX
+  sudo $PREFIX/deploy/install.sh
+
+If you really need to install from a different location, re-run with
+--allow-out-of-tree (you take responsibility for the venv/systemd path
+mismatch — see install.sh --help for details)."
+    fi
 fi
 
 command -v python3 >/dev/null || die "python3 not found in PATH"
@@ -239,12 +281,24 @@ log "  cognee anon_id touched: $ANON_ID_PATH"
 # =============================================================================
 log "Step 5/8: install config files into $CONFIG_DIR"
 # =============================================================================
-# default.yaml: always overwrite (it's the structural template; secrets and
-# operator overrides live in env). Owner eb:eb mode 640.
-install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 640 \
-    "$REPO_DIR/elephantbroker/config/default.yaml" \
-    "$CONFIG_DIR/default.yaml"
-log "  $CONFIG_DIR/default.yaml  (640 $SERVICE_USER:$SERVICE_GROUP, overwritten)"
+# default.yaml: NEVER overwrite — operators routinely edit gateway_id, org_id,
+# team_id, profile weights, and other deployment-specific knobs in this file.
+# C1 (TODO-3-600): the previous unconditional `install` clobbered those edits
+# on every install.sh re-run, which is the expected behavior of an idempotent
+# installer except when the operator has customized the file. The fix mirrors
+# the env / hitl.env handling below: copy from the packaged template only on
+# first install, and track a "freshly copied" flag for downstream steps that
+# may want to know whether the file is template-shape or operator-edited.
+YAML_FRESHLY_COPIED=0
+if [[ -f "$CONFIG_DIR/default.yaml" ]]; then
+    log "  $CONFIG_DIR/default.yaml  (already exists — preserved)"
+else
+    install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 640 \
+        "$REPO_DIR/elephantbroker/config/default.yaml" \
+        "$CONFIG_DIR/default.yaml"
+    YAML_FRESHLY_COPIED=1
+    log "  $CONFIG_DIR/default.yaml  (640 $SERVICE_USER:$SERVICE_GROUP, FROM TEMPLATE — set gateway_id before starting)"
+fi
 
 # env files: NEVER overwrite — they contain operator secrets. Owner root:eb
 # mode 640 (root writes, service reads). On first install, copy from .example.
@@ -345,14 +399,22 @@ log "Step 8/8: verify install"
 # =============================================================================
 # Quick smoke test: invoke the elephantbroker entry point with --help to
 # confirm the venv is functional and the binary is on the right path.
-if [[ -x "$REPO_DIR/.venv/bin/elephantbroker" ]]; then
-    if "$REPO_DIR/.venv/bin/elephantbroker" --help >/dev/null 2>&1; then
+#
+# C2: this MUST use $PREFIX (not $REPO_DIR) — that's the path the systemd
+# units hardcode (/opt/elephantbroker/.venv/bin/elephantbroker). For an
+# in-tree install ($REPO_DIR == $PREFIX) the two paths are identical, so
+# this is a no-op behavior change. For an out-of-tree install (--allow-out-of-tree),
+# this will warn that the binary isn't where systemd expects it — which IS
+# the right thing to surface to the operator.
+if [[ -x "$PREFIX/.venv/bin/elephantbroker" ]]; then
+    if "$PREFIX/.venv/bin/elephantbroker" --help >/dev/null 2>&1; then
         log "  elephantbroker entry point works ✓"
     else
         warn "  elephantbroker --help returned non-zero — check the install"
     fi
 else
-    warn "  elephantbroker binary not found at $REPO_DIR/.venv/bin/elephantbroker"
+    warn "  elephantbroker binary not found at $PREFIX/.venv/bin/elephantbroker"
+    warn "  (out-of-tree install? venv lives at $REPO_DIR/.venv — systemd will fail to start)"
 fi
 
 # =============================================================================
