@@ -248,12 +248,15 @@ log "  $CONFIG_DIR/default.yaml  (640 $SERVICE_USER:$SERVICE_GROUP, overwritten)
 
 # env files: NEVER overwrite — they contain operator secrets. Owner root:eb
 # mode 640 (root writes, service reads). On first install, copy from .example.
+ENV_FRESHLY_COPIED=0
+HITL_ENV_FRESHLY_COPIED=0
 if [[ -f "$CONFIG_DIR/env" ]]; then
     log "  $CONFIG_DIR/env           (already exists — preserved)"
 else
     install -o root -g "$SERVICE_GROUP" -m 640 \
         "$REPO_DIR/elephantbroker/config/env.example" \
         "$CONFIG_DIR/env"
+    ENV_FRESHLY_COPIED=1
     log "  $CONFIG_DIR/env           (640 root:$SERVICE_GROUP, FROM TEMPLATE — edit before starting)"
 fi
 
@@ -263,7 +266,47 @@ else
     install -o root -g "$SERVICE_GROUP" -m 640 \
         "$REPO_DIR/hitl-middleware/hitl.env.example" \
         "$CONFIG_DIR/hitl.env"
+    HITL_ENV_FRESHLY_COPIED=1
     log "  $CONFIG_DIR/hitl.env      (640 root:$SERVICE_GROUP, FROM TEMPLATE — edit before starting)"
+fi
+
+# F11 (TODO-3-614): auto-generate EB_HITL_CALLBACK_SECRET on first install.
+#
+# The runtime AND the hitl-middleware must agree on the same HMAC secret or
+# every HITL approval callback fails verification. Historically the operator
+# was told (in `Next steps:` below) to run `openssl rand -hex 32` and paste
+# the result into BOTH /etc/elephantbroker/env AND /etc/elephantbroker/hitl.env.
+# In practice this was the #1 cause of "first start works for everything
+# except HITL" because operators routinely (a) forgot, (b) generated different
+# values for the two files, or (c) pasted with surrounding whitespace.
+#
+# When BOTH env files were freshly copied in this run, we generate one secret
+# and patch it into both. If only one was freshly copied (the other already
+# exists with operator-customized contents), we leave the placeholder alone
+# and warn the operator — auto-generating one half would silently break the
+# existing pair.
+if [[ "$ENV_FRESHLY_COPIED" -eq 1 && "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+        HITL_SECRET=$(openssl rand -hex 32)
+        # Use a temp file + mv pattern instead of `sed -i` to keep ownership/mode
+        # intact (sed -i on Linux re-creates the file with the invoking user's
+        # umask, which would clobber the 640 root:elephantbroker we just set).
+        for env_file in "$CONFIG_DIR/env" "$CONFIG_DIR/hitl.env"; do
+            tmp_file=$(mktemp)
+            sed "s|^EB_HITL_CALLBACK_SECRET=$|EB_HITL_CALLBACK_SECRET=$HITL_SECRET|" \
+                "$env_file" > "$tmp_file"
+            cat "$tmp_file" > "$env_file"
+            rm -f "$tmp_file"
+        done
+        log "  EB_HITL_CALLBACK_SECRET   (auto-generated, written to env + hitl.env)"
+    else
+        warn "  openssl not found — cannot auto-generate EB_HITL_CALLBACK_SECRET."
+        warn "  You MUST set the same value manually in env + hitl.env before starting HITL."
+    fi
+elif [[ "$ENV_FRESHLY_COPIED" -eq 1 || "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
+    warn "  Only ONE of env / hitl.env was freshly copied. Skipping HITL secret"
+    warn "  auto-generation — paste the existing value from the preserved file"
+    warn "  into the freshly-copied one, or both halves will fail HMAC verification."
 fi
 
 # =============================================================================

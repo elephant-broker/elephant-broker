@@ -4,7 +4,15 @@ import os
 import pytest
 from pydantic import ValidationError
 
-from elephantbroker.schemas.config import CogneeConfig, ElephantBrokerConfig, InfraConfig, LLMConfig
+from elephantbroker.schemas.config import (
+    BlockerExtractionConfig,
+    CogneeConfig,
+    ElephantBrokerConfig,
+    InfraConfig,
+    KNOWN_EMBEDDING_DIMS,
+    LLMConfig,
+    SuccessfulUseConfig,
+)
 
 
 class TestCogneeConfig:
@@ -786,3 +794,46 @@ class TestEnvVarRegistryCompleteness:
         assert not overlap, (
             f"vars listed in BOTH ENV_OVERRIDE_BINDINGS and NON_CONFIG_ENV_VARS: {overlap}"
         )
+
+
+class TestF8LocalhostDefaults:
+    """F8 (TODO-3-612): host.docker.internal defaults removed."""
+
+    def test_successful_use_endpoint_defaults_to_localhost(self):
+        assert SuccessfulUseConfig().endpoint == "http://localhost:8811/v1"
+
+    def test_blocker_extraction_endpoint_defaults_to_localhost(self):
+        assert BlockerExtractionConfig().endpoint == "http://localhost:8811/v1"
+
+
+class TestF9EmbeddingDimensionsValidator:
+    """F9 (TODO-3-613): cross-validator on embedding_model + embedding_dimensions."""
+
+    def test_default_model_default_dim_passes(self):
+        # Sanity: the schema default itself must satisfy its own validator.
+        c = CogneeConfig()
+        assert c.embedding_model == "gemini/text-embedding-004"
+        assert c.embedding_dimensions == 768
+
+    def test_known_model_with_correct_dim_passes(self):
+        c = CogneeConfig(embedding_model="text-embedding-3-large", embedding_dimensions=3072)
+        assert c.embedding_dimensions == 3072
+
+    def test_known_model_with_wrong_dim_raises(self):
+        with pytest.raises(ValueError, match="does not match"):
+            CogneeConfig(embedding_model="text-embedding-3-large", embedding_dimensions=768)
+
+    def test_unknown_model_passes_with_arbitrary_dim(self):
+        # Validator only protects known models — unknown ones are operator-managed.
+        c = CogneeConfig(embedding_model="custom/private-model", embedding_dimensions=42)
+        assert c.embedding_dimensions == 42
+
+    def test_known_dims_map_is_populated(self):
+        # Sanity: catch accidental wipes of KNOWN_EMBEDDING_DIMS.
+        assert len(KNOWN_EMBEDDING_DIMS) >= 5
+        assert "gemini/text-embedding-004" in KNOWN_EMBEDDING_DIMS
+        assert KNOWN_EMBEDDING_DIMS["text-embedding-3-large"] == 3072
+
+    def test_validator_error_message_mentions_expected_dim(self):
+        with pytest.raises(ValueError, match=r"expected 1536"):
+            CogneeConfig(embedding_model="text-embedding-3-small", embedding_dimensions=999)

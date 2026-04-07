@@ -3,7 +3,39 @@ from __future__ import annotations
 
 import os
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# F9 (TODO-3-613): well-known embedding model → expected vector dimensions.
+# When the operator picks a model from this map, the schema validator refuses
+# to start with a mismatched `embedding_dimensions` value. The map is
+# intentionally conservative — only models we have personally verified the
+# output dimensions for are listed. Unknown models pass through without a
+# constraint (the validator only protects known cases). Adding a model here
+# should always be paired with verifying the dim against the upstream provider
+# docs OR a live API probe — guessing is the exact failure mode this prevents.
+#
+# The cost of this check is that orphaned Qdrant collections (one of the
+# nastiest debugging experiences in Cognee deployments) become impossible
+# for the well-known model paths.
+KNOWN_EMBEDDING_DIMS: dict[str, int] = {
+    # Google / Gemini
+    "gemini/text-embedding-004": 768,
+    # OpenAI
+    "text-embedding-3-large": 3072,
+    "text-embedding-3-small": 1536,
+    "text-embedding-ada-002": 1536,
+    # Voyage AI
+    "voyage-3": 1024,
+    "voyage-3-large": 1024,
+    "voyage-code-3": 1024,
+    # Cohere
+    "cohere/embed-english-v3.0": 1024,
+    "cohere/embed-multilingual-v3.0": 1024,
+    # BGE / OSS
+    "BAAI/bge-large-en-v1.5": 1024,
+    "BAAI/bge-base-en-v1.5": 768,
+    "BAAI/bge-small-en-v1.5": 384,
+}
 
 # Imported at module top for the new `consolidation` regular field (F4 fix).
 # The previous code used a `@property` with a lazy import, claiming a circular
@@ -44,6 +76,27 @@ class CogneeConfig(_StrictBase):
     embedding_endpoint: str = "http://localhost:8811/v1"
     embedding_api_key: str = ""
     embedding_dimensions: int = Field(default=768, ge=1)  # must match embedding_model output dim
+
+    @model_validator(mode="after")
+    def _check_embedding_dimensions_match_known_model(self) -> "CogneeConfig":
+        """F9: refuse to start if embedding_dimensions disagrees with a known model.
+
+        Mismatched dims silently orphan Qdrant collections — every retrieval
+        breaks until an operator notices that search returns nothing. The
+        check fires only for models present in `KNOWN_EMBEDDING_DIMS`;
+        unknown models pass through (the operator is on their own).
+        """
+        expected = KNOWN_EMBEDDING_DIMS.get(self.embedding_model)
+        if expected is not None and expected != self.embedding_dimensions:
+            raise ValueError(
+                f"embedding_dimensions={self.embedding_dimensions} does not match "
+                f"the known output dimension of embedding_model={self.embedding_model!r} "
+                f"(expected {expected}). Mismatched dimensions orphan Qdrant collections "
+                f"and silently break all retrieval. Either set embedding_dimensions={expected} "
+                f"or pick a different embedding_model. To bypass this check, choose a model "
+                f"name not in KNOWN_EMBEDDING_DIMS (the validator only protects known models)."
+            )
+        return self
 
 
 class LLMConfig(_StrictBase):
@@ -164,7 +217,13 @@ class SuccessfulUseConfig(_StrictBase):
     because it is expensive.
     """
     enabled: bool = False
-    endpoint: str = "http://host.docker.internal:8811/v1"
+    # F8 (TODO-3-612): historically defaulted to host.docker.internal:8811 from
+    # the Docker-only era. The Docker setup is unsupported (Dockerfile has known
+    # dep issues) and every native venv install resolved that DNS name to
+    # nothing, breaking successful-use feedback whenever an operator forgot to
+    # override the endpoint. Defaulting to localhost matches every other LLM
+    # config in this file.
+    endpoint: str = "http://localhost:8811/v1"
     api_key: str = ""  # Falls back to EB_LLM_API_KEY if empty
     model: str = "gemini/gemini-2.5-flash"
     batch_size: int = Field(default=5, ge=1)
@@ -358,7 +417,8 @@ class CompactionLLMConfig(_StrictBase):
 class BlockerExtractionConfig(_StrictBase):
     """Configuration for automatic LLM-based blocker extraction (Phase 9 RT-2)."""
     enabled: bool = False
-    endpoint: str = "http://host.docker.internal:8811/v1"
+    # F8 (TODO-3-612): see SuccessfulUseConfig.endpoint comment — same fix.
+    endpoint: str = "http://localhost:8811/v1"
     api_key: str = ""  # Falls back to EB_LLM_API_KEY if empty
     model: str = "gemini/gemini-2.5-flash"
     run_every_n_turns: int = Field(default=3, ge=1)
