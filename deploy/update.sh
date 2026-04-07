@@ -154,10 +154,22 @@ fi
 # that bypassed the lockfile entirely and let the HITL service drift
 # from the runtime on every update.
 
-# Cognee writable directories: re-create in case a fresh sync wiped them
-COGNEE_DIR=$(find "$PREFIX/.venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1 || true)
-if [[ -n "$COGNEE_DIR" ]]; then
-    mkdir -p "$COGNEE_DIR/.cognee_system/databases" "$COGNEE_DIR/.data_storage"
+# Cognee writable directories: re-create in case a fresh sync wiped them.
+#
+# C8 (TODO-3-325): resolve the venv site-packages dir via Python's stdlib
+# instead of the brittle `find ... | head -n 1` form (matches the same
+# rewrite in install.sh step 4). The new approach asks the venv's own
+# Python where its site-packages live — authoritative, no maxdepth guess.
+SITE_PACKAGES=$(uv run python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)
+if [[ -n "$SITE_PACKAGES" && -d "$SITE_PACKAGES" ]]; then
+    COGNEE_DIR="$SITE_PACKAGES/cognee"
+    if [[ -d "$COGNEE_DIR" ]]; then
+        mkdir -p "$COGNEE_DIR/.cognee_system/databases" "$COGNEE_DIR/.data_storage"
+    fi
+else
+    warn "  could not resolve venv site-packages dir — Cognee writable paths may be stale"
+    SITE_PACKAGES=""
+    COGNEE_DIR=""
 fi
 
 # =============================================================================
@@ -172,9 +184,8 @@ log "Step 3/4: re-apply ownership of writable subdirs only"
 # `uv sync` may have re-created the .cognee_system / .data_storage paths if
 # Cognee was upgraded (the new install includes a fresh tree). Re-chown
 # exactly the same set of paths install.sh chowns in its step 6.
-ANON_ID_PATH=""
-if [[ -n "${COGNEE_DIR:-}" ]]; then
-    ANON_ID_PATH=$(find "$PREFIX/.venv/lib" -maxdepth 3 -type d -name site-packages | head -n 1)/.anon_id
+if [[ -n "$COGNEE_DIR" && -d "$COGNEE_DIR" ]]; then
+    ANON_ID_PATH="$SITE_PACKAGES/.anon_id"
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$COGNEE_DIR/.cognee_system"
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$COGNEE_DIR/.data_storage"
     if [[ -e "$ANON_ID_PATH" ]]; then

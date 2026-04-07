@@ -243,6 +243,24 @@ uv sync --frozen --no-dev
 log "Step 4/8: post-install fixes (Cognee writable dirs + mistralai safety net)"
 # =============================================================================
 
+# C8 (TODO-3-325): resolve the venv site-packages dir ONCE via Python's stdlib
+# instead of brittle `find ... | head -n 1` constructions at every site that
+# needs it. The previous form had several failure modes:
+#   * relied on specific maxdepth values that broke when uv changed its venv
+#     layout (e.g. from lib/python3.X/site-packages to lib/site-packages)
+#   * silently picked the FIRST match if there were multiple site-packages
+#     dirs (e.g. when a tool like ipykernel created auxiliary trees)
+#   * masked failures via `2>/dev/null` so an empty result returned an empty
+#     string that propagated as "/.cognee_system" (root-relative — disaster)
+# Asking the venv's own Python interpreter where its site-packages live is
+# both authoritative (it's the same answer the runtime will use at import
+# time) and impossible to silently mis-detect.
+SITE_PACKAGES=$(uv run python -c 'import site; print(site.getsitepackages()[0])')
+if [[ -z "$SITE_PACKAGES" || ! -d "$SITE_PACKAGES" ]]; then
+    die "could not resolve venv site-packages dir from $REPO_DIR/.venv (got: '$SITE_PACKAGES'). Did uv sync fail?"
+fi
+log "  venv site-packages: $SITE_PACKAGES"
+
 # 4a) mistralai cleanup (belt-and-suspenders, only matters for the pip path)
 # cognee==0.5.3 ships a broken `mistralai` namespace package as a transitive
 # dep. With uv (the supported install path) this is NOT an issue — uv's
@@ -264,10 +282,10 @@ log "Step 4/8: post-install fixes (Cognee writable dirs + mistralai safety net)"
 # uninstall ONLY when needed and warns loudly if it actually fails — the
 # directory rm still happens as a fallback so the safety net delivers the
 # end state regardless.
-MISTRAL_DIR=$(find "$REPO_DIR/.venv/lib" -type d -name mistralai -prune 2>/dev/null | head -n 1 || true)
-if [[ -z "$MISTRAL_DIR" ]]; then
+MISTRAL_DIR="$SITE_PACKAGES/mistralai"
+if [[ ! -d "$MISTRAL_DIR" ]]; then
     log "  mistralai not installed in venv — no cleanup needed (uv path)"
-elif compgen -G "$(dirname "$MISTRAL_DIR")/mistralai-*.dist-info/METADATA" >/dev/null; then
+elif compgen -G "$SITE_PACKAGES/mistralai-*.dist-info/METADATA" >/dev/null; then
     log "  mistralai present as proper dist-info package — no cleanup needed"
 else
     # Confirmed broken namespace-package shape. Try uv pip uninstall first
@@ -290,9 +308,11 @@ fi
 # site-packages directory at runtime. We pre-create them so first-run
 # doesn't fail. Step 6 below targeted-chowns these specific subdirs to
 # the service user (NOT a recursive chown of $PREFIX — see C3 comment).
-COGNEE_DIR=$(find "$REPO_DIR/.venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1)
-if [[ -z "$COGNEE_DIR" ]]; then
-    die "could not locate cognee site-packages dir under $REPO_DIR/.venv/lib — did uv sync fail?"
+#
+# C8: derive COGNEE_DIR from $SITE_PACKAGES instead of `find ... | head -n 1`.
+COGNEE_DIR="$SITE_PACKAGES/cognee"
+if [[ ! -d "$COGNEE_DIR" ]]; then
+    die "cognee package missing at $COGNEE_DIR — did uv sync fail?"
 fi
 mkdir -p "$COGNEE_DIR/.cognee_system/databases"
 mkdir -p "$COGNEE_DIR/.data_storage"
@@ -304,7 +324,9 @@ log "  cognee writable dirs ready: $COGNEE_DIR/{.cognee_system,.data_storage}"
 # warnings). The runtime sets COGNEE_DISABLE_TELEMETRY=true at import time
 # anyway (elephantbroker/__init__.py), so this file stays empty — but
 # pre-creating it avoids log noise.
-ANON_ID_PATH=$(find "$REPO_DIR/.venv/lib" -maxdepth 3 -type d -name site-packages | head -n 1)/.anon_id
+#
+# C8: derive ANON_ID_PATH from $SITE_PACKAGES instead of `find ... | head -n 1`.
+ANON_ID_PATH="$SITE_PACKAGES/.anon_id"
 touch "$ANON_ID_PATH"
 chmod 644 "$ANON_ID_PATH"
 log "  cognee anon_id touched: $ANON_ID_PATH"
@@ -422,6 +444,29 @@ log "  chowned $COGNEE_DIR/.cognee_system    → $SERVICE_USER:$SERVICE_GROUP"
 log "  chowned $COGNEE_DIR/.data_storage     → $SERVICE_USER:$SERVICE_GROUP"
 log "  chowned $ANON_ID_PATH                 → $SERVICE_USER:$SERVICE_GROUP"
 log "  $PREFIX itself remains root-owned (defense in depth)"
+
+# C4 (TODO-3-013): validate the on-disk config BEFORE handing the unit to
+# systemd. This calls the same ElephantBrokerConfig.load() the runtime uses
+# at startup, so any structural failure (extra="forbid" violation, embedding
+# model/dim mismatch, malformed YAML, env coercion error) surfaces here as
+# a clear install-log error instead of a confusing journalctl failure 30
+# seconds later.
+#
+# We treat validation failure as a WARNING (not a die) because the operator
+# may legitimately have just-copied template state — gateway_id is still the
+# sentinel default, secrets aren't filled in, etc. The Next steps: section
+# at the bottom of this script tells the operator what to edit. The validate
+# step is here to surface the early errors that would otherwise hide behind
+# "service won't start", not to gate the install on a fully-working config.
+log "  validating $CONFIG_DIR/default.yaml against the runtime schema"
+if "$PREFIX/.venv/bin/elephantbroker" config validate \
+        --config "$CONFIG_DIR/default.yaml" 2>/tmp/eb-validate.err; then
+    log "  config validate ✓ ($CONFIG_DIR/default.yaml)"
+else
+    warn "  config validate FAILED (see /tmp/eb-validate.err for details):"
+    while IFS= read -r line; do warn "    $line"; done < /tmp/eb-validate.err
+    warn "  → fix the issues above before running 'systemctl start elephantbroker'"
+fi
 
 # =============================================================================
 log "Step 7/8: install systemd unit files"
