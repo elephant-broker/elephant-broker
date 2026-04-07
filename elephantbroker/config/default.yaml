@@ -8,9 +8,14 @@
 #
 # Source schema:  elephantbroker/schemas/config.py
 # Loading:        elephantbroker serve --config /etc/elephantbroker/default.yaml
-# Env overrides:  only the 14 env vars in `from_yaml()`'s curated list override
-#                 YAML values. They are tagged inline below as `env: EB_*`.
-#                 All other fields are YAML-only or env-only via `from_env()`.
+#                 (or omit --config to load THIS file as the packaged resource
+#                  via ElephantBrokerConfig.load() — F2/F3 D5 OPERATOR LOCKED)
+# Env overrides:  every binding in `ENV_OVERRIDE_BINDINGS` (schemas/config.py)
+#                 overrides the YAML value at load time. Bindings are tagged
+#                 inline below as `env: EB_*`. The packaged default.yaml is
+#                 the single source of truth — `from_env()` no longer exists,
+#                 and the inverse contract test in tests/unit/schemas pins
+#                 every env var that source code references to a binding here.
 #                 See docs/CONFIGURATION.md §1 for the full env var matrix.
 #
 # Conventions:

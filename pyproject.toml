@@ -65,6 +65,14 @@ members = ["hitl-middleware"]
 [tool.setuptools.packages.find]
 include = ["elephantbroker*"]
 
+# Ship default.yaml inside the wheel so `ElephantBrokerConfig.load()` can read
+# it as a packaged resource via `importlib.resources.files("elephantbroker.config")`.
+# Without this, a wheel install (or any non-source-tree install) would fail to
+# locate default.yaml at runtime — F2/F3: from_env() removal made the YAML
+# the single source of truth, so the file MUST be packaged.
+[tool.setuptools.package-data]
+elephantbroker = ["config/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

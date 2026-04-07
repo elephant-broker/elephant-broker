@@ -45,7 +45,7 @@ async def app():
     from elephantbroker.runtime.container import RuntimeContainer
     from elephantbroker.schemas.tiers import BusinessTier
 
-    config = ElephantBrokerConfig.from_env()
+    config = ElephantBrokerConfig.load()
     container = await RuntimeContainer.from_config(config, tier=BusinessTier.FULL)
     application = create_app(container)
     yield application

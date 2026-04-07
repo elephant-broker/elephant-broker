@@ -32,10 +32,7 @@ def serve(host: str, port: int, log_level: str, config: str | None) -> None:
     from elephantbroker.schemas.config import ElephantBrokerConfig
 
     async def _build_and_run() -> None:
-        if config:
-            eb_config = ElephantBrokerConfig.from_yaml(config)
-        else:
-            eb_config = ElephantBrokerConfig.from_env()
+        eb_config = ElephantBrokerConfig.load(config)
         container = await RuntimeContainer.from_config(eb_config)
 
         from elephantbroker.api.app import create_app

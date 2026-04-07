@@ -351,8 +351,11 @@ class BlockerExtractionConfig(_StrictBase):
 # =============================================================================
 #
 # This list defines EVERY env var that overrides a YAML field when loading via
-# `ElephantBrokerConfig.from_yaml()`. The contract is: if `from_env()` reads an
-# env var, that same env var must appear here so it also overrides YAML.
+# `ElephantBrokerConfig.from_yaml()` (or its `load()` wrapper). The contract is:
+# if any source code references `os.environ["EB_*"]` or `os.getenv("EB_*")`, that
+# same env var must appear here so the registry — and the packaged default.yaml
+# that the runtime now boots from — covers it. The inverse contract test in
+# `tests/unit/schemas/test_config.py` walks the source tree and asserts this.
 #
 # Each entry is `(env_var_name, dotted_config_path, type_coercer)`:
 #   - env_var_name: e.g. "EB_LLM_MAX_TOKENS"
@@ -508,7 +511,7 @@ def _apply_env_overrides(yaml_data: dict) -> None:
 def _apply_api_key_fallbacks(yaml_data: dict) -> None:
     """Apply secret inheritance chains so operators don't have to duplicate keys.
 
-    Mirrors ``from_env()`` fallback semantics:
+    Inheritance tiers:
       1. ``llm.api_key`` ← ``cognee.embedding_api_key`` (if llm.api_key empty)
       2. ``compaction_llm.api_key`` / ``successful_use.api_key`` /
          ``blocker_extraction.api_key`` ← ``llm.api_key`` (each only if its own value is empty)
@@ -584,14 +587,16 @@ class ElephantBrokerConfig(_StrictBase):
 
         Resolution order: env var (if set) > YAML value > schema default.
 
-        EVERY env var that ``from_env()`` reads also overrides YAML — see
-        ``ENV_OVERRIDE_BINDINGS`` for the complete registry. Adding a new env
-        var to ``from_env()`` REQUIRES adding the matching binding here, or
-        operators will silently lose the ability to override that field when
-        loading via YAML.
+        Every env var that overrides a YAML field MUST be declared in
+        ``ENV_OVERRIDE_BINDINGS`` — the registry is the single source of
+        truth. Removing or renaming a binding silently breaks operators
+        relying on the env var path, so the registry doubles as the
+        contract test target (see ``test_every_binding_applies``).
 
         After env overrides are applied, ``_apply_api_key_fallbacks()`` runs
-        to mirror ``from_env()``'s secret inheritance chains.
+        to populate empty derived secrets (compaction_llm, successful_use,
+        blocker_extraction) from ``llm.api_key``, and to populate
+        ``llm.api_key`` from ``cognee.embedding_api_key`` if both are empty.
 
         The merged dict is re-validated through ``cls.model_validate()`` so any
         type or constraint violation (e.g. ``EB_EMBEDDING_DIMENSIONS=0`` would
@@ -609,117 +614,35 @@ class ElephantBrokerConfig(_StrictBase):
         return cls.model_validate(yaml_data)
 
     @classmethod
-    def from_env(cls) -> ElephantBrokerConfig:
-        """Create config from environment variables with EB_ prefix."""
-        cognee = CogneeConfig(
-            neo4j_uri=os.environ.get("EB_NEO4J_URI", "bolt://localhost:7687"),
-            neo4j_user=os.environ.get("EB_NEO4J_USER", "neo4j"),
-            neo4j_password=os.environ.get("EB_NEO4J_PASSWORD", ""),
-            qdrant_url=os.environ.get("EB_QDRANT_URL", "http://localhost:6333"),
-            default_dataset=os.environ.get("EB_DEFAULT_DATASET", "elephantbroker"),
-            embedding_provider=os.environ.get("EB_EMBEDDING_PROVIDER", "openai"),
-            embedding_model=os.environ.get("EB_EMBEDDING_MODEL", "gemini/text-embedding-004"),
-            embedding_endpoint=os.environ.get("EB_EMBEDDING_ENDPOINT", "http://localhost:8811/v1"),
-            embedding_api_key=os.environ.get("EB_EMBEDDING_API_KEY", ""),
-            embedding_dimensions=int(os.environ.get("EB_EMBEDDING_DIMENSIONS", "768")),
-        )
-        embedding_api_key = os.environ.get("EB_EMBEDDING_API_KEY", "")
-        llm_api_key = os.environ.get("EB_LLM_API_KEY", "") or embedding_api_key
-        llm = LLMConfig(
-            model=os.environ.get("EB_LLM_MODEL", "openai/gemini/gemini-2.5-pro"),
-            endpoint=os.environ.get("EB_LLM_ENDPOINT", "http://localhost:8811/v1"),
-            api_key=llm_api_key,
-            max_tokens=int(os.environ.get("EB_LLM_MAX_TOKENS", "8192")),
-            temperature=float(os.environ.get("EB_LLM_TEMPERATURE", "0.1")),
-            extraction_max_input_tokens=int(os.environ.get("EB_LLM_EXTRACTION_MAX_INPUT_TOKENS", "4000")),
-            extraction_max_output_tokens=int(os.environ.get("EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS", "16384")),
-            extraction_max_facts_per_batch=int(os.environ.get("EB_LLM_EXTRACTION_MAX_FACTS", "10")),
-            summarization_max_output_tokens=int(os.environ.get("EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS", "200")),
-            summarization_min_artifact_chars=int(os.environ.get("EB_LLM_SUMMARIZATION_MIN_CHARS", "500")),
-            ingest_batch_size=int(os.environ.get("EB_INGEST_BATCH_SIZE", "6")),
-            ingest_batch_timeout_seconds=float(os.environ.get("EB_INGEST_BATCH_TIMEOUT", "60.0")),
-            ingest_buffer_ttl_seconds=int(os.environ.get("EB_INGEST_BUFFER_TTL", "300")),
-            extraction_context_facts=int(os.environ.get("EB_EXTRACTION_CONTEXT_FACTS", "20")),
-            extraction_context_ttl_seconds=int(os.environ.get("EB_EXTRACTION_CONTEXT_TTL", "3600")),
-        )
-        reranker = RerankerConfig(
-            endpoint=os.environ.get("EB_RERANKER_ENDPOINT", "http://localhost:1235"),
-            api_key=os.environ.get("EB_RERANKER_API_KEY", ""),
-            model=os.environ.get("EB_RERANKER_MODEL", "Qwen/Qwen3-Reranker-4B"),
-        )
-        trace_config = TraceConfig(
-            otel_logs_enabled=os.environ.get("EB_TRACE_OTEL_LOGS_ENABLED", "false").lower() == "true",
-            memory_max_events=int(os.environ.get("EB_TRACE_MEMORY_MAX_EVENTS", "10000")),
-        )
-        clickhouse_config = ClickHouseConfig(
-            enabled=os.environ.get("EB_CLICKHOUSE_ENABLED", "false").lower() == "true",
-            host=os.environ.get("EB_CLICKHOUSE_HOST", "localhost"),
-            port=int(os.environ.get("EB_CLICKHOUSE_PORT", "8123")),
-            database=os.environ.get("EB_CLICKHOUSE_DATABASE", "otel"),
-        )
-        infra = InfraConfig(
-            redis_url=os.environ.get("EB_REDIS_URL", "redis://localhost:6379"),
-            otel_endpoint=os.environ.get("EB_OTEL_ENDPOINT"),
-            log_level=os.environ.get("EB_LOG_LEVEL", "INFO"),
-            metrics_ttl_seconds=int(os.environ.get("EB_METRICS_TTL_SECONDS", "3600")),
-            trace=trace_config,
-            clickhouse=clickhouse_config,
-        )
-        embedding_cache = EmbeddingCacheConfig(
-            enabled=os.environ.get("EB_EMBEDDING_CACHE_ENABLED", "true").lower() == "true",
-            ttl_seconds=int(os.environ.get("EB_EMBEDDING_CACHE_TTL", "3600")),
-        )
-        scoring = ScoringConfig(
-            snapshot_ttl_seconds=int(os.environ.get("EB_SCORING_SNAPSHOT_TTL", "300")),
-            session_goals_ttl_seconds=int(os.environ.get("EB_SESSION_GOALS_TTL", "86400")),
-        )
-        gateway = GatewayConfig(
-            gateway_id=os.environ.get("EB_GATEWAY_ID", ""),
-            gateway_short_name=os.environ.get("EB_GATEWAY_SHORT_NAME", ""),
-            org_id=os.environ.get("EB_ORG_ID") or None,
-            team_id=os.environ.get("EB_TEAM_ID") or None,
-            agent_authority_level=int(os.environ.get("EB_AGENT_AUTHORITY_LEVEL", "0")),
-        )
-        compaction_llm_api_key = os.environ.get("EB_COMPACTION_LLM_API_KEY", "") or llm_api_key
-        compaction_llm = CompactionLLMConfig(
-            model=os.environ.get("EB_COMPACTION_LLM_MODEL", "gemini/gemini-2.5-flash"),
-            endpoint=os.environ.get("EB_COMPACTION_LLM_ENDPOINT", llm.endpoint),
-            api_key=compaction_llm_api_key,
-        )
-        # Master guard switch — env: EB_GUARDS_ENABLED → guards.enabled
-        # (the legacy top-level `enable_guards` field was dead code; the wired
-        # switch is `RedLineGuardEngine`'s `_config.enabled` flag, which is
-        # passed `config.guards` from the runtime container).
-        guards = GuardConfig(
-            enabled=os.environ.get("EB_GUARDS_ENABLED", "true").lower() == "true",
-        )
-        return cls(
-            cognee=cognee,
-            llm=llm,
-            reranker=reranker,
-            infra=infra,
-            default_profile=os.environ.get("EB_DEFAULT_PROFILE", "coding"),
-            enable_trace_ledger=os.environ.get("EB_ENABLE_TRACE_LEDGER", "true").lower() == "true",
-            max_concurrent_sessions=int(os.environ.get("EB_MAX_CONCURRENT_SESSIONS", "100")),
-            embedding_cache=embedding_cache,
-            scoring=scoring,
-            gateway=gateway,
-            guards=guards,
-            compaction_llm=compaction_llm,
-            consolidation_min_retention_seconds=int(os.environ.get("EB_CONSOLIDATION_MIN_RETENTION_SECONDS", "172800")),
-            # Phase 9 env overrides
-            successful_use=SuccessfulUseConfig(
-                enabled=os.environ.get("EB_SUCCESSFUL_USE_ENABLED", "false").lower() == "true",
-                endpoint=os.environ.get("EB_SUCCESSFUL_USE_ENDPOINT", "http://host.docker.internal:8811/v1"),
-                api_key=os.environ.get("EB_SUCCESSFUL_USE_API_KEY", "") or llm_api_key,
-                model=os.environ.get("EB_SUCCESSFUL_USE_MODEL", "gemini/gemini-2.5-flash"),
-                batch_size=int(os.environ.get("EB_SUCCESSFUL_USE_BATCH_SIZE", "5")),
-            ),
-            blocker_extraction=BlockerExtractionConfig(
-                enabled=os.environ.get("EB_BLOCKER_EXTRACTION_ENABLED", "false").lower() == "true",
-                endpoint=os.environ.get("EB_BLOCKER_EXTRACTION_ENDPOINT", "http://host.docker.internal:8811/v1"),
-                api_key=os.environ.get("EB_BLOCKER_EXTRACTION_API_KEY", "") or llm_api_key,
-                model=os.environ.get("EB_BLOCKER_EXTRACTION_MODEL", "gemini/gemini-2.5-flash"),
-                run_every_n_turns=int(os.environ.get("EB_BLOCKER_EXTRACTION_EVERY_N_TURNS", "3")),
-            ),
-        )
+    def load(cls, path: str | None = None) -> ElephantBrokerConfig:
+        """Load runtime config from a YAML file (or the packaged default).
+
+        Single entry point for the runtime, CLI, and tests. ``path`` may be:
+
+        - A filesystem path (e.g. ``/etc/elephantbroker/default.yaml``) — used
+          in production where operators ship a tuned YAML beside the venv.
+        - ``None`` — falls back to the packaged
+          ``elephantbroker/config/default.yaml`` resource. This is the path
+          tests and standalone-dev use, and it lets the runtime boot with
+          zero on-disk config (provided env vars supply the secrets and the
+          startup safety guard is satisfied).
+
+        Env vars in ``ENV_OVERRIDE_BINDINGS`` then override any YAML values,
+        and api-key inheritance fallbacks fire to populate empty secrets.
+        This replaces the legacy ``from_env()`` classmethod, which had to
+        duplicate every default and drift from the registry whenever a new
+        field was added (F2/F3 — D5 OPERATOR LOCKED). The packaged default
+        YAML is now the single source of truth for both YAML-only and
+        env-only callers.
+        """
+        if path is None:
+            # `as_file()` materializes the resource on disk if needed (e.g.
+            # when loaded from a zipimport wheel). For our wheel layout the
+            # file is already a real file under site-packages, so this is a
+            # no-op context manager — but the abstraction lets us survive
+            # any future packaging change without touching this code.
+            from importlib.resources import as_file, files
+            ref = files("elephantbroker.config") / "default.yaml"
+            with as_file(ref) as default_path:
+                return cls.from_yaml(str(default_path))
+        return cls.from_yaml(path)

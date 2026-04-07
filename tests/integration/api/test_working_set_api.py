@@ -22,7 +22,7 @@ pytestmark = pytest.mark.integration
 @pytest_asyncio.fixture
 async def live_client():
     """Create an async test client backed by real infrastructure."""
-    config = ElephantBrokerConfig.from_env()
+    config = ElephantBrokerConfig.load()
     container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
     app = create_app(container)
     transport = ASGITransport(app=app)

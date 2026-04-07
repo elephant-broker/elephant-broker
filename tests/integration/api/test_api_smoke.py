@@ -15,7 +15,7 @@ from elephantbroker.schemas.tiers import BusinessTier
 
 @pytest_asyncio.fixture
 async def live_client():
-    config = ElephantBrokerConfig.from_env()
+    config = ElephantBrokerConfig.load()
     container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
     app = create_app(container)
     transport = ASGITransport(app=app)

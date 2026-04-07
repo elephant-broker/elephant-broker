@@ -187,9 +187,11 @@ class TestConfigLoading:
         with pytest.raises(FileNotFoundError):
             ElephantBrokerConfig.from_yaml("/nonexistent/path.yaml")
 
-    def test_from_env_still_works(self):
+    def test_load_no_path_uses_packaged_default(self):
         from elephantbroker.schemas.config import ElephantBrokerConfig
-        config = ElephantBrokerConfig.from_env()
+        # F2/F3 — D5 OPERATOR LOCKED: load() with no path falls back to the
+        # packaged default.yaml resource and applies env overrides on top.
+        config = ElephantBrokerConfig.load()
         assert config.gateway.gateway_id is not None
 
     def test_default_yaml_loads(self):

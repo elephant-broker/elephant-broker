@@ -92,12 +92,17 @@ class TestElephantBrokerConfig:
         assert restored.llm.model == "gpt-4o"
         assert restored.llm.api_key == "sk-test"
 
-    def test_from_env_defaults(self):
-        # Clear any EB_ vars that might exist
+    def test_load_defaults(self):
+        """`load()` with no path returns the packaged default.yaml values.
+
+        F2/F3 — D5 OPERATOR LOCKED: replaces the deleted ``from_env()``
+        defaults test. The packaged ``default.yaml`` is now the single source
+        of truth, so these assertions pin the shipped values.
+        """
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.default_profile == "coding"
             assert c.cognee.neo4j_uri == "bolt://localhost:7687"
             assert c.infra.redis_url == "redis://localhost:6379"
@@ -105,24 +110,26 @@ class TestElephantBrokerConfig:
         finally:
             os.environ.update(saved)
 
-    def test_from_env_always_creates_llm(self):
+    def test_load_always_creates_llm(self):
+        """LLMConfig is always populated from the packaged default.yaml."""
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.llm is not None
             assert c.llm.model == "openai/gemini/gemini-2.5-pro"
         finally:
             os.environ.update(saved)
 
-    def test_from_env_with_llm_vars(self):
+    def test_load_with_llm_env_overrides(self):
+        """EB_LLM_* env vars override packaged YAML llm values via load()."""
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
             os.environ["EB_LLM_MODEL"] = "gpt-4o"
             os.environ["EB_LLM_ENDPOINT"] = "https://api.openai.com/v1"
             os.environ["EB_LLM_API_KEY"] = "sk-test"
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.llm is not None
             assert c.llm.model == "gpt-4o"
             assert c.llm.endpoint == "https://api.openai.com/v1"
@@ -132,7 +139,8 @@ class TestElephantBrokerConfig:
                 os.environ.pop(k, None)
             os.environ.update(saved)
 
-    def test_from_env_overrides(self):
+    def test_load_env_overrides_top_level(self):
+        """Top-level + nested env overrides flow through load()."""
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
@@ -140,7 +148,7 @@ class TestElephantBrokerConfig:
             os.environ["EB_NEO4J_URI"] = "bolt://prod:7687"
             os.environ["EB_GUARDS_ENABLED"] = "false"
             os.environ["EB_MAX_CONCURRENT_SESSIONS"] = "50"
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.default_profile == "research"
             assert c.cognee.neo4j_uri == "bolt://prod:7687"
             assert c.guards.enabled is False
@@ -197,7 +205,8 @@ class TestElephantBrokerConfig:
             os.environ.pop("EB_GUARDS_ENABLED", None)
             os.environ.update(saved)
 
-    def test_from_env_embedding_overrides(self):
+    def test_load_embedding_env_overrides(self):
+        """EB_EMBEDDING_* env vars override packaged YAML cognee values via load()."""
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
@@ -206,7 +215,7 @@ class TestElephantBrokerConfig:
             os.environ["EB_EMBEDDING_ENDPOINT"] = "http://embed:9999/v1"
             os.environ["EB_EMBEDDING_API_KEY"] = "sk-test"
             os.environ["EB_EMBEDDING_DIMENSIONS"] = "512"
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.cognee.embedding_provider == "custom"
             assert c.cognee.embedding_model == "my-model"
             assert c.cognee.embedding_endpoint == "http://embed:9999/v1"
@@ -239,28 +248,28 @@ class TestLLMConfigValidation:
         with pytest.raises(ValidationError):
             LLMConfig(temperature=2.1)
 
-    def test_from_env_api_key_fallback(self):
-        """EB_LLM_API_KEY falls back to EB_EMBEDDING_API_KEY."""
+    def test_load_api_key_fallback(self):
+        """EB_LLM_API_KEY falls back to EB_EMBEDDING_API_KEY via load() inheritance."""
         import os
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
             os.environ["EB_EMBEDDING_API_KEY"] = "embed-key"
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.llm.api_key == "embed-key"
         finally:
             os.environ.pop("EB_EMBEDDING_API_KEY", None)
             os.environ.update(saved)
 
-    def test_from_env_llm_key_takes_precedence(self):
-        """EB_LLM_API_KEY takes precedence over EB_EMBEDDING_API_KEY."""
+    def test_load_llm_key_takes_precedence(self):
+        """EB_LLM_API_KEY takes precedence over EB_EMBEDDING_API_KEY via load()."""
         import os
         env_keys = [k for k in os.environ if k.startswith("EB_")]
         saved = {k: os.environ.pop(k) for k in env_keys}
         try:
             os.environ["EB_EMBEDDING_API_KEY"] = "embed-key"
             os.environ["EB_LLM_API_KEY"] = "llm-key"
-            c = ElephantBrokerConfig.from_env()
+            c = ElephantBrokerConfig.load()
             assert c.llm.api_key == "llm-key"
         finally:
             os.environ.pop("EB_EMBEDDING_API_KEY", None)

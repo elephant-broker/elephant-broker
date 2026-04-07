@@ -22,7 +22,7 @@ pytestmark = pytest.mark.integration
 @pytest_asyncio.fixture
 async def container():
     """Build a full RuntimeContainer wired to Docker test services."""
-    config = ElephantBrokerConfig.from_env()
+    config = ElephantBrokerConfig.load()
     c = await RuntimeContainer.from_config(config, BusinessTier.FULL)
     yield c
     try:
