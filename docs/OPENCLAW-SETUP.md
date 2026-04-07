@@ -572,7 +572,7 @@ Additional Phase 7 variable:
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `EB_ENABLE_GUARDS` | No | `true` | Enable/disable the guard engine |
+| `EB_GUARDS_ENABLED` | No | `true` | Master switch for the 6-layer guard pipeline (overrides `guards.enabled` in YAML) |
 
 ---
 

@@ -36,7 +36,7 @@
 # consolidation routing. They MUST be the UUIDs emitted by `ebrun bootstrap`.
 
 gateway:
-  gateway_id: "local"                # env: EB_GATEWAY_ID — replace with your gateway label
+  gateway_id: ""                     # env: EB_GATEWAY_ID — REQUIRED. Runtime refuses to boot if empty (set EB_ALLOW_DEFAULT_GATEWAY_ID=true to override for dev/test)
   gateway_short_name: ""             # human-friendly log/trace label; defaults to first 8 chars of gateway_id
                                      # WARNING: also a TS-plugin env var; keep both VMs in sync to avoid mismatched log labels
   register_agent_identity: true      # auto-register agent self-ActorRef on session_start
@@ -56,7 +56,7 @@ gateway:
 cognee:
   neo4j_uri: "bolt://localhost:7687"            # env: EB_NEO4J_URI
   neo4j_user: "neo4j"
-  neo4j_password: "elephant_dev"                # (secret) override via EB_NEO4J_PASSWORD env on prod hosts
+  neo4j_password: ""                            # (secret) REQUIRED via EB_NEO4J_PASSWORD env. Runtime refuses to boot with empty password unless EB_DEV_MODE=true
   qdrant_url: "http://localhost:6333"           # env: EB_QDRANT_URL
   default_dataset: "elephantbroker"             # DANGER: changing this orphans all existing Cognee data
   embedding_provider: "openai"                  # API client style (openai SDK shape) — works for any LiteLLM-routed backend
@@ -317,7 +317,7 @@ async_analysis:
 # overlay) — they do NOT physically block tool calls (TD-12).
 
 guards:
-  enabled: true                         # global kill switch; also at top-level `enable_guards`
+  enabled: true                         # master switch for the 6-layer guard pipeline — env: EB_GUARDS_ENABLED
   builtin_rules_enabled: true           # ships with 12 builtin red-line patterns; disable to use only your own rules
   history_ttl_seconds: 86400            # how long guard event history stays in Redis per session
   max_history_events: 50                # max guard events kept per session before LRU eviction
@@ -407,6 +407,6 @@ profile_cache:
 default_profile: "coding"               # which profile governs scoring/retrieval/compaction when no per-session profile is set
                                         # options: coding, research, managerial, worker, personal_assistant
 enable_trace_ledger: true               # disable only for benchmarks — losing trace events removes all forensic visibility
-enable_guards: true                     # master switch for the guard pipeline (also at guards.enabled)
+# (the master guard switch lives at `guards.enabled` above — env: EB_GUARDS_ENABLED)
 max_concurrent_sessions: 100            # rejection threshold; raise carefully — Redis/Neo4j connection pressure scales with this
 consolidation_min_retention_seconds: 172800   # (48h) min age before consolidation pipeline can decay/archive a fact

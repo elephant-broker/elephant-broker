@@ -64,7 +64,7 @@ class TestElephantBrokerConfig:
     def test_defaults(self):
         c = ElephantBrokerConfig()
         assert c.default_profile == "coding"
-        assert c.enable_guards is True
+        assert c.guards.enabled is True
         assert c.max_concurrent_sessions == 100
 
     def test_llm_always_created(self):
@@ -101,7 +101,7 @@ class TestElephantBrokerConfig:
             assert c.default_profile == "coding"
             assert c.cognee.neo4j_uri == "bolt://localhost:7687"
             assert c.infra.redis_url == "redis://localhost:6379"
-            assert c.enable_guards is True
+            assert c.guards.enabled is True
         finally:
             os.environ.update(saved)
 
@@ -138,16 +138,63 @@ class TestElephantBrokerConfig:
         try:
             os.environ["EB_DEFAULT_PROFILE"] = "research"
             os.environ["EB_NEO4J_URI"] = "bolt://prod:7687"
-            os.environ["EB_ENABLE_GUARDS"] = "false"
+            os.environ["EB_GUARDS_ENABLED"] = "false"
             os.environ["EB_MAX_CONCURRENT_SESSIONS"] = "50"
             c = ElephantBrokerConfig.from_env()
             assert c.default_profile == "research"
             assert c.cognee.neo4j_uri == "bolt://prod:7687"
-            assert c.enable_guards is False
+            assert c.guards.enabled is False
             assert c.max_concurrent_sessions == 50
         finally:
-            for k in ["EB_DEFAULT_PROFILE", "EB_NEO4J_URI", "EB_ENABLE_GUARDS", "EB_MAX_CONCURRENT_SESSIONS"]:
+            for k in ["EB_DEFAULT_PROFILE", "EB_NEO4J_URI", "EB_GUARDS_ENABLED", "EB_MAX_CONCURRENT_SESSIONS"]:
                 os.environ.pop(k, None)
+            os.environ.update(saved)
+
+    def test_extra_forbid_top_level_typo(self):
+        """ElephantBrokerConfig must reject unknown top-level keys.
+
+        Pins the `extra="forbid"` contract so a typo like `enable_guard` (vs
+        the legacy `enable_guards`, now removed) cannot silently leave the
+        intended setting at default. Before this contract, dropping a stray
+        top-level field would be swallowed and operators would lose the
+        ability to spot misspelled YAML.
+        """
+        with pytest.raises(ValidationError, match="extra"):
+            ElephantBrokerConfig(unknown_top_level=42)
+
+    def test_extra_forbid_nested_typo(self):
+        """Nested submodels (GuardConfig, GatewayConfig, ...) must also reject typos."""
+        from elephantbroker.schemas.config import GatewayConfig, GuardConfig
+        with pytest.raises(ValidationError, match="extra"):
+            GuardConfig(enabld=True)  # 'enabled' typo
+        with pytest.raises(ValidationError, match="extra"):
+            GatewayConfig(gatway_id="oops")  # 'gateway_id' typo
+
+    def test_extra_forbid_via_from_yaml(self, tmp_path):
+        """`from_yaml()` must surface unknown YAML keys as ValidationError, not swallow them."""
+        yaml_path = tmp_path / "stray.yaml"
+        yaml_path.write_text("guards:\n  enabld: true\n")  # typo
+        with pytest.raises(ValidationError, match="extra"):
+            ElephantBrokerConfig.from_yaml(str(yaml_path))
+
+    def test_eb_guards_enabled_env_var_disables_via_from_yaml(self, tmp_path):
+        """EB_GUARDS_ENABLED=false flows through from_yaml() to guards.enabled.
+
+        Regression for the dead `enable_guards` field removal: the old
+        EB_ENABLE_GUARDS variable was the only documented switch but was wired
+        to a no-op field. This test pins the new EB_GUARDS_ENABLED → guards.enabled
+        path so it cannot silently regress to a top-level field again.
+        """
+        env_keys = [k for k in os.environ if k.startswith("EB_")]
+        saved = {k: os.environ.pop(k) for k in env_keys}
+        try:
+            yaml_path = tmp_path / "guards.yaml"
+            yaml_path.write_text("guards:\n  enabled: true\n")
+            os.environ["EB_GUARDS_ENABLED"] = "false"
+            cfg = ElephantBrokerConfig.from_yaml(str(yaml_path))
+            assert cfg.guards.enabled is False
+        finally:
+            os.environ.pop("EB_GUARDS_ENABLED", None)
             os.environ.update(saved)
 
     def test_from_env_embedding_overrides(self):

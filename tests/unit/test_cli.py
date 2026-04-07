@@ -198,4 +198,6 @@ class TestConfigLoading:
         yaml_path = os.path.join(os.path.dirname(__file__), "..", "..", "elephantbroker", "config", "default.yaml")
         if os.path.exists(yaml_path):
             config = ElephantBrokerConfig.from_yaml(yaml_path)
-            assert config.gateway.gateway_id == "local"
+            # default.yaml ships with an empty gateway_id sentinel — operators
+            # MUST set EB_GATEWAY_ID before booting (Bucket A — A3 startup guard).
+            assert config.gateway.gateway_id == ""

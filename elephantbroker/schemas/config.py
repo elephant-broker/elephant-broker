@@ -3,14 +3,33 @@ from __future__ import annotations
 
 import os
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class CogneeConfig(BaseModel):
+class _StrictBase(BaseModel):
+    """Base class for every config submodel.
+
+    Sets ``extra="forbid"`` so unknown YAML/dict keys raise ``ValidationError``
+    at load time instead of being silently swallowed. This catches operator
+    typos like ``guards: enabld: true`` (which would otherwise leave
+    ``guards.enabled`` at its default and silently change runtime behavior).
+
+    All config schemas in this file inherit from ``_StrictBase`` rather than
+    ``BaseModel`` directly. If you add a new submodel, inherit from this base
+    so the strictness contract holds across the whole config tree.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+
+class CogneeConfig(_StrictBase):
     """Configuration for the Cognee knowledge plane."""
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "elephant_dev"  # dev/test default — override via EB_NEO4J_PASSWORD in production
+    # Empty by default — runtime refuses to boot with an empty password unless
+    # EB_DEV_MODE=true is set (see RuntimeContainer.from_config). The legacy
+    # "elephant_dev" sentinel was a foot-gun: prod hosts that forgot to set
+    # EB_NEO4J_PASSWORD would silently authenticate with the dev password.
+    neo4j_password: str = ""
     qdrant_url: str = "http://localhost:6333"
     default_dataset: str = "elephantbroker"  # DANGER: changing this orphans all existing Cognee data
     embedding_provider: str = "openai"  # API client style — openai SDK shape works for any LiteLLM-routed backend
@@ -20,7 +39,7 @@ class CogneeConfig(BaseModel):
     embedding_dimensions: int = Field(default=768, ge=1)  # must match embedding_model output dim
 
 
-class LLMConfig(BaseModel):
+class LLMConfig(_StrictBase):
     """LLM configuration for extraction, classification, and summarization."""
     # Cognee requires the "openai/" prefix to route through its OpenAI-compatible
     # client. Cognee strips the prefix internally before sending to LiteLLM, so
@@ -43,7 +62,7 @@ class LLMConfig(BaseModel):
     extraction_context_ttl_seconds: int = Field(default=3600, ge=60)
 
 
-class RerankerConfig(BaseModel):
+class RerankerConfig(_StrictBase):
     """Reranker configuration (Phase 5+)."""
     endpoint: str = "http://localhost:1235"
     api_key: str = ""
@@ -56,14 +75,14 @@ class RerankerConfig(BaseModel):
     top_n: int | None = None
 
 
-class TraceConfig(BaseModel):
+class TraceConfig(_StrictBase):
     """TraceLedger in-memory retention and OTEL log export."""
     memory_max_events: int = Field(default=10_000, ge=100)
     memory_ttl_seconds: int = Field(default=3600, ge=60)
     otel_logs_enabled: bool = False
 
 
-class ClickHouseConfig(BaseModel):
+class ClickHouseConfig(_StrictBase):
     """ClickHouse connection for cross-session analytics (Stage 7)."""
     enabled: bool = False
     host: str = "localhost"
@@ -72,7 +91,7 @@ class ClickHouseConfig(BaseModel):
     logs_table: str = "otel_logs"
 
 
-class InfraConfig(BaseModel):
+class InfraConfig(_StrictBase):
     """Infrastructure configuration."""
     redis_url: str = "redis://localhost:6379"
     otel_endpoint: str | None = None
@@ -85,14 +104,14 @@ class InfraConfig(BaseModel):
 # --- Phase 5 config models ---
 
 
-class EmbeddingCacheConfig(BaseModel):
+class EmbeddingCacheConfig(_StrictBase):
     """Redis-backed embedding cache configuration."""
     enabled: bool = True
     ttl_seconds: int = Field(default=3600, ge=60)
     key_prefix: str = "eb:emb_cache"
 
 
-class ScoringConfig(BaseModel):
+class ScoringConfig(_StrictBase):
     """Working set scoring pipeline configuration."""
     neutral_use_prior: float = Field(default=0.5, ge=0.0, le=1.0)
     cheap_prune_max_candidates: int = Field(default=80, ge=1)
@@ -103,7 +122,7 @@ class ScoringConfig(BaseModel):
     working_set_build_global_goals_filter_by_actors: bool = True
 
 
-class VerificationMultipliers(BaseModel):
+class VerificationMultipliers(_StrictBase):
     """Multipliers for claim verification status on confidence scoring."""
     supervisor_verified: float = Field(default=1.0, ge=0.0, le=2.0)
     tool_supported: float = Field(default=0.9, ge=0.0, le=2.0)
@@ -112,7 +131,7 @@ class VerificationMultipliers(BaseModel):
     no_claim: float = Field(default=0.8, ge=0.0, le=2.0)
 
 
-class ConflictDetectionConfig(BaseModel):
+class ConflictDetectionConfig(_StrictBase):
     """Global penalty values for contradiction detection layers."""
     supersession_penalty: float = Field(default=1.0, ge=0.0)
     contradiction_edge_penalty: float = Field(default=0.9, ge=0.0)
@@ -123,7 +142,7 @@ class ConflictDetectionConfig(BaseModel):
     redundancy_similarity_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
 
 
-class SuccessfulUseConfig(BaseModel):
+class SuccessfulUseConfig(_StrictBase):
     """Configuration for successful-use feedback.
 
     When enabled, fires an LLM-based batch evaluation to determine which
@@ -141,7 +160,7 @@ class SuccessfulUseConfig(BaseModel):
     run_async: bool = True
 
 
-class GoalInjectionConfig(BaseModel):
+class GoalInjectionConfig(_StrictBase):
     """Controls goal injection into extraction prompts."""
     enabled: bool = True
     max_session_goals: int = Field(default=5, ge=0)
@@ -149,7 +168,7 @@ class GoalInjectionConfig(BaseModel):
     include_persistent_goals: bool = True
 
 
-class GoalRefinementConfig(BaseModel):
+class GoalRefinementConfig(_StrictBase):
     """Goal refinement pipeline configuration."""
     hints_enabled: bool = True
     refinement_task_enabled: bool = True
@@ -161,7 +180,7 @@ class GoalRefinementConfig(BaseModel):
     subgoal_dedup_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
-class ProcedureCandidateConfig(BaseModel):
+class ProcedureCandidateConfig(_StrictBase):
     """Controls how procedures are surfaced in the working set."""
     enabled: bool = True
     filter_by_relevance: bool = True
@@ -170,7 +189,7 @@ class ProcedureCandidateConfig(BaseModel):
     always_include_proof_required: bool = True
 
 
-class AuditConfig(BaseModel):
+class AuditConfig(_StrictBase):
     """SQLite audit trail configuration."""
     procedure_audit_enabled: bool = True
     procedure_audit_db_path: str = "data/procedure_audit.db"
@@ -185,19 +204,25 @@ class AuditConfig(BaseModel):
     retention_days: int = Field(default=90, ge=7)
 
 
-class ProfileCacheConfig(BaseModel):
+class ProfileCacheConfig(_StrictBase):
     """Profile resolution cache configuration."""
     ttl_seconds: int = Field(default=300, ge=10)
 
 
-class GatewayConfig(BaseModel):
+class GatewayConfig(_StrictBase):
     """Gateway identity configuration.
 
     In production the gateway_id comes from the TS plugin via HTTP headers.
     The Python runtime config is a fallback for standalone/dev mode.
     org_id and team_id are set per-deployment to bind the gateway to an org/team.
+
+    The default is intentionally empty so the runtime container can refuse
+    to boot a host that never set its own gateway_id (see
+    ``RuntimeContainer.from_config``). The startup guard accepts the legacy
+    "local" sentinel only when ``EB_ALLOW_DEFAULT_GATEWAY_ID=true`` is set,
+    so dev/test environments can opt in explicitly.
     """
-    gateway_id: str = "local"
+    gateway_id: str = ""
     gateway_short_name: str = ""
     register_agent_identity: bool = True
     register_agent_actor: bool = True
@@ -213,7 +238,7 @@ class GatewayConfig(BaseModel):
 # --- Phase 6 config models ---
 
 
-class ContextAssemblyConfig(BaseModel):
+class ContextAssemblyConfig(_StrictBase):
     """Configuration for the 4-block context assembly pipeline."""
     max_context_window_fraction: float = Field(default=0.15, ge=0.01, le=0.5)
     fallback_context_window: int = Field(default=128000, ge=1000)
@@ -225,7 +250,7 @@ class ContextAssemblyConfig(BaseModel):
     compaction_summary_max_tokens: int = Field(default=1000, ge=100)
 
 
-class ArtifactCaptureConfig(BaseModel):
+class ArtifactCaptureConfig(_StrictBase):
     """Configuration for automatic tool artifact capture."""
     enabled: bool = True
     min_content_chars: int = Field(default=200, ge=0)
@@ -233,21 +258,21 @@ class ArtifactCaptureConfig(BaseModel):
     skip_tools: list[str] = Field(default_factory=list)
 
 
-class ArtifactAssemblyConfig(BaseModel):
+class ArtifactAssemblyConfig(_StrictBase):
     """Configuration for artifact placeholder rendering in context assembly."""
     placeholder_enabled: bool = True
     placeholder_min_tokens: int = Field(default=100, ge=0)
     placeholder_template: str = '[Tool output: {tool_name} — {summary}\n → Call artifact_search("{artifact_id}") for full output]'
 
 
-class AsyncAnalysisConfig(BaseModel):
+class AsyncAnalysisConfig(_StrictBase):
     """Configuration for async injection analysis (AD-24)."""
     enabled: bool = False
     topic_continuation_threshold: float = Field(default=0.6, ge=0.3, le=0.9)
     batch_size: int = Field(default=20, ge=1)
 
 
-class StrictnessPreset(BaseModel):
+class StrictnessPreset(_StrictBase):
     """Strictness preset controlling guard layer behavior."""
     bm25_threshold_multiplier: float = Field(default=1.0, ge=0.1, le=3.0)
     semantic_threshold_override: float | None = None
@@ -257,7 +282,7 @@ class StrictnessPreset(BaseModel):
     llm_escalation_on: str = "ambiguous"
 
 
-class GuardConfig(BaseModel):
+class GuardConfig(_StrictBase):
     """Guard engine configuration."""
     enabled: bool = True
     builtin_rules_enabled: bool = True
@@ -290,7 +315,7 @@ class GuardConfig(BaseModel):
     })
 
 
-class HitlConfig(BaseModel):
+class HitlConfig(_StrictBase):
     """Human-in-the-loop middleware configuration."""
     enabled: bool = False
     default_url: str = "http://localhost:8421"
@@ -302,7 +327,7 @@ class HitlConfig(BaseModel):
     retry_delay_seconds: float = Field(default=0.5, ge=0.0, description="Base delay for exponential backoff")
 
 
-class CompactionLLMConfig(BaseModel):
+class CompactionLLMConfig(_StrictBase):
     """LLM configuration for compaction summarization."""
     model: str = "gemini/gemini-2.5-flash"
     endpoint: str = "http://localhost:8811/v1"
@@ -311,7 +336,7 @@ class CompactionLLMConfig(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
 
-class BlockerExtractionConfig(BaseModel):
+class BlockerExtractionConfig(_StrictBase):
     """Configuration for automatic LLM-based blocker extraction (Phase 9 RT-2)."""
     enabled: bool = False
     endpoint: str = "http://host.docker.internal:8811/v1"
@@ -432,7 +457,7 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
 
     # --- Top-level toggles & global limits ---
     ("EB_ENABLE_TRACE_LEDGER", "enable_trace_ledger", "bool"),
-    ("EB_ENABLE_GUARDS", "enable_guards", "bool"),
+    ("EB_GUARDS_ENABLED", "guards.enabled", "bool"),
     ("EB_MAX_CONCURRENT_SESSIONS", "max_concurrent_sessions", "int"),
     ("EB_CONSOLIDATION_MIN_RETENTION_SECONDS", "consolidation_min_retention_seconds", "int"),
 ]
@@ -507,7 +532,7 @@ def _apply_api_key_fallbacks(yaml_data: dict) -> None:
                 sec["api_key"] = llm_key
 
 
-class ElephantBrokerConfig(BaseModel):
+class ElephantBrokerConfig(_StrictBase):
     """Top-level runtime configuration."""
     cognee: CogneeConfig = Field(default_factory=CogneeConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -516,7 +541,6 @@ class ElephantBrokerConfig(BaseModel):
     infra: InfraConfig = Field(default_factory=InfraConfig)
     default_profile: str = "coding"
     enable_trace_ledger: bool = True
-    enable_guards: bool = True
     max_concurrent_sessions: int = Field(default=100, ge=1)
     # Phase 5 config sections
     embedding_cache: EmbeddingCacheConfig = Field(default_factory=EmbeddingCacheConfig)
@@ -590,7 +614,7 @@ class ElephantBrokerConfig(BaseModel):
         cognee = CogneeConfig(
             neo4j_uri=os.environ.get("EB_NEO4J_URI", "bolt://localhost:7687"),
             neo4j_user=os.environ.get("EB_NEO4J_USER", "neo4j"),
-            neo4j_password=os.environ.get("EB_NEO4J_PASSWORD", "elephant_dev"),
+            neo4j_password=os.environ.get("EB_NEO4J_PASSWORD", ""),
             qdrant_url=os.environ.get("EB_QDRANT_URL", "http://localhost:6333"),
             default_dataset=os.environ.get("EB_DEFAULT_DATASET", "elephantbroker"),
             embedding_provider=os.environ.get("EB_EMBEDDING_PROVIDER", "openai"),
@@ -650,7 +674,7 @@ class ElephantBrokerConfig(BaseModel):
             session_goals_ttl_seconds=int(os.environ.get("EB_SESSION_GOALS_TTL", "86400")),
         )
         gateway = GatewayConfig(
-            gateway_id=os.environ.get("EB_GATEWAY_ID", "local"),
+            gateway_id=os.environ.get("EB_GATEWAY_ID", ""),
             gateway_short_name=os.environ.get("EB_GATEWAY_SHORT_NAME", ""),
             org_id=os.environ.get("EB_ORG_ID") or None,
             team_id=os.environ.get("EB_TEAM_ID") or None,
@@ -662,6 +686,13 @@ class ElephantBrokerConfig(BaseModel):
             endpoint=os.environ.get("EB_COMPACTION_LLM_ENDPOINT", llm.endpoint),
             api_key=compaction_llm_api_key,
         )
+        # Master guard switch — env: EB_GUARDS_ENABLED → guards.enabled
+        # (the legacy top-level `enable_guards` field was dead code; the wired
+        # switch is `RedLineGuardEngine`'s `_config.enabled` flag, which is
+        # passed `config.guards` from the runtime container).
+        guards = GuardConfig(
+            enabled=os.environ.get("EB_GUARDS_ENABLED", "true").lower() == "true",
+        )
         return cls(
             cognee=cognee,
             llm=llm,
@@ -669,11 +700,11 @@ class ElephantBrokerConfig(BaseModel):
             infra=infra,
             default_profile=os.environ.get("EB_DEFAULT_PROFILE", "coding"),
             enable_trace_ledger=os.environ.get("EB_ENABLE_TRACE_LEDGER", "true").lower() == "true",
-            enable_guards=os.environ.get("EB_ENABLE_GUARDS", "true").lower() == "true",
             max_concurrent_sessions=int(os.environ.get("EB_MAX_CONCURRENT_SESSIONS", "100")),
             embedding_cache=embedding_cache,
             scoring=scoring,
             gateway=gateway,
+            guards=guards,
             compaction_llm=compaction_llm,
             consolidation_min_retention_seconds=int(os.environ.get("EB_CONSOLIDATION_MIN_RETENTION_SECONDS", "172800")),
             # Phase 9 env overrides

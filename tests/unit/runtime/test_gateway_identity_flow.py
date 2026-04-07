@@ -70,9 +70,12 @@ async def test_trace_ledger_no_enrichment_when_no_gateway():
 # --- GatewayConfig ---
 
 def test_gateway_config_defaults():
+    # Default is intentionally empty — runtime container's startup guard
+    # refuses to boot with this sentinel unless EB_ALLOW_DEFAULT_GATEWAY_ID=true
+    # is set (Bucket A — A3).
     cfg = GatewayConfig()
-    assert cfg.gateway_id == "local"
-    assert cfg.effective_short_name == "local"
+    assert cfg.gateway_id == ""
+    assert cfg.effective_short_name == ""
 
 
 def test_gateway_config_short_name_override():

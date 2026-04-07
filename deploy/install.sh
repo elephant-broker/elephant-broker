@@ -320,23 +320,31 @@ Next steps:
   1. Edit secrets in /etc/elephantbroker/env :
         EB_LLM_API_KEY=...
         EB_EMBEDDING_API_KEY=...
-        EB_NEO4J_PASSWORD=...
+        EB_NEO4J_PASSWORD=...                   # REQUIRED — runtime refuses to boot if empty
         EB_HITL_CALLBACK_SECRET=\$(openssl rand -hex 32)
 
   2. Edit /etc/elephantbroker/hitl.env and put the SAME EB_HITL_CALLBACK_SECRET
      value as the runtime env file.
 
-  3. Review /etc/elephantbroker/default.yaml (gateway_id, org_id, team_id,
-     reranker, etc.) — most operators only need to change these few fields.
+  3. Set gateway_id in /etc/elephantbroker/default.yaml to a deployment-
+     specific value (REQUIRED — the runtime refuses to boot with the empty
+     sentinel default; two hosts that share the same gateway_id collide on
+     Redis, ClickHouse, and Neo4j). For example:
+        gateway:
+          gateway_id: "gw-prod-eu1"     # any unique label per host
+        # Override at runtime via EB_GATEWAY_ID if you prefer env-based config.
 
-  4. Make sure your infrastructure (Neo4j / Qdrant / Redis) is running. The
+  4. Review the rest of /etc/elephantbroker/default.yaml (org_id, team_id,
+     reranker, etc.) — most operators only need to change those few fields.
+
+  5. Make sure your infrastructure (Neo4j / Qdrant / Redis) is running. The
      project ships a docker-compose file at infrastructure/docker-compose.yml:
         cd $REPO_DIR/infrastructure && docker compose up -d
 
-  5. Start the services:
+  6. Start the services:
         sudo systemctl start elephantbroker elephantbroker-hitl
 
-  6. Verify:
+  7. Verify:
         systemctl status elephantbroker elephantbroker-hitl
         curl http://localhost:8420/health/    # note trailing slash
         curl http://localhost:8421/health
