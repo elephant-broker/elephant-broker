@@ -16,7 +16,8 @@
 #      + mistralai ghost-package safety net for the pip path)
 #   5. Copies default.yaml + env.example + hitl.env.example into /etc/elephantbroker
 #      and auto-generates EB_HITL_CALLBACK_SECRET on first install
-#   6. Sets ownership/permissions across $PREFIX (final pass)
+#   6. Chowns ONLY the Cognee writable subdirs to the service user;
+#      $PREFIX itself stays root-owned for defense in depth
 #   7. Installs the systemd units (unless --no-systemd)
 #   8. Smoke-test: invoke `elephantbroker --help` to verify the venv is
 #      functional and the entry-point binary is on the right path
@@ -199,10 +200,17 @@ fi
 log "Step 2/8: create directories"
 # =============================================================================
 # install -d is idempotent and sets owner/group/mode in one call.
-install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 755 "$PREFIX"
+#
+# C3 (TODO-3-010): $PREFIX is intentionally root-owned (755). The service
+# user must be able to READ and TRAVERSE the install tree but must NOT be
+# able to WRITE to its own source code or venv binaries. The only paths the
+# service user actually needs to write to are the Cognee runtime subdirs
+# inside .venv (chowned individually in step 6) and $DATA_DIR. A compromised
+# runtime process can no longer rewrite its own binaries or config templates.
+install -d -o root -g root -m 755 "$PREFIX"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$CONFIG_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$DATA_DIR"
-log "  $PREFIX            (755 $SERVICE_USER:$SERVICE_GROUP)"
+log "  $PREFIX            (755 root:root — defense in depth, see C3 comment)"
 log "  $CONFIG_DIR  (750 $SERVICE_USER:$SERVICE_GROUP)"
 log "  $DATA_DIR    (750 $SERVICE_USER:$SERVICE_GROUP)"
 
@@ -238,17 +246,40 @@ log "Step 4/8: post-install fixes (Cognee writable dirs + mistralai safety net)"
 # 4a) mistralai cleanup (belt-and-suspenders, only matters for the pip path)
 # cognee==0.5.3 ships a broken `mistralai` namespace package as a transitive
 # dep. With uv (the supported install path) this is NOT an issue — uv's
-# holistic resolver picks mistralai 1.12.4 (a working modern version). But
-# if anyone runs `pip install` against this venv (e.g. by habit), pip's
-# greedy resolver may install the broken namespace package.
+# holistic resolver picks mistralai 1.12.4 (a working modern version with a
+# proper dist-info). But if anyone runs `pip install` against this venv (e.g.
+# by habit), pip's greedy resolver may install the broken namespace package
+# on top of the modern one.
 #
-# This cleanup is a defensive safety net for the pip path. With uv it's a
-# no-op (mistralai is the modern version, not a namespace package).
-uv pip uninstall mistralai 2>/dev/null || true
+# C7 (TODO-3-320): the previous version of this block always ran the
+# `uv pip uninstall mistralai` step, even when mistralai wasn't present
+# at all OR was the modern dist-info shape. That produced confusing log
+# noise on the supported uv path and obscured the intent of the safety net.
+# Now we shape-check FIRST and only act when the broken namespace-package
+# shape is confirmed (no dist-info/METADATA file alongside the directory).
+#
+# C5 (TODO-3-012): the previous form swallowed all errors with
+# `2>/dev/null || true`, which hid genuine failures (e.g. uv binary missing
+# from PATH, permissions broken on the venv). The new form runs the
+# uninstall ONLY when needed and warns loudly if it actually fails — the
+# directory rm still happens as a fallback so the safety net delivers the
+# end state regardless.
 MISTRAL_DIR=$(find "$REPO_DIR/.venv/lib" -type d -name mistralai -prune 2>/dev/null | head -n 1 || true)
-if [[ -n "$MISTRAL_DIR" ]]; then
-    # Only remove if it's the broken namespace-package shape (no METADATA file)
-    if [[ ! -f "$(dirname "$MISTRAL_DIR")"/mistralai-*.dist-info/METADATA ]]; then
+if [[ -z "$MISTRAL_DIR" ]]; then
+    log "  mistralai not installed in venv — no cleanup needed (uv path)"
+elif compgen -G "$(dirname "$MISTRAL_DIR")/mistralai-*.dist-info/METADATA" >/dev/null; then
+    log "  mistralai present as proper dist-info package — no cleanup needed"
+else
+    # Confirmed broken namespace-package shape. Try uv pip uninstall first
+    # so the venv's installer metadata stays consistent; fall through to a
+    # filesystem rm -rf if uninstall reports nothing or fails outright.
+    log "  mistralai ghost detected (no dist-info/METADATA) — running cleanup"
+    if uv pip uninstall mistralai; then
+        log "  uv pip uninstall mistralai → handled"
+    else
+        warn "  uv pip uninstall mistralai exited non-zero — continuing with directory removal"
+    fi
+    if [[ -d "$MISTRAL_DIR" ]]; then
         rm -rf "$MISTRAL_DIR"
         log "  removed mistralai ghost package (pip safety net): $MISTRAL_DIR"
     fi
@@ -257,8 +288,8 @@ fi
 # 4b) Cognee writable directories
 # Cognee creates `.cognee_system/` and `.data_storage/` inside its own
 # site-packages directory at runtime. We pre-create them so first-run
-# doesn't fail. Final chown -R later in step 6 makes them owned by the
-# service user (no chmod 777 hack needed — that was the wrong fix).
+# doesn't fail. Step 6 below targeted-chowns these specific subdirs to
+# the service user (NOT a recursive chown of $PREFIX — see C3 comment).
 COGNEE_DIR=$(find "$REPO_DIR/.venv/lib" -maxdepth 4 -type d -name cognee -path '*/site-packages/cognee' | head -n 1)
 if [[ -z "$COGNEE_DIR" ]]; then
     die "could not locate cognee site-packages dir under $REPO_DIR/.venv/lib — did uv sync fail?"
@@ -364,14 +395,33 @@ elif [[ "$ENV_FRESHLY_COPIED" -eq 1 || "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
 fi
 
 # =============================================================================
-log "Step 6/8: ensure ownership across $PREFIX (final pass)"
+log "Step 6/8: chown writable subdirs only (defense in depth)"
 # =============================================================================
-# All operations above run as root, which means files inside the venv may have
-# root ownership. Final chown -R sets the whole install tree to the service
-# user. This is the LAST thing before systemd setup so any subsequent file
-# access (e.g. by the systemd service) finds correct ownership.
-chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX"
-log "  chowned $PREFIX → $SERVICE_USER:$SERVICE_GROUP (recursive)"
+# C3 (TODO-3-010): the previous version did `chown -R $SERVICE_USER $PREFIX`
+# which transferred ownership of the entire install tree (source + venv +
+# binaries) to the runtime user. A compromised runtime process could then
+# rewrite its own code, the cognee binaries, or the config templates — the
+# whole point of running as a dedicated unprivileged service user vanishes.
+#
+# The minimal set of paths that genuinely need to be writable by the
+# service user is:
+#   * $COGNEE_DIR/.cognee_system   — Cognee's runtime SQLite + state
+#   * $COGNEE_DIR/.data_storage    — Cognee's chunk/artifact storage
+#   * $ANON_ID_PATH                — Cognee's anonymous-telemetry id file
+#
+# Everything else stays root-owned. Default file modes from `uv sync` are
+# 644/755 (other-readable + other-executable for dirs), so the service
+# user can read and traverse the venv without owning it. The systemd unit's
+# `ReadWritePaths=/opt/elephantbroker` permits writes to $PREFIX through
+# its MAC layer, but DAC ownership now blocks unintended writes from a
+# compromised runtime that didn't go through the pre-created Cognee paths.
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$COGNEE_DIR/.cognee_system"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$COGNEE_DIR/.data_storage"
+chown "$SERVICE_USER:$SERVICE_GROUP" "$ANON_ID_PATH"
+log "  chowned $COGNEE_DIR/.cognee_system    → $SERVICE_USER:$SERVICE_GROUP"
+log "  chowned $COGNEE_DIR/.data_storage     → $SERVICE_USER:$SERVICE_GROUP"
+log "  chowned $ANON_ID_PATH                 → $SERVICE_USER:$SERVICE_GROUP"
+log "  $PREFIX itself remains root-owned (defense in depth)"
 
 # =============================================================================
 log "Step 7/8: install systemd unit files"

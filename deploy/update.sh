@@ -18,7 +18,9 @@
 # Default behavior (no --upgrade flag):
 #   - git pull --ff-only origin <current-branch>
 #   - uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-#   - chown -R + restart services
+#   - re-chown ONLY the Cognee writable subdirs (NOT a recursive $PREFIX
+#     chown — see C3/TODO-3-010); $PREFIX itself stays root-owned
+#   - restart services
 #
 # With --upgrade:
 #   - git pull
@@ -73,7 +75,9 @@ Flags:
 Default behavior (no --upgrade):
   - git pull --ff-only origin <current-branch>
   - uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-  - chown -R elephantbroker:elephantbroker /opt/elephantbroker
+  - chown ONLY the Cognee writable subdirs (.cognee_system, .data_storage,
+    .anon_id) to elephantbroker:elephantbroker — $PREFIX itself stays
+    root-owned for defense in depth (see install.sh step 6 + C3 comment)
   - systemctl restart elephantbroker elephantbroker-hitl
 
 With --upgrade:
@@ -157,13 +161,32 @@ if [[ -n "$COGNEE_DIR" ]]; then
 fi
 
 # =============================================================================
-log "Step 3/4: re-apply ownership across $PREFIX"
+log "Step 3/4: re-apply ownership of writable subdirs only"
 # =============================================================================
-# Files written by `uv sync` (during root execution above) may have root
-# ownership. Re-chown the whole tree to the service user so the systemd unit
-# can read everything.
-chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PREFIX"
-log "  chowned $PREFIX -> $SERVICE_USER:$SERVICE_GROUP (recursive)"
+# C3 (TODO-3-010): the previous version did `chown -R $SERVICE_USER $PREFIX`
+# which gave the runtime user write access to its own source code and venv
+# binaries. The narrowed model (matching install.sh step 6) only chowns the
+# Cognee runtime subdirs to the service user; everything else stays root-
+# owned and is read+executed via "other" file mode bits (644/755).
+#
+# `uv sync` may have re-created the .cognee_system / .data_storage paths if
+# Cognee was upgraded (the new install includes a fresh tree). Re-chown
+# exactly the same set of paths install.sh chowns in its step 6.
+ANON_ID_PATH=""
+if [[ -n "${COGNEE_DIR:-}" ]]; then
+    ANON_ID_PATH=$(find "$PREFIX/.venv/lib" -maxdepth 3 -type d -name site-packages | head -n 1)/.anon_id
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$COGNEE_DIR/.cognee_system"
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$COGNEE_DIR/.data_storage"
+    if [[ -e "$ANON_ID_PATH" ]]; then
+        chown "$SERVICE_USER:$SERVICE_GROUP" "$ANON_ID_PATH"
+    fi
+    log "  chowned $COGNEE_DIR/.cognee_system  → $SERVICE_USER:$SERVICE_GROUP"
+    log "  chowned $COGNEE_DIR/.data_storage   → $SERVICE_USER:$SERVICE_GROUP"
+    log "  $PREFIX itself remains root-owned (defense in depth)"
+else
+    warn "  COGNEE_DIR was not located in step 2 — skipping targeted chown"
+    warn "  re-run install.sh if Cognee paths are missing from the venv"
+fi
 
 # =============================================================================
 log "Step 4/4: restart services"
