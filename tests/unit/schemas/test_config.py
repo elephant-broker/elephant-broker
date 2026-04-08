@@ -482,11 +482,21 @@ enable_trace_ledger: true
         os.environ["EB_CLICKHOUSE_HOST"] = "ch-prod"
         os.environ["EB_CLICKHOUSE_PORT"] = "8124"
         os.environ["EB_CLICKHOUSE_DATABASE"] = "eb_traces"
+        # F5 auth pair + F5-completion LOGS_TABLE — these are covered by the
+        # bulk `test_every_binding_applies` smoke but also need explicit
+        # dedicated coverage so a refactor that breaks ClickHouse auth or
+        # the logs-table override fails THIS test first (faster-to-diagnose).
+        os.environ["EB_CLICKHOUSE_USER"] = "ch-admin"
+        os.environ["EB_CLICKHOUSE_PASSWORD"] = "secret123"
+        os.environ["EB_CLICKHOUSE_LOGS_TABLE"] = "custom_logs"
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
         assert cfg.infra.clickhouse.enabled is True
         assert cfg.infra.clickhouse.host == "ch-prod"
         assert cfg.infra.clickhouse.port == 8124
         assert cfg.infra.clickhouse.database == "eb_traces"
+        assert cfg.infra.clickhouse.user == "ch-admin"
+        assert cfg.infra.clickhouse.password == "secret123"
+        assert cfg.infra.clickhouse.logs_table == "custom_logs"
 
     # ----- API key fallback chains -----
 

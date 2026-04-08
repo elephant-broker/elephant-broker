@@ -111,7 +111,7 @@ infra:
     database: "otel"                    # env: EB_CLICKHOUSE_DATABASE
     user: "default"                     # env: EB_CLICKHOUSE_USER — managed clusters (Aiven, ClickHouse Cloud, Altinity) require non-default users
     password: ""                        # env: EB_CLICKHOUSE_PASSWORD — REQUIRED on any auth-enabled cluster; leave empty for unauthenticated local dev
-    logs_table: "otel_logs"
+    logs_table: "otel_logs"             # env: EB_CLICKHOUSE_LOGS_TABLE — override if your OTEL Collector writes to a non-default table name
 
 
 # -----------------------------------------------------------------------------

@@ -520,6 +520,13 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     # F5: managed ClickHouse clusters require auth — these were missing.
     ("EB_CLICKHOUSE_USER", "infra.clickhouse.user", "str"),
     ("EB_CLICKHOUSE_PASSWORD", "infra.clickhouse.password", "str"),
+    # F5 completion (Bucket F-R2): the F5 commit body claimed LOGS_TABLE was
+    # added alongside USER/PASSWORD, but the actual diff only added the auth
+    # pair. Operators overriding the OTEL Collector's target table (e.g. using
+    # a non-default `otel_logs_*` sharded layout) had no env binding and had
+    # to either fork default.yaml or rename their ClickHouse table. Binding
+    # added here for symmetry with the rest of the `infra.clickhouse.*` block.
+    ("EB_CLICKHOUSE_LOGS_TABLE", "infra.clickhouse.logs_table", "str"),
 
     # --- Embedding cache ---
     ("EB_EMBEDDING_CACHE_ENABLED", "embedding_cache.enabled", "bool"),
