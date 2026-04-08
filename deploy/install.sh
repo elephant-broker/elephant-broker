@@ -184,8 +184,26 @@ else
     log "  uv not found — installing via Astral's official installer"
     # UV_INSTALL_DIR forces install to /usr/local/bin (default is ~/.local/bin)
     # so the binary is on PATH for all users including the service user.
+    #
+    # TODO-3-346: the installer URL is pinned to the same uv version as the
+    # Dockerfile (ghcr.io/astral-sh/uv:0.11.3, see Dockerfile lines 14 + 70)
+    # so host-install and container-install ship identical uv binaries.
+    # Reproducible builds break silently if the two drift: host installs
+    # would pull whatever `latest` happens to be on the day of install
+    # while the Docker image stays pinned, producing two different
+    # resolver behaviors for the same uv.lock on the same hardware.
+    #
+    # Astral serves versioned installers via https://astral.sh/uv/<VERSION>/install.sh
+    # which 301-redirects to the corresponding GitHub release asset
+    # (release-assets.githubusercontent.com/.../<VERSION>/uv-installer.sh),
+    # so the URL below is a stable pinning mechanism with no manual
+    # download step. Verified 2026-04-08.
+    #
+    # Bumping uv: update BOTH this URL AND the two Dockerfile
+    # `COPY --from=ghcr.io/astral-sh/uv:<ver>` lines in lockstep, otherwise
+    # host and container drift silently on the next install.
     UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 \
-        sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null
+        sh -c 'curl -LsSf https://astral.sh/uv/0.11.3/install.sh | sh' >/dev/null
     if ! command -v uv &>/dev/null; then
         die "uv install completed but binary not on PATH — check /usr/local/bin"
     fi

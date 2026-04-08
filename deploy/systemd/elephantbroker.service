@@ -15,11 +15,24 @@
 #
 # This unit assumes the canonical install layout produced by deploy/install.sh:
 #
-#   /opt/elephantbroker/        elephantbroker:elephantbroker  755   venv lives here
+#   /opt/elephantbroker/        root:root                      755   install tree (code + venv)
 #   /etc/elephantbroker/        elephantbroker:elephantbroker  750   config dir
 #   /etc/elephantbroker/default.yaml   elephantbroker:elephantbroker  640
 #   /etc/elephantbroker/env            root:elephantbroker            640   secrets
-#   /var/lib/elephantbroker/    elephantbroker:elephantbroker  750   runtime data
+#   /etc/elephantbroker/hitl.env       root:elephantbroker            640   HITL secrets
+#   /var/lib/elephantbroker/    elephantbroker:elephantbroker  750   runtime state
+#
+# TODO-3-342: /opt/elephantbroker is intentionally root:root, NOT owned by
+# the service user. Only the Cognee runtime subdirs under .venv/lib
+# (.cognee_system/, .data_storage/, and the .anon_id telemetry file) are
+# chowned to elephantbroker individually by install.sh Step 6. This is the
+# DAC half of the C3 (TODO-3-010) defense-in-depth model that pairs with
+# the ReadWritePaths narrowing under `Filesystem hardening` below — a
+# compromised runtime cannot rewrite its own source code, pyproject.toml,
+# uv.lock, or this unit file at EITHER the kernel MAC layer or the DAC
+# ownership layer. An earlier revision of this comment claimed
+# `/opt/elephantbroker  elephantbroker:elephantbroker  755` which was the
+# pre-C3 layout; the doc drifted when C3 landed in Bucket C-R2.
 #
 # The `elephantbroker` system user is created by deploy/install.sh with
 # `useradd --system --shell /usr/sbin/nologin --home-dir /var/lib/elephantbroker`.
@@ -69,7 +82,20 @@ TimeoutStopSec=30
 # on larger hosts rather than editing this file in place.
 MemoryMax=8G
 MemoryHigh=6G
-TasksMax=512
+# TODO-3-345: TasksMax bumped from 512 → 4096. The runtime holds up to
+# ~100 concurrent sessions under saturated load, each spawning ~5–15
+# async tasks (retrieval fan-out across 5 sources, scoring workers, the
+# compaction background loop, trace ledger writes, guard pipelines).
+# That baseline of 500–1500 tasks put 512 at-or-below normal operation
+# and risked "fork: Resource temporarily unavailable" errors that surface
+# in the journal as mysterious 5xx bursts rather than an obvious quota
+# hit. 4096 gives ~40 tasks per session of headroom — enough to absorb
+# transient spikes (subagent spawns, Cognee cognify bursts, Phase 9
+# consolidation sleep cycles) without removing the runaway-fork ceiling
+# that D2 (TODO-3-322) is here to enforce. HITL's TasksMax stays at 64
+# — it is a thin FastAPI proxy with no fan-out and has not shown any
+# baseline pressure at that cap.
+TasksMax=4096
 CPUQuota=400%
 LimitNOFILE=65536
 

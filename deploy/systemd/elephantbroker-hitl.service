@@ -34,6 +34,26 @@ Documentation=https://github.com/elephant-broker/elephant-broker
 # can't reach a non-existent runtime. Wants= triggers the runtime to
 # start when HITL is started, but does NOT cascade-fail HITL if the
 # runtime fails to come up (Requires= would, and that's too strict).
+#
+# TODO-3-632: After=/Wants= govern startup ORDER and on-start activation
+# only. Neither directive propagates `systemctl restart elephantbroker`
+# to this unit — an operator bouncing the main runtime leaves HITL
+# running against a briefly-unreachable callback target, and HITL's own
+# retry / reconnect logic is what recovers. That is intentional: HITL is
+# a stateless FastAPI approval proxy, and dragging it through a restart
+# every time the runtime bounces would amplify operator-visible churn
+# (and every in-flight approval would get re-served as a 503) for no
+# correctness benefit. Operators who need tightly-coupled lifecycle
+# (e.g. a maintenance window that flushes both processes) should either
+# restart both units explicitly —
+#
+#     systemctl restart elephantbroker elephantbroker-hitl
+#
+# — or add `PartOf=elephantbroker.service` to a drop-in override at
+# /etc/systemd/system/elephantbroker-hitl.service.d/partof.conf. DO NOT
+# add PartOf= or BindsTo= directly to this unit file: both change the
+# restart semantics for every deployment and are operator-level policy
+# decisions, not packaging decisions.
 After=elephantbroker.service network-online.target
 Wants=network-online.target elephantbroker.service
 
