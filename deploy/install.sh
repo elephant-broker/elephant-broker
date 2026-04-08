@@ -405,6 +405,28 @@ if [[ "$ENV_FRESHLY_COPIED" -eq 1 && "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
             cat "$tmp_file" > "$env_file"
             rm -f "$tmp_file"
         done
+        # TODO-3-223 / TODO-3-626: verify the sed actually matched. If a
+        # future template rename drifts the anchor (e.g. someone writes
+        # `EB_HITL_CALLBACK_SECRET = ""` or `EB_HITL_CALLBACK_SECRET="..."`
+        # instead of the bare `EB_HITL_CALLBACK_SECRET=`), the sed silently
+        # no-ops and both files ship with the placeholder intact — HMAC
+        # verification then fails on the first HITL callback with a
+        # confusing "signature mismatch" error. Grep for the post-sed
+        # result and die loudly if either file was missed, so the anchor
+        # drift is caught here at install time instead of at first HITL
+        # approval.
+        for env_file in "$CONFIG_DIR/env" "$CONFIG_DIR/hitl.env"; do
+            if ! grep -q "^EB_HITL_CALLBACK_SECRET=${HITL_SECRET}$" "$env_file"; then
+                warn "  F11 sed anchor drift: $env_file still contains the"
+                warn "  unpatched EB_HITL_CALLBACK_SECRET= placeholder."
+                warn "  The sed script expects the bare form:"
+                warn "      EB_HITL_CALLBACK_SECRET="
+                warn "  (no spaces, no quotes, empty RHS). Check the template"
+                warn "  at elephantbroker/config/env.example and"
+                warn "  hitl-middleware/hitl.env.example for drift."
+                die "EB_HITL_CALLBACK_SECRET auto-gen failed — refusing to ship a broken HMAC pair"
+            fi
+        done
         log "  EB_HITL_CALLBACK_SECRET   (auto-generated, written to env + hitl.env)"
     else
         warn "  openssl not found — cannot auto-generate EB_HITL_CALLBACK_SECRET."
@@ -445,27 +467,56 @@ log "  chowned $COGNEE_DIR/.data_storage     → $SERVICE_USER:$SERVICE_GROUP"
 log "  chowned $ANON_ID_PATH                 → $SERVICE_USER:$SERVICE_GROUP"
 log "  $PREFIX itself remains root-owned (defense in depth)"
 
-# C4 (TODO-3-013): validate the on-disk config BEFORE handing the unit to
-# systemd. This calls the same ElephantBrokerConfig.load() the runtime uses
-# at startup, so any structural failure (extra="forbid" violation, embedding
-# model/dim mismatch, malformed YAML, env coercion error) surfaces here as
-# a clear install-log error instead of a confusing journalctl failure 30
-# seconds later.
+# C4 (TODO-3-013, TODO-3-222): validate the on-disk config BEFORE handing
+# the unit to systemd. This calls the same ElephantBrokerConfig.load() the
+# runtime uses at startup, so any structural failure (extra="forbid"
+# violation, embedding model/dim mismatch, malformed YAML, env coercion
+# error) surfaces here as a clear install-log error instead of a confusing
+# journalctl failure 30 seconds later.
 #
-# We treat validation failure as a WARNING (not a die) because the operator
-# may legitimately have just-copied template state — gateway_id is still the
-# sentinel default, secrets aren't filled in, etc. The Next steps: section
-# at the bottom of this script tells the operator what to edit. The validate
-# step is here to surface the early errors that would otherwise hide behind
-# "service won't start", not to gate the install on a fully-working config.
+# The earlier version treated validation failure as a warning on the
+# reasoning that a fresh-install config would refuse to load because of
+# sentinel-default gateway_id / empty neo4j_password. That reasoning was
+# wrong: `config validate` invokes `ElephantBrokerConfig.load()` which is
+# pure Pydantic — it does NOT call `_validate_startup_safety`, so the
+# fresh-install sentinel defaults pass validation cleanly. The Bucket A
+# runtime safety guards (A3/A4/A5) fire later, at
+# `RuntimeContainer.from_config()` time, which is the right layer for
+# "did the operator fill in secrets". Treating validate-failure as a
+# warning therefore hid real schema bugs (extra="forbid" typos, embedding
+# dim mismatches) behind a noisy "service won't start" 30 seconds later
+# — exactly the UX regression Bucket C was trying to prevent.
+#
+# Hard-die on failure is safe for the fresh-install path AND correct for
+# genuine schema errors.
+#
+# TODO-3-627 (Bucket C-R2, order-of-operations): use $REPO_DIR/.venv (the
+# venv `uv sync` just created in step 3) NOT $PREFIX/.venv. For in-tree
+# installs the two paths are identical. For --allow-out-of-tree installs
+# the venv lives at $REPO_DIR/.venv and $PREFIX/.venv does not exist
+# yet — validating via $PREFIX/.venv would die on "binary not found"
+# before ever looking at the YAML. The step 8 smoke test below still
+# checks $PREFIX/.venv explicitly because that's what matters for the
+# systemd ExecStart path.
 log "  validating $CONFIG_DIR/default.yaml against the runtime schema"
-if "$PREFIX/.venv/bin/elephantbroker" config validate \
+if "$REPO_DIR/.venv/bin/elephantbroker" config validate \
         --config "$CONFIG_DIR/default.yaml" 2>/tmp/eb-validate.err; then
     log "  config validate ✓ ($CONFIG_DIR/default.yaml)"
 else
-    warn "  config validate FAILED (see /tmp/eb-validate.err for details):"
+    warn "  config validate FAILED — dumping errors:"
     while IFS= read -r line; do warn "    $line"; done < /tmp/eb-validate.err
-    warn "  → fix the issues above before running 'systemctl start elephantbroker'"
+    warn ""
+    warn "  Common causes:"
+    warn "    - typo in $CONFIG_DIR/default.yaml (extra='forbid' rejects unknown keys)"
+    warn "    - embedding model / dimension mismatch in the cognee: block"
+    warn "    - malformed YAML or unresolved env var reference"
+    warn ""
+    warn "  Recovery (TODO-3-628):"
+    warn "    - edit $CONFIG_DIR/default.yaml to fix the errors above"
+    warn "    - re-run $REPO_DIR/deploy/install.sh (idempotent)"
+    warn "    - if the venv itself is suspect, rebuild with:"
+    warn "        sudo rm -rf $PREFIX/.venv && sudo $REPO_DIR/deploy/install.sh"
+    die "config validate failed — refusing to enable systemd unit with a broken config"
 fi
 
 # =============================================================================
@@ -485,7 +536,13 @@ else
     systemctl daemon-reload
     log "  systemctl daemon-reload"
 
-    systemctl enable elephantbroker elephantbroker-hitl >/dev/null 2>&1 || true
+    # TODO-3-224: no `|| true` swallow — a genuine systemctl-enable failure
+    # (malformed unit file, missing dependency target, selinux denial) must
+    # surface at install time so the operator sees it, not two hours later
+    # when a reboot doesn't come back up and they can't find elephantbroker
+    # in `systemctl list-unit-files`. `set -euo pipefail` above will abort
+    # the install on non-zero exit.
+    systemctl enable elephantbroker elephantbroker-hitl >/dev/null 2>&1
     log "  systemctl enable elephantbroker elephantbroker-hitl"
 fi
 
@@ -505,11 +562,21 @@ if [[ -x "$PREFIX/.venv/bin/elephantbroker" ]]; then
     if "$PREFIX/.venv/bin/elephantbroker" --help >/dev/null 2>&1; then
         log "  elephantbroker entry point works ✓"
     else
-        warn "  elephantbroker --help returned non-zero — check the install"
+        # TODO-3-628: broken-venv recovery hint. The binary exists but
+        # fails to run — usually a partial `uv sync` (network blip mid-
+        # install), a torn .pyc cache, or a Python ABI mismatch after a
+        # host Python upgrade. Point the operator at the single safe
+        # recovery (nuke + reinstall) instead of leaving them to
+        # hand-edit site-packages.
+        warn "  elephantbroker --help returned non-zero — the venv is broken."
+        warn "  Recovery:"
+        warn "      sudo rm -rf $PREFIX/.venv && sudo $REPO_DIR/deploy/install.sh"
     fi
 else
     warn "  elephantbroker binary not found at $PREFIX/.venv/bin/elephantbroker"
     warn "  (out-of-tree install? venv lives at $REPO_DIR/.venv — systemd will fail to start)"
+    warn "  Recovery (TODO-3-628):"
+    warn "      sudo rm -rf $PREFIX/.venv && sudo $REPO_DIR/deploy/install.sh"
 fi
 
 # =============================================================================
@@ -518,16 +585,24 @@ log "Install complete."
 cat <<EOF
 
 Next steps:
-  1. Edit secrets in /etc/elephantbroker/env :
+  1. Fill in the required secrets in /etc/elephantbroker/env :
         EB_LLM_API_KEY=...
         EB_EMBEDDING_API_KEY=...
         EB_NEO4J_PASSWORD=...                   # REQUIRED — runtime refuses to boot if empty
-        EB_HITL_CALLBACK_SECRET=\$(openssl rand -hex 32)
 
-  2. Edit /etc/elephantbroker/hitl.env and put the SAME EB_HITL_CALLBACK_SECRET
-     value as the runtime env file.
+     NOTE (TODO-3-624): EB_HITL_CALLBACK_SECRET is auto-generated by this
+     installer (F11) on a fresh install — the same random 32-byte hex
+     value is written to BOTH /etc/elephantbroker/env and
+     /etc/elephantbroker/hitl.env, and the installer now verifies the
+     sed anchor actually matched before exiting. You do NOT need to run
+     \`openssl rand -hex 32\` manually on fresh installs. If you re-run
+     the installer on a host with existing env files, the auto-gen is
+     SKIPPED (to avoid breaking the existing HMAC pair). To deliberately
+     rotate the secret, regenerate it by hand and make sure the SAME
+     value lands in BOTH files — a mismatch will fail every HITL
+     callback with "signature mismatch".
 
-  3. Set gateway_id in /etc/elephantbroker/default.yaml to a deployment-
+  2. Set gateway_id in /etc/elephantbroker/default.yaml to a deployment-
      specific value (REQUIRED — the runtime refuses to boot with the empty
      sentinel default; two hosts that share the same gateway_id collide on
      Redis, ClickHouse, and Neo4j). For example:
@@ -535,17 +610,17 @@ Next steps:
           gateway_id: "gw-prod-eu1"     # any unique label per host
         # Override at runtime via EB_GATEWAY_ID if you prefer env-based config.
 
-  4. Review the rest of /etc/elephantbroker/default.yaml (org_id, team_id,
+  3. Review the rest of /etc/elephantbroker/default.yaml (org_id, team_id,
      reranker, etc.) — most operators only need to change those few fields.
 
-  5. Make sure your infrastructure (Neo4j / Qdrant / Redis) is running. The
+  4. Make sure your infrastructure (Neo4j / Qdrant / Redis) is running. The
      project ships a docker-compose file at infrastructure/docker-compose.yml:
         cd $REPO_DIR/infrastructure && docker compose up -d
 
-  6. Start the services:
+  5. Start the services:
         sudo systemctl start elephantbroker elephantbroker-hitl
 
-  7. Verify:
+  6. Verify:
         systemctl status elephantbroker elephantbroker-hitl
         curl http://localhost:8420/health/    # note trailing slash
         curl http://localhost:8421/health
