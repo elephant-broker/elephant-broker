@@ -21,7 +21,27 @@ WORKDIR /app
 # source-only edit busted the dep cache. Now:
 #   1. copy lockfile  ->  uv sync deps only (cached layer)
 #   2. copy source    ->  uv sync project on top (cheap re-run)
+#
+# H-R2 (TODO-3-344, TODO-3-620): the root pyproject.toml declares
+# `[tool.uv.workspace] members = ["hitl-middleware"]` (see E1 workspace
+# conversion, Bucket E commit 112cccd), but the previous Dockerfile only
+# copied `elephantbroker/` into the build context. The second `uv sync
+# --frozen --no-dev` therefore saw the workspace declaration with no
+# source behind it — uv exited 0 without installing hitl-middleware and
+# the image shipped HITL-less (no /app/.venv/bin/hitl-middleware binary).
+# The native-install path (deploy/install.sh) worked only because
+# `uv sync` ran at the repo root where both package directories exist.
+#
+# Fix: copy the workspace member pyproject BEFORE the first `uv sync`
+# (so workspace resolution is consistent in the cached deps layer) AND
+# copy the workspace member source BEFORE the second `uv sync` (so the
+# install actually has code to install). Both copies sit alongside
+# their elephantbroker/ counterparts at the matching layer position so
+# the cache boundaries stay correct: lockfile + both pyprojects in the
+# deps layer (cached unless lockfile changes), both source trees in
+# the project layer (cached unless source changes).
 COPY pyproject.toml uv.lock ./
+COPY hitl-middleware/pyproject.toml hitl-middleware/pyproject.toml
 
 # uv sync --frozen installs EXACTLY what uv.lock specifies — same versions
 # as a native install via deploy/install.sh, no transitive drift between
@@ -33,10 +53,11 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 COPY elephantbroker/ elephantbroker/
+COPY hitl-middleware/ hitl-middleware/
 
-# Second sync installs the project itself on top of the cached dep layer.
-# Source-only edits invalidate this layer but not the (much larger) dep
-# layer above it.
+# Second sync installs the project AND the hitl-middleware workspace
+# member on top of the cached dep layer. Source-only edits invalidate
+# this layer but not the (much larger) dep layer above it.
 RUN uv sync --frozen --no-dev
 
 # ---
@@ -52,9 +73,20 @@ WORKDIR /app
 
 # Copy the venv and source from the builder stage. The venv lives at
 # /app/.venv (uv's default location). The elephantbroker entry point is
-# at /app/.venv/bin/elephantbroker.
+# at /app/.venv/bin/elephantbroker, and the hitl-middleware entry point
+# is at /app/.venv/bin/hitl-middleware.
+#
+# H-R2 (TODO-3-344, TODO-3-620): /app/hitl-middleware must also be
+# preserved in the runtime stage. `uv sync` installs workspace members
+# as editable by default, so .venv/lib/python3.11/site-packages/
+# contains a .pth file that points at /app/hitl-middleware/hitl_middleware/
+# (and similarly at /app/elephantbroker/elephantbroker/). Without the
+# source directory in the runtime image, the editable link is dead and
+# `import hitl_middleware` fails at import time. This mirrors the
+# pre-existing `COPY --from=builder /app/elephantbroker` line.
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/elephantbroker /app/elephantbroker
+COPY --from=builder /app/hitl-middleware /app/hitl-middleware
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 
 # Bake in default config so the container has something to read at startup.
