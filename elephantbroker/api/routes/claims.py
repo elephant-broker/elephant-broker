@@ -14,7 +14,11 @@ router = APIRouter()
 @router.post("/")
 async def create_claim(claim: ClaimRecord, request: Request):
     engine = get_evidence_engine(request)
-    claim.gateway_id = getattr(request.state, "gateway_id", "") or claim.gateway_id
+    # Middleware wins unconditionally over caller-supplied claim.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        claim.gateway_id = _state_gw
     result = await engine.record_claim(claim)
     return result.model_dump(mode="json")
 

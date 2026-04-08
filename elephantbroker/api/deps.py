@@ -90,10 +90,6 @@ def get_session_goal_store(request: Request):
     return getattr(get_container(request), "session_goal_store", None)
 
 
-def get_gateway_id(request: Request) -> str:
-    return getattr(request.state, "gateway_id", "local")
-
-
 def get_agent_key(request: Request) -> str:
     return getattr(request.state, "agent_key", "")
 

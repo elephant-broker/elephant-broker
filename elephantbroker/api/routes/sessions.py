@@ -23,7 +23,14 @@ router = APIRouter()
 @router.post("/start")
 async def session_start(body: SessionStartRequest, request: Request):
     container = get_container(request)
-    gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+    # Middleware wins UNCONDITIONALLY over body.gateway_id — this is a tenant
+    # isolation boundary. `is not None` is required: post-Bucket-A the
+    # middleware default is "" (falsy) and the old `body.gateway_id or <state>`
+    # pattern let a caller spoof another tenant by posting a non-empty
+    # body.gateway_id (the `or` picks the truthy LHS). See TD-41.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        gw_id = body.gateway_id or ""
     agent_id = body.agent_id or getattr(request.state, "agent_id", "")
     agent_key = body.agent_key or (f"{gw_id}:{agent_id}" if agent_id else "")
 
@@ -125,7 +132,10 @@ async def session_context_window(request: Request):
     from elephantbroker.schemas.context import ContextWindowReport
     body = ContextWindowReport(**(await request.json()))
     container = get_container(request)
-    gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+    # Middleware wins unconditionally over body.gateway_id — see session_start().
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        gw_id = body.gateway_id or ""
 
     store = getattr(container, "session_context_store", None)
     if store:
@@ -166,7 +176,10 @@ async def session_token_usage(request: Request):
 
     trace_ledger = getattr(container, "trace_ledger", None)
     if trace_ledger:
-        gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+        # Middleware wins unconditionally over body.gateway_id — see session_start().
+        gw_id = getattr(request.state, "gateway_id", None)
+        if gw_id is None:
+            gw_id = body.gateway_id or ""
         await trace_ledger.append_event(TraceEvent(
             event_type=TraceEventType.TOKEN_USAGE_REPORTED,
             gateway_id=gw_id,
@@ -183,7 +196,10 @@ async def session_token_usage(request: Request):
 @router.post("/end")
 async def session_end(body: SessionEndRequest, request: Request):
     container = get_container(request)
-    gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+    # Middleware wins unconditionally over body.gateway_id — see session_start().
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        gw_id = body.gateway_id or ""
     agent_key = body.agent_key or getattr(request.state, "agent_key", "")
 
     # Force-flush buffer if available.

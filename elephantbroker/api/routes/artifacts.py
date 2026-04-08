@@ -25,7 +25,11 @@ class ArtifactSearchRequest(BaseModel):
 @router.post("/")
 async def store_artifact(artifact: ToolArtifact, request: Request):
     store = get_artifact_store(request)
-    artifact.gateway_id = getattr(request.state, "gateway_id", "") or artifact.gateway_id
+    # Middleware wins unconditionally over caller-supplied artifact.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        artifact.gateway_id = _state_gw
     result = await store.store_artifact(artifact)
     return result.model_dump(mode="json")
 

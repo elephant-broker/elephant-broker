@@ -23,7 +23,11 @@ class StepCompleteRequest(BaseModel):
 @router.post("/")
 async def create_procedure(procedure: ProcedureDefinition, request: Request):
     engine = get_procedure_engine(request)
-    procedure.gateway_id = getattr(request.state, "gateway_id", "") or procedure.gateway_id
+    # Middleware wins unconditionally over caller-supplied procedure.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        procedure.gateway_id = _state_gw
     result = await engine.store_procedure(procedure)
     return result.model_dump(mode="json")
 

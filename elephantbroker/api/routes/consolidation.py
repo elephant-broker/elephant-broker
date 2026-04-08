@@ -26,7 +26,7 @@ async def run_consolidation(body: RunConsolidationRequest, request: Request):
     if engine is None:
         raise HTTPException(status_code=501, detail="Consolidation engine not available")
 
-    gateway_id = getattr(request.state, "gateway_id", "local")
+    gateway_id = getattr(request.state, "gateway_id", "")
     config = getattr(container, "config", None)
     org_id = ""
     if config and hasattr(config, "gateway"):
@@ -46,7 +46,7 @@ async def list_reports(request: Request, limit: int = 10):
     store = getattr(container, "consolidation_report_store", None)
     if store is None:
         return []
-    gateway_id = getattr(request.state, "gateway_id", "local")
+    gateway_id = getattr(request.state, "gateway_id", "")
     reports = await store.list_reports(gateway_id, limit=limit)
     return [r.model_dump(mode="json") for r in reports]
 
@@ -88,7 +88,7 @@ async def list_suggestions(request: Request, approval_status: str | None = None)
     store = getattr(container, "consolidation_report_store", None)
     if store is None:
         return []
-    gateway_id = getattr(request.state, "gateway_id", "local")
+    gateway_id = getattr(request.state, "gateway_id", "")
     return await store.list_suggestions(gateway_id, approval_status=approval_status)
 
 
