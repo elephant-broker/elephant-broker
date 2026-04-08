@@ -16,17 +16,28 @@
 # uncommitted local changes.
 #
 # Default behavior (no --upgrade flag):
-#   - git pull --ff-only origin <current-branch>
-#   - uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-#   - re-chown ONLY the Cognee writable subdirs (NOT a recursive $PREFIX
-#     chown — see C3/TODO-3-010); $PREFIX itself stays root-owned
-#   - restart services
+#   1. git pull --ff-only origin <current-branch>
+#   2. uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
+#   3. verify EB_HITL_CALLBACK_SECRET is populated in env + hitl.env
+#      (Bucket C-R2, TODO-3-623 — detects upgrades from a pre-F11 install
+#      that never got the auto-gen, warn with the fix command)
+#   4. config validate against the runtime schema (matches install.sh C4
+#      — Bucket C-R2, TODO-3-621; hard-dies on failure so a broken
+#      upgrade never reaches `systemctl restart`)
+#   5. re-chown ONLY the Cognee writable subdirs (NOT a recursive $PREFIX
+#      chown — see C3/TODO-3-010); $PREFIX itself stays root-owned
+#   6. re-install systemd unit files from $PREFIX/deploy/systemd/ (Bucket
+#      C-R2, TODO-3-622 — ensures unit-file edits in the repo actually
+#      land on target hosts; skipped if no unit file is currently
+#      registered, mirroring the `--no-systemd` install path)
+#   7. restart services
 #
 # With --upgrade:
 #   - git pull
 #   - uv lock --upgrade (regenerates uv.lock from current pyproject.toml,
 #     picking the latest versions allowed by the constraints)
 #   - uv sync --no-dev (installs the new lockfile)
+#   - then steps 3-7 same as above
 #   - This is the path for "I bumped a version in pyproject.toml" workflows.
 #     See deploy/UPDATING-DEPS.md for the full upgrade procedure.
 #
@@ -47,6 +58,7 @@ set -euo pipefail
 PREFIX="/opt/elephantbroker"
 SERVICE_USER="elephantbroker"
 SERVICE_GROUP="elephantbroker"
+CONFIG_DIR="/etc/elephantbroker"
 UPGRADE_LOCK=0
 RESTART=1
 
@@ -73,18 +85,20 @@ Flags:
   --help, -h       Show this message
 
 Default behavior (no --upgrade):
-  - git pull --ff-only origin <current-branch>
-  - uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-  - chown ONLY the Cognee writable subdirs (.cognee_system, .data_storage,
-    .anon_id) to elephantbroker:elephantbroker — $PREFIX itself stays
-    root-owned for defense in depth (see install.sh step 6 + C3 comment)
-  - systemctl restart elephantbroker elephantbroker-hitl
+  1. git pull --ff-only origin <current-branch>
+  2. uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
+  3. verify EB_HITL_CALLBACK_SECRET is populated in env + hitl.env
+  4. config validate against the runtime schema (hard-dies on failure)
+  5. chown ONLY the Cognee writable subdirs (.cognee_system, .data_storage,
+     .anon_id) to elephantbroker:elephantbroker — $PREFIX itself stays
+     root-owned for defense in depth (see install.sh step 6 + C3 comment)
+  6. re-install systemd unit files from $PREFIX/deploy/systemd/
+  7. systemctl restart elephantbroker elephantbroker-hitl
 
 With --upgrade:
-  - git pull --ff-only origin <current-branch>
-  - uv lock --upgrade (regenerate the lockfile)
-  - uv sync --no-dev (install the new lockfile)
-  - chown + restart
+  1. git pull --ff-only origin <current-branch>
+  2. uv lock --upgrade (regenerate the lockfile) + uv sync --no-dev
+  3-7. Same as default behavior above
 
 The script refuses to run on a dirty git tree.
 See deploy/UPDATING-DEPS.md for the full dep upgrade procedure.
@@ -124,7 +138,7 @@ log "Install prefix: $PREFIX"
 log "Current branch: $CURRENT_BRANCH"
 
 # =============================================================================
-log "Step 1/4: git pull"
+log "Step 1/7: git pull"
 # =============================================================================
 BEFORE_SHA="$(git rev-parse HEAD)"
 git pull --ff-only origin "$CURRENT_BRANCH"
@@ -136,7 +150,7 @@ else
 fi
 
 # =============================================================================
-log "Step 2/4: uv sync"
+log "Step 2/7: uv sync"
 # =============================================================================
 if [[ "$UPGRADE_LOCK" -eq 1 ]]; then
     log "  --upgrade flag: regenerating uv.lock from pyproject.toml"
@@ -183,7 +197,77 @@ else
 fi
 
 # =============================================================================
-log "Step 3/4: re-apply ownership of writable subdirs only"
+log "Step 3/7: verify EB_HITL_CALLBACK_SECRET is populated"
+# =============================================================================
+# TODO-3-623 (Bucket C-R2): on update.sh we do NOT auto-generate the HITL
+# secret (install.sh F11 owns that — auto-gen on fresh install only, to
+# avoid clobbering an existing operator-rotated value on subsequent runs).
+# But an upgrade path from a pre-F11 install.sh version, or from a manual
+# clone-and-go deployment, can leave the placeholder intact in one or
+# both files. If that happens the runtime starts cleanly but every HITL
+# approval callback fails HMAC verification with an opaque "signature
+# mismatch" error that's painful to diagnose. Detect the placeholder
+# here and warn loudly — the fix is a one-liner but it has to be applied
+# before the restart below or the failure is invisible until a HITL
+# request arrives.
+for env_file in "$CONFIG_DIR/env" "$CONFIG_DIR/hitl.env"; do
+    if [[ ! -f "$env_file" ]]; then
+        warn "  $env_file missing — re-run install.sh to populate it"
+        continue
+    fi
+    if grep -q "^EB_HITL_CALLBACK_SECRET=$" "$env_file"; then
+        warn "  $env_file still has the bare EB_HITL_CALLBACK_SECRET= placeholder."
+        warn "  HITL HMAC verification will fail until this is populated."
+        warn "  Fix: set the SAME random value in BOTH env + hitl.env, e.g."
+        warn "      secret=\$(openssl rand -hex 32)"
+        warn "      sudo sed -i \"s|^EB_HITL_CALLBACK_SECRET=\$|EB_HITL_CALLBACK_SECRET=\$secret|\" \\"
+        warn "          $CONFIG_DIR/env $CONFIG_DIR/hitl.env"
+        warn "      sudo systemctl restart elephantbroker-hitl"
+    fi
+done
+log "  EB_HITL_CALLBACK_SECRET presence check complete"
+
+# =============================================================================
+log "Step 4/7: validate $CONFIG_DIR/default.yaml against the runtime schema"
+# =============================================================================
+# TODO-3-621 (Bucket C-R2): mirror install.sh C4 (TODO-3-013, TODO-3-222)
+# — validate the on-disk config BEFORE restarting services. This calls the
+# same ElephantBrokerConfig.load() the runtime uses at startup, so any
+# structural failure surfaces here as a clear update-log error instead of
+# a confusing journalctl failure 30 seconds after `systemctl restart`.
+#
+# This matters MORE for update.sh than for install.sh: on update, the
+# previous (working) version of the runtime is still running. If we
+# restart into a broken config, we take down a working production
+# service. Hard-die BEFORE the restart so the operator fixes the config
+# while the old process is still serving traffic.
+if [[ ! -f "$CONFIG_DIR/default.yaml" ]]; then
+    warn "  $CONFIG_DIR/default.yaml missing — skipping validate"
+    warn "  run install.sh to populate /etc/elephantbroker first"
+else
+    if "$PREFIX/.venv/bin/elephantbroker" config validate \
+            --config "$CONFIG_DIR/default.yaml" 2>/tmp/eb-validate.err; then
+        log "  config validate ✓ ($CONFIG_DIR/default.yaml)"
+    else
+        warn "  config validate FAILED — dumping errors:"
+        while IFS= read -r line; do warn "    $line"; done < /tmp/eb-validate.err
+        warn ""
+        warn "  Common causes:"
+        warn "    - upgraded runtime rejects an old config field (extra='forbid')"
+        warn "    - embedding model / dimension drifted in the cognee: block"
+        warn "    - env var referenced in YAML is no longer exported"
+        warn ""
+        warn "  Recovery:"
+        warn "    - edit $CONFIG_DIR/default.yaml to match the new schema"
+        warn "    - re-run $PREFIX/deploy/update.sh (idempotent)"
+        warn "    - the OLD runtime is still running — this failure did NOT"
+        warn "      restart any services, so traffic is still being served"
+        die "config validate failed — refusing to restart services with a broken config"
+    fi
+fi
+
+# =============================================================================
+log "Step 5/7: re-apply ownership of writable subdirs only"
 # =============================================================================
 # C3 (TODO-3-010): the previous version did `chown -R $SERVICE_USER $PREFIX`
 # which gave the runtime user write access to its own source code and venv
@@ -210,7 +294,54 @@ else
 fi
 
 # =============================================================================
-log "Step 4/4: restart services"
+log "Step 6/7: re-install systemd unit files"
+# =============================================================================
+# TODO-3-622 (Bucket C-R2): unit-file edits in $PREFIX/deploy/systemd/ are
+# pulled by `git pull` in step 1 but never land on /etc/systemd/system/
+# without an explicit re-install. This matters whenever we change hardening
+# options (MemoryMax, ProtectSystem, ReadWritePaths, CAPABILITY drops) or
+# the ExecStart line for a new CLI entry point — the repo has the new unit,
+# but systemd keeps serving the old one until daemon-reload sees a fresh
+# file on disk.
+#
+# Only re-install if the unit is ALREADY registered. Operators who
+# installed with --no-systemd don't want update.sh sneaking a systemd
+# unit back in behind their backs; mirroring the "is the unit registered"
+# guard in step 7 keeps the two paths symmetric.
+SYSTEMD_TOUCHED=0
+if systemctl list-unit-files elephantbroker.service &>/dev/null; then
+    if [[ -f "$PREFIX/deploy/systemd/elephantbroker.service" ]]; then
+        install -o root -g root -m 644 \
+            "$PREFIX/deploy/systemd/elephantbroker.service" \
+            /etc/systemd/system/elephantbroker.service
+        log "  re-installed /etc/systemd/system/elephantbroker.service"
+        SYSTEMD_TOUCHED=1
+    else
+        warn "  $PREFIX/deploy/systemd/elephantbroker.service missing in repo"
+    fi
+else
+    log "  elephantbroker.service not registered — skipping (--no-systemd install?)"
+fi
+if systemctl list-unit-files elephantbroker-hitl.service &>/dev/null; then
+    if [[ -f "$PREFIX/deploy/systemd/elephantbroker-hitl.service" ]]; then
+        install -o root -g root -m 644 \
+            "$PREFIX/deploy/systemd/elephantbroker-hitl.service" \
+            /etc/systemd/system/elephantbroker-hitl.service
+        log "  re-installed /etc/systemd/system/elephantbroker-hitl.service"
+        SYSTEMD_TOUCHED=1
+    else
+        warn "  $PREFIX/deploy/systemd/elephantbroker-hitl.service missing in repo"
+    fi
+else
+    log "  elephantbroker-hitl.service not registered — skipping"
+fi
+if [[ "$SYSTEMD_TOUCHED" -eq 1 ]]; then
+    systemctl daemon-reload
+    log "  systemctl daemon-reload"
+fi
+
+# =============================================================================
+log "Step 7/7: restart services"
 # =============================================================================
 if [[ "$RESTART" -eq 0 ]]; then
     log "  --no-restart flag set — skipping (run 'systemctl restart elephantbroker' manually)"

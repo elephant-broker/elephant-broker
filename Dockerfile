@@ -63,12 +63,43 @@ COPY elephantbroker/config/default.yaml /etc/elephantbroker/default.yaml
 
 # H2 (TODO-3-321): create a non-root service user. The native install
 # (deploy/install.sh) runs the runtime as a dedicated `elephantbroker`
-# system user; the Docker image should mirror that posture instead of
-# running as root. /app is chowned to the new user so the runtime can
-# read its own venv + source. /etc/elephantbroker/default.yaml stays
-# root-owned at default 644 (the service user only reads it).
+# system user; the Docker image mirrors that posture instead of running
+# as root.
+#
+# C3 / TODO-3-625 (Bucket C-R2): chown narrowing. The previous form
+# `chown -R elephantbroker:elephantbroker /app` transferred ownership of
+# the entire install tree (venv + source + binaries) to the runtime
+# user, matching the exact anti-pattern C3 removed from install.sh
+# (TODO-3-010). A compromised runtime process could then rewrite its
+# own code, the cognee binaries, or pyproject.toml — the whole point
+# of a dedicated unprivileged service user vanishes.
+#
+# The native-install narrowed model chowns ONLY the Cognee writable
+# subdirs:
+#   * <site-packages>/cognee/.cognee_system  — Cognee runtime SQLite + state
+#   * <site-packages>/cognee/.data_storage   — Cognee chunk/artifact storage
+#   * <site-packages>/.anon_id               — Cognee telemetry id file
+# Everything else stays root-owned. Default file modes from `uv sync`
+# are 644/755 (other-readable + other-executable for dirs), so the
+# service user reads and traverses the venv without owning it.
+#
+# In the Docker image, site-packages lives at
+# /app/.venv/lib/python3.11/site-packages/. We resolve it via the venv's
+# own Python and chown just the three Cognee paths. /etc/elephantbroker/
+# default.yaml stays root-owned at default 644 (the service user only
+# reads it).
+#
+# NOTE: this Dockerfile is for dev/sandbox/CI use only — production
+# deployments use deploy/install.sh on a real host (see header comment).
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin elephantbroker \
-    && chown -R elephantbroker:elephantbroker /app
+    && SITE_PACKAGES=$(/app/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])') \
+    && COGNEE_DIR="$SITE_PACKAGES/cognee" \
+    && mkdir -p "$COGNEE_DIR/.cognee_system/databases" "$COGNEE_DIR/.data_storage" \
+    && touch "$SITE_PACKAGES/.anon_id" \
+    && chmod 644 "$SITE_PACKAGES/.anon_id" \
+    && chown -R elephantbroker:elephantbroker "$COGNEE_DIR/.cognee_system" \
+    && chown -R elephantbroker:elephantbroker "$COGNEE_DIR/.data_storage" \
+    && chown elephantbroker:elephantbroker "$SITE_PACKAGES/.anon_id"
 USER elephantbroker
 
 # Required at runtime: EB_GATEWAY_ID
