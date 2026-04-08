@@ -105,6 +105,11 @@ class TestOtelTraceQueryClientDegradedOps:
         assert emitted_event.event_type == TraceEventType.DEGRADED_OPERATION
         assert emitted_event.payload["component"] == "clickhouse_trace_query"
         assert emitted_event.payload["operation"] == "connect_import"
+        # F6 symmetry (Bucket F-R2, TODO-3-112): init-failure payload must
+        # carry gateway_id like the query-failure payload below. The test
+        # passes "gw-1" to get_tool_sequences so that is what the event
+        # should be stamped with.
+        assert emitted_event.payload["gateway_id"] == "gw-1"
 
     async def test_query_failure_emits_event_and_metric(self):
         """A query exception fires both metric + degraded trace event each time."""

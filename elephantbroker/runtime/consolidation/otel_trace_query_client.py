@@ -78,7 +78,14 @@ class OtelTraceQueryClient:
             except Exception:
                 pass
 
-    async def _emit_init_failure_event(self) -> None:
+    async def _emit_init_failure_event(self, gateway_id: str) -> None:
+        # F6 symmetry (Bucket F-R2, TODO-3-112): the query-failure payload at
+        # ``get_tool_sequences`` below includes ``gateway_id`` so operators can
+        # filter DEGRADED_OPERATION events by gateway. The init-failure payload
+        # used to omit gateway_id, so a multi-gateway host whose ClickHouse
+        # client failed to import couldn't tell *which* gateway first hit the
+        # failure (the event fires on the first query after init). Threading
+        # gateway_id from the caller restores symmetry between the two payloads.
         if self._init_failure is None or self._init_failure_emitted or self._trace is None:
             return
         operation, reason = self._init_failure
@@ -90,6 +97,7 @@ class OtelTraceQueryClient:
                     "component": _COMPONENT,
                     "operation": operation,
                     "reason": reason,
+                    "gateway_id": gateway_id,
                 },
             ))
         except Exception:
@@ -112,7 +120,7 @@ class OtelTraceQueryClient:
         Body contains the full TraceEvent JSON.
         """
         if not self._client:
-            await self._emit_init_failure_event()
+            await self._emit_init_failure_event(gateway_id)
             return []
 
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()

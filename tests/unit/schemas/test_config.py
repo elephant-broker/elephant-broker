@@ -872,6 +872,120 @@ class TestEnvVarRegistryCompleteness:
             f"vars listed in BOTH ENV_OVERRIDE_BINDINGS and NON_CONFIG_ENV_VARS: {overlap}"
         )
 
+    def test_every_binding_dotted_path_resolves_to_real_field(self):
+        """TODO-3-341 (Bucket F-R2, AR MED): every ENV_OVERRIDE_BINDINGS entry
+        must point to a real Pydantic model field in ElephantBrokerConfig.
+
+        This is the true logical inverse of
+        ``test_no_unregistered_env_var_in_source`` above — that walks source
+        for ``os.environ``/``os.getenv`` reads and asserts each is in the
+        registry or the NON_CONFIG_ENV_VARS allowlist. This one walks the
+        registry in the other direction: for every binding, it splits the
+        dotted path on ``"."``, descends ``ElephantBrokerConfig.model_fields``,
+        and asserts the final segment resolves to a scalar leaf (not a
+        nested BaseModel, not a missing attribute, not a wrong-type descent).
+
+        Bug classes this catches that the forward test cannot:
+          1. Schema field renamed but the binding left behind with the old
+             dotted path — the binding becomes a silent phantom because env
+             var writes land on a dict key that nothing reads at validation
+             time. This is the exact failure mode that R1 F5 nearly hit with
+             ``EB_CLICKHOUSE_LOGS_TABLE`` (the F5 commit body claimed the
+             binding was added; the diff didn't add it; nothing caught the
+             mismatch until Bucket F-R2 TODO-3-110 fixed it manually).
+          2. Dotted-path typos in new bindings (e.g. ``infra.clickhouse.logs_tabl``
+             instead of ``infra.clickhouse.logs_table``) — the env var would
+             silently stop overriding after any code review that doesn't
+             visually diff the dotted path character-by-character.
+          3. Wrong nesting level (e.g. ``clickhouse.logs_table`` at the root
+             instead of ``infra.clickhouse.logs_table``) — same silent-drop
+             failure mode.
+
+        Interpretation choice (ADR-style note for future maintainers):
+        The original R1 TODO-3-312 framing asked for the opposite direction
+        — "every ``*Config`` leaf field has a binding or opt-out". Mental
+        enumeration during F-R2 pre-flight showed that ~60-90 leaf fields
+        (scoring weights, stage thresholds, LLM generation parameters,
+        audit retention, budget fractions, per-profile tuning knobs) are
+        legitimately YAML-only and would all have to sit in an opt-out
+        allowlist. At that ratio the allowlist IS the test — tautological.
+        The inverse direction (binding → field must exist) catches real
+        phantom-binding bugs without any allowlist at all, keeping the
+        existing 5-entry ``NON_CONFIG_ENV_VARS`` clean and tight. If a
+        future reviewer wants to reintroduce the schema → binding
+        direction, it should go through a narrow predicate (e.g. only
+        fields matching ``_endpoint``/``_api_key``/``_enabled``/``_model``/
+        ``_url``/``_password``) to avoid the 90% allowlist problem.
+        """
+        import inspect
+        import typing
+
+        from pydantic import BaseModel
+
+        from elephantbroker.schemas.config import (
+            ENV_OVERRIDE_BINDINGS,
+            ElephantBrokerConfig,
+        )
+
+        def unwrap_model(annotation: object) -> type[BaseModel] | None:
+            """Return the BaseModel subclass inside an annotation, or None.
+
+            Handles bare ``SomeConfig`` annotations AND the union forms
+            ``Optional[SomeConfig]`` / ``SomeConfig | None`` — for the
+            union case, returns the first BaseModel arg found via
+            ``typing.get_args`` (works for both ``typing.Union`` and PEP
+            604 ``X | Y`` forms because ``get_args`` unifies them).
+            """
+            if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+                return annotation
+            for arg in typing.get_args(annotation):
+                if inspect.isclass(arg) and issubclass(arg, BaseModel):
+                    return arg
+            return None
+
+        violations: list[str] = []
+        for env_var, dotted_path, _coercer in ENV_OVERRIDE_BINDINGS:
+            parts = dotted_path.split(".")
+            current_model: type[BaseModel] = ElephantBrokerConfig
+            for i, part in enumerate(parts):
+                fields = current_model.model_fields
+                if part not in fields:
+                    resolved_so_far = ".".join(parts[:i]) or "<root>"
+                    violations.append(
+                        f"{env_var} → {dotted_path}: no field '{part}' on "
+                        f"{current_model.__name__} (depth {i}, resolved: "
+                        f"{resolved_so_far})"
+                    )
+                    break
+                field_info = fields[part]
+                annotation = field_info.annotation
+                if i < len(parts) - 1:
+                    nested = unwrap_model(annotation)
+                    if nested is None:
+                        violations.append(
+                            f"{env_var} → {dotted_path}: '{part}' at depth "
+                            f"{i} has annotation {annotation!r} (not a nested "
+                            f"BaseModel) but {len(parts) - 1 - i} path "
+                            f"part(s) remain"
+                        )
+                        break
+                    current_model = nested
+                else:
+                    # Leaf — must NOT itself be a nested BaseModel (that would
+                    # mean the binding tries to override an entire subtree,
+                    # which the coercers can't handle).
+                    if unwrap_model(annotation) is not None:
+                        violations.append(
+                            f"{env_var} → {dotted_path}: points to nested "
+                            f"model {annotation!r}, not a scalar leaf"
+                        )
+
+        assert not violations, (
+            "Phantom or misrouted ENV_OVERRIDE_BINDINGS entries "
+            "(binding → schema field resolution failed):\n"
+            + "\n".join(f"  - {v}" for v in violations)
+        )
+
 
 class TestF8LocalhostDefaults:
     """F8 (TODO-3-612): host.docker.internal defaults removed."""
