@@ -8,9 +8,13 @@ default in place:
 * A5 — dataset rename forbidden once /var/lib/elephantbroker/.dataset_lock exists
        unless EB_ALLOW_DATASET_CHANGE=true
 
-The opt-out env vars are set unconditionally in tests/conftest.py for the rest
-of the test suite. Each test below clears the relevant opt-out locally to
-prove the guard fires.
+Each test below uses ``monkeypatch.delenv``/``setenv`` to control the relevant
+opt-out env var locally and prove the guard fires (or short-circuits) as
+expected. Tests elsewhere that need to bypass the guards opt in explicitly
+via the ``allow_default_gateway`` fixture defined in ``tests/conftest.py``;
+the previous global ``os.environ.setdefault`` opt-out was removed in
+Bucket A-R2-Test (TODO-3-343) so the suite no longer masks the guards by
+default.
 """
 from __future__ import annotations
 

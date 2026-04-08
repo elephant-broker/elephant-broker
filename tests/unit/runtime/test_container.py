@@ -7,6 +7,17 @@ from elephantbroker.runtime.container import RuntimeContainer
 from elephantbroker.schemas.config import ElephantBrokerConfig
 from elephantbroker.schemas.tiers import BusinessTier
 
+# Every test in this module constructs a container from a bare
+# ``ElephantBrokerConfig()``, which has the empty ``gateway.gateway_id``
+# and empty ``cognee.neo4j_password`` defaults. Bucket A's
+# ``_validate_startup_safety`` refuses both unless the operator opts out
+# via env var. The ``allow_default_gateway`` fixture (tests/conftest.py)
+# sets ``EB_ALLOW_DEFAULT_GATEWAY_ID`` + ``EB_DEV_MODE`` +
+# ``EB_ALLOW_DATASET_CHANGE`` for the duration of each test via
+# ``monkeypatch``, so the opt-outs do not leak into adjacent tests that
+# verify the guards fire (e.g. ``test_container_startup_safety.py``).
+pytestmark = pytest.mark.usefixtures("allow_default_gateway")
+
 
 @pytest.fixture(autouse=True)
 def _mock_configure_cognee():

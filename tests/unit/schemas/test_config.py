@@ -904,3 +904,89 @@ class TestF9EmbeddingDimensionsValidator:
     def test_validator_error_message_mentions_expected_dim(self):
         with pytest.raises(ValueError, match=r"expected 1536"):
             CogneeConfig(embedding_model="text-embedding-3-small", embedding_dimensions=999)
+
+
+class TestStrictBaseInheritance:
+    """TR-512 — every config submodel must inherit from ``_StrictBase``.
+
+    Bucket A added ``_StrictBase`` (``model_config = ConfigDict(extra="forbid")``)
+    so unknown YAML/dict keys raise ``ValidationError`` at load time instead of
+    being silently swallowed. The class docstring spells out the contract:
+
+        All config schemas in this file inherit from ``_StrictBase`` rather
+        than ``BaseModel`` directly. If you add a new submodel, inherit from
+        this base so the strictness contract holds across the whole config
+        tree.
+
+    A class-by-class assertion would drift the moment someone adds a new
+    submodel and forgets to update the test. Instead this test walks the
+    ``elephantbroker.schemas.config`` module at import time, finds every
+    ``BaseModel`` subclass defined in that module file, and asserts each
+    inherits from ``_StrictBase``. New submodels are picked up automatically;
+    a contributor who reaches for ``BaseModel`` directly trips the test.
+    """
+
+    @staticmethod
+    def _config_module_classes() -> list[type]:
+        """Return every Pydantic ``BaseModel`` subclass *defined in*
+        ``elephantbroker.schemas.config`` (not merely re-exported).
+
+        We filter on ``cls.__module__`` so types pulled in via ``from … import``
+        (e.g. ``ConsolidationConfig`` from ``schemas.consolidation``) do not
+        false-fire — those classes have their own test files in their own
+        module and may have intentionally different inheritance.
+        """
+        import inspect
+        from pydantic import BaseModel
+
+        from elephantbroker.schemas import config as config_module
+
+        members = inspect.getmembers(config_module, inspect.isclass)
+        return [
+            cls for _, cls in members
+            if issubclass(cls, BaseModel)
+            and cls is not BaseModel
+            and cls.__module__ == config_module.__name__
+        ]
+
+    def test_every_config_class_inherits_strict_base(self):
+        from elephantbroker.schemas.config import _StrictBase
+
+        classes = self._config_module_classes()
+        # Lower bound — config has 25+ submodels today; if discovery returns a
+        # tiny number, the filter is broken and the test would trivially pass.
+        assert len(classes) >= 20, (
+            f"Expected at least 20 config classes in elephantbroker.schemas.config, "
+            f"got {len(classes)}: {[c.__name__ for c in classes]}. "
+            "The discovery filter is wrong or the module was reorganized."
+        )
+
+        # _StrictBase itself is allowed (it IS the base) but every other
+        # class must inherit from it.
+        offenders = [
+            cls.__name__ for cls in classes
+            if cls is not _StrictBase and not issubclass(cls, _StrictBase)
+        ]
+        assert not offenders, (
+            f"Config submodels NOT inheriting from _StrictBase: {offenders}. "
+            "Every class in elephantbroker/schemas/config.py must inherit from "
+            "_StrictBase so unknown YAML keys raise ValidationError instead of "
+            "being silently swallowed. See the _StrictBase docstring for the "
+            "contract. If a class needs to allow extra keys for a deliberate "
+            "reason (e.g. forward-compat), document the exemption inline AND "
+            "update this test to whitelist it explicitly."
+        )
+
+    def test_strict_base_forbids_extra_keys(self):
+        """Sanity guard — confirm the contract _StrictBase encodes is actually
+        wired (``extra="forbid"``). If someone flips the model_config, the
+        inheritance test above would still pass while the runtime stops
+        catching typos."""
+        from elephantbroker.schemas.config import _StrictBase
+
+        assert _StrictBase.model_config.get("extra") == "forbid", (
+            f"_StrictBase.model_config['extra'] is "
+            f"{_StrictBase.model_config.get('extra')!r}, expected 'forbid'. "
+            "The strictness contract was changed — every config submodel will "
+            "now silently swallow unknown YAML keys. Restore extra='forbid'."
+        )
