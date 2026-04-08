@@ -20,8 +20,29 @@ pytestmark = pytest.mark.integration
 
 
 @pytest_asyncio.fixture
-async def container():
-    """Build a full RuntimeContainer wired to Docker test services."""
+async def container(monkeypatch):
+    """Build a full RuntimeContainer wired to Docker test services.
+
+    TODO-3-510: EB_GATEWAY_ID is explicitly set to a non-empty distinctive
+    value here so that test_end_to_end_build_working_set below is NOT
+    tautologically satisfied. Without this monkeypatch, the integration
+    fixture runs with no EB_GATEWAY_ID env override, which means
+    ElephantBrokerConfig.load() returns the post-Bucket-A sentinel default
+    of "" (empty string) and the WorkingSetManager instantiated inside the
+    container carries `_gateway_id == ""`. Under that state, the assertion
+      assert snapshot.gateway_id == container.working_set_manager._gateway_id
+    collapses to `"" == ""` and passes regardless of whether the stamping
+    contract is actually honored. Seeding a real value at fixture entry
+    turns that assertion into a meaningful contract check.
+
+    The value "test-ws-gateway" is deliberately distinct from the guards
+    subpackage's `GATEWAY_ID = "test-gw"` hardcoded constant (see
+    tests/integration/runtime/guards/conftest.py) and from the Batch 4
+    explicit values ("gw-alpha", "gw-beta", "gw-owner", etc.) so a mismatch
+    during cross-module refactoring fails loudly instead of accidentally
+    aligning.
+    """
+    monkeypatch.setenv("EB_GATEWAY_ID", "test-ws-gateway")
     config = ElephantBrokerConfig.load()
     c = await RuntimeContainer.from_config(config, BusinessTier.FULL)
     yield c
@@ -172,15 +193,22 @@ class TestWorkingSetIntegration:
         assert snapshot is not None
         assert snapshot.session_id == session_id
         assert snapshot.tokens_used <= snapshot.token_budget
-        # Verify gateway_id is stamped to match the manager's configured value.
-        # Post-Bucket-A the default gateway_id is "" (empty string sentinel for
-        # single-tenant deployments — see TD-41 in TECHNICAL-DEBT.md), so the
-        # pre-Bucket-A `!= ""` check is no longer meaningful. The contract is
-        # "snapshot carries the manager's gateway_id byte-identically", which
-        # holds in both single-tenant ("") and multi-tenant (e.g. "hub-01")
-        # deployments. The manager stamps via
-        # `snapshot.gateway_id or self._gateway_id` at build time
-        # (working_set/manager.py:195).
+        # TODO-3-510: Verify gateway_id is stamped to match the manager's
+        # configured value. The `container` fixture above explicitly sets
+        # EB_GATEWAY_ID="test-ws-gateway" via monkeypatch so both sides of
+        # this equality carry a real distinctive value instead of the
+        # post-Bucket-A "" sentinel that ElephantBrokerConfig.load() would
+        # otherwise produce under no env override (see TD-41 in
+        # TECHNICAL-DEBT.md for the sentinel rationale). Pre-510 the
+        # assertion was tautologically satisfied — both sides evaluated to
+        # "" regardless of whether the WorkingSetManager actually did the
+        # stamping, so the contract went unchecked. Post-510 the assertion
+        # fails loudly if working_set/manager.py:195's
+        # `snapshot.gateway_id or self._gateway_id` coalescing ever gets
+        # replaced with a hardcoded value or silently dropped. The contract
+        # is "snapshot carries the manager's gateway_id byte-identically"
+        # and it now holds under a real gateway_id the way it needs to in
+        # any multi-tenant (e.g. "hub-01") deployment.
         assert snapshot.gateway_id == container.working_set_manager._gateway_id
         # Must contain items (facts and/or goals)
         assert len(snapshot.items) > 0
