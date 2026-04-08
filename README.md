@@ -238,8 +238,8 @@ docker compose --profile observability up -d  # + ClickHouse, Jaeger, Grafana (o
 ElephantBroker uses [uv](https://github.com/astral-sh/uv) for reproducible installs from a pinned `uv.lock`. See [deploy/UPDATING-DEPS.md](deploy/UPDATING-DEPS.md) for the dep upgrade procedure and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production deployments via `deploy/install.sh`.
 
 ```bash
-# Install uv (one-time setup)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install uv (one-time setup — pinned to 0.11.3 to match install.sh + Dockerfile)
+curl -LsSf https://astral.sh/uv/0.11.3/install.sh | sh
 
 # Clone and install
 git clone https://github.com/elephant-broker/elephant-broker

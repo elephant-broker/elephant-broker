@@ -315,14 +315,15 @@ one of the conflicting direct deps).
 
 ### `uv` not found on the DB VM
 
-The installer (`deploy/install.sh`) installs uv via Astral's curl one-liner.
-If something went wrong:
+The installer (`deploy/install.sh`) installs uv via Astral's versioned curl
+installer, pinned to `0.11.3` to match `Dockerfile:14` and `:70` (same
+`ghcr.io/astral-sh/uv:0.11.3` base image). If something went wrong:
 
 ```bash
 $ which uv
 $ uv --version
-# If missing, re-install:
-$ curl -LsSf https://astral.sh/uv/install.sh | sudo UV_INSTALL_DIR=/usr/local/bin sh
+# If missing, re-install (pin matches install.sh + Dockerfile):
+$ curl -LsSf https://astral.sh/uv/0.11.3/install.sh | sudo UV_INSTALL_DIR=/usr/local/bin sh
 ```
 
 ### I need to install a specific Python version for uv to use
