@@ -202,7 +202,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
 |----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_SUCCESSFUL_USE_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
-| `EB_SUCCESSFUL_USE_ENDPOINT` | No | `"http://host.docker.internal:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
+| `EB_SUCCESSFUL_USE_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
 | `EB_SUCCESSFUL_USE_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
 | `EB_SUCCESSFUL_USE_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | No | `5` | int | Python runtime | `5`, `10` | No | Yes |
@@ -212,7 +212,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
 |----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_BLOCKER_EXTRACTION_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | No | `"http://host.docker.internal:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
+| `EB_BLOCKER_EXTRACTION_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
 | `EB_BLOCKER_EXTRACTION_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | No | `3` | int | Python runtime | `3`, `5` | No | Yes |
@@ -636,7 +636,7 @@ Path prefix: `successful_use.*`
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `successful_use.enabled` | `bool` | `False` | `EB_SUCCESSFUL_USE_ENABLED` | -- | Enables LLM-based batch evaluation of which injected facts actually contributed to agent actions | Enabling is expensive (LLM calls per turn); disabling loses D10 scoring accuracy | `false` / `false` / `true` |
-| `successful_use.endpoint` | `str` | `"http://host.docker.internal:8811/v1"` | `EB_SUCCESSFUL_USE_ENDPOINT` | -- | LLM endpoint for use evaluation (typically a cheaper/faster model) | Wrong endpoint = evaluation fails silently (async) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
+| `successful_use.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_SUCCESSFUL_USE_ENDPOINT` | -- | LLM endpoint for use evaluation (typically a cheaper/faster model) | Wrong endpoint = evaluation fails silently (async) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
 | `successful_use.api_key` | `str` | `""` | `EB_SUCCESSFUL_USE_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure on evaluation calls | `""` / `sk-...` / `sk-...` |
 | `successful_use.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_SUCCESSFUL_USE_MODEL` | -- | LLM model for use evaluation (flash model for cost efficiency) | Wrong model = evaluation errors | `gemini/gemini-2.5-flash` / same / same |
 | `successful_use.batch_size` | `int` | `5` | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `ge=1` | Number of facts evaluated per LLM call | Too low = many LLM calls (expensive); too high = context window overflow | `5` / `5` / `10` |
@@ -838,7 +838,7 @@ Path prefix: `blocker_extraction.*`
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `blocker_extraction.enabled` | `bool` | `False` | `EB_BLOCKER_EXTRACTION_ENABLED` | -- | Enables LLM-based extraction of task blockers from conversation | Enabling is expensive (LLM calls every N turns); disabling = no automatic blocker detection | `false` / `false` / `true` |
-| `blocker_extraction.endpoint` | `str` | `"http://host.docker.internal:8811/v1"` | `EB_BLOCKER_EXTRACTION_ENDPOINT` | -- | LLM endpoint for blocker extraction | Wrong endpoint = extraction fails silently | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
+| `blocker_extraction.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_BLOCKER_EXTRACTION_ENDPOINT` | -- | LLM endpoint for blocker extraction | Wrong endpoint = extraction fails silently | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
 | `blocker_extraction.api_key` | `str` | `""` | `EB_BLOCKER_EXTRACTION_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure | `""` / `sk-...` / `sk-...` |
 | `blocker_extraction.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_BLOCKER_EXTRACTION_MODEL` | -- | LLM model for blocker extraction | Wrong model = extraction errors | `gemini/gemini-2.5-flash` / same / same |
 | `blocker_extraction.run_every_n_turns` | `int` | `3` | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `ge=1` | Run blocker extraction every N turns | Too low = excessive LLM calls; too high = delayed blocker detection | `3` / `3` / `5` |
@@ -960,7 +960,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_AGENT_AUTHORITY_LEVEL` | `gateway.agent_authority_level` | `int` | `0` |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | `str` | `""` (fallback: `EB_LLM_API_KEY`) |
 | `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `bool` | `false` |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `str` | `http://host.docker.internal:8811/v1` |
+| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `int` | `3` |
 | `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `str` | `gemini/gemini-2.5-flash` |
 | `EB_CLICKHOUSE_DATABASE` | `infra.clickhouse.database` | `str` | `otel` |
@@ -1021,7 +1021,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_SUCCESSFUL_USE_API_KEY` | `successful_use.api_key` | `str` | `""` (fallback: `EB_LLM_API_KEY`) |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `int` | `5` |
 | `EB_SUCCESSFUL_USE_ENABLED` | `successful_use.enabled` | `bool` | `false` |
-| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `str` | `http://host.docker.internal:8811/v1` |
+| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `str` | `gemini/gemini-2.5-flash` |
 | `EB_TEAM_ID` | `gateway.team_id` | `str` | `None` |
 | `EB_TRACE_MEMORY_MAX_EVENTS` | `infra.trace.memory_max_events` | `int` | `10000` |
@@ -4098,7 +4098,7 @@ conflict_detection:
 ## --- Successful-use feedback (Phase 9, opt-in) ---
 successful_use:
   enabled: false                             # EB_SUCCESSFUL_USE_ENABLED
-  endpoint: "http://host.docker.internal:8811/v1"  # EB_SUCCESSFUL_USE_ENDPOINT
+  endpoint: "http://localhost:8811/v1"  # EB_SUCCESSFUL_USE_ENDPOINT
   api_key: ""                                # EB_SUCCESSFUL_USE_API_KEY (falls back to EB_LLM_API_KEY)
   model: "gemini/gemini-2.5-flash"           # EB_SUCCESSFUL_USE_MODEL
   batch_size: 5                              # EB_SUCCESSFUL_USE_BATCH_SIZE
@@ -4228,7 +4228,7 @@ compaction_llm:
 ## --- Blocker extraction (Phase 9, opt-in) ---
 blocker_extraction:
   enabled: false                          # EB_BLOCKER_EXTRACTION_ENABLED
-  endpoint: "http://host.docker.internal:8811/v1"  # EB_BLOCKER_EXTRACTION_ENDPOINT
+  endpoint: "http://localhost:8811/v1"  # EB_BLOCKER_EXTRACTION_ENDPOINT
   api_key: ""                             # EB_BLOCKER_EXTRACTION_API_KEY (falls back to EB_LLM_API_KEY)
   model: "gemini/gemini-2.5-flash"        # EB_BLOCKER_EXTRACTION_MODEL
   run_every_n_turns: 3                    # EB_BLOCKER_EXTRACTION_EVERY_N_TURNS
@@ -4311,12 +4311,12 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_
 | `EB_HITL_CALLBACK_SECRET` | `hitl.callback_hmac_secret` | `""` |
 | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `consolidation_min_retention_seconds` | `172800` |
 | `EB_SUCCESSFUL_USE_ENABLED` | `successful_use.enabled` | `"false"` |
-| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `"http://host.docker.internal:8811/v1"` |
+| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_SUCCESSFUL_USE_API_KEY` | `successful_use.api_key` | (falls back to `EB_LLM_API_KEY`) |
 | `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `"gemini/gemini-2.5-flash"` |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `5` |
 | `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `"false"` |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `"http://host.docker.internal:8811/v1"` |
+| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | (falls back to `EB_LLM_API_KEY`) |
 | `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `"gemini/gemini-2.5-flash"` |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `3` |
@@ -4804,7 +4804,7 @@ After registration, loggers can use `logger.verbose("message")`.
 
 | Env Var | Default | Effect |
 |---|---|---|
-| `EB_LOG_LEVEL` | `"INFO"` | Python log level. Accepts `DEBUG`, `VERBOSE`, `INFO`, `WARNING`, `ERROR`. |
+| `EB_LOG_LEVEL` | `"INFO"` | Python log level. Accepts `DEBUG`, `VERBOSE`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 
 In `RuntimeContainer.from_config()`:
 ```python
@@ -7874,7 +7874,7 @@ Do NOT mark a fact as used if the agent would have done the same without it.
 - `goal_list` -- session goal titles and descriptions, or "(none)"
 - `conversation` -- all messages from `turn_messages` batches, each content truncated to 500 chars, total truncated to 4000 chars
 - `turn_count` -- number of turn batches
-- Uses own dedicated httpx client with `SuccessfulUseConfig.endpoint` (default: `http://host.docker.internal:8811/v1`)
+- Uses own dedicated httpx client with `SuccessfulUseConfig.endpoint` (default: `http://localhost:8811/v1`)
 - Uses raw OpenAI-compatible API (`/chat/completions`), not `LLMClient`
 
 ---
@@ -7933,7 +7933,7 @@ Return JSON: [{"goal_index": int, "blocker_text": "description of the blocker"}]
 **Parameters injected:**
 - `goal_list` -- indexed goals with titles, descriptions, and existing blockers
 - `messages` -- last `recent_messages_window` messages (default: 10), each content truncated to 500 chars, total truncated to 4000 chars
-- Uses own dedicated httpx client with `BlockerExtractionConfig.endpoint` (default: `http://host.docker.internal:8811/v1`)
+- Uses own dedicated httpx client with `BlockerExtractionConfig.endpoint` (default: `http://localhost:8811/v1`)
 - Uses raw OpenAI-compatible API (`/chat/completions`), not `LLMClient`
 
 ---

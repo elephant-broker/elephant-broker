@@ -30,12 +30,23 @@
 #     pip needed (uv's holistic resolver picks a working mistralai version).
 #   - See deploy/UPDATING-DEPS.md for the dep upgrade workflow.
 #
-# Usage (typical):
+# Usage (typical — in-tree, $REPO_DIR == $PREFIX):
 #   sudo git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 #   sudo /opt/elephantbroker/deploy/install.sh
 #   sudo nano /etc/elephantbroker/env       # fill in EB_LLM_API_KEY etc
 #   sudo nano /etc/elephantbroker/hitl.env  # fill in EB_HITL_CALLBACK_SECRET
 #   sudo systemctl start elephantbroker elephantbroker-hitl
+#
+# Usage (out-of-tree — $REPO_DIR != $PREFIX, requires --allow-out-of-tree):
+#   sudo git clone https://github.com/elephant-broker/elephant-broker.git /tmp/eb-src
+#   sudo /tmp/eb-src/deploy/install.sh --allow-out-of-tree --prefix /opt/elephantbroker
+#   # Remaining env/hitl/systemctl steps identical to the in-tree flow above.
+#
+# OOT mode exists for CI sandboxes, build hosts, and bind-mounted source
+# layouts where the git working tree cannot live at $PREFIX. The flag is
+# opt-in (default-off) because the supported production workflow is to clone
+# directly into $PREFIX — see C2 (TODO-3-202/602/011) for the rationale and
+# the safety guards that still fire in OOT mode.
 #
 # This script is idempotent — safe to re-run on a partially-installed host.
 # It runs entirely as root (no `sudo -u` switching). All ownership is set via

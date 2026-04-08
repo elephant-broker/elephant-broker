@@ -15,8 +15,12 @@
 #                 After the F2/F3 unification (PR #3), there is exactly one
 #                 config load path: `ElephantBrokerConfig.load()`, which parses
 #                 the YAML, applies env overrides, runs the inheritance fallbacks,
-#                 then validates against the Pydantic schema. The legacy
-#                 `from_env()` and `from_yaml()` methods no longer exist.
+#                 then validates against the Pydantic schema. Under the hood,
+#                 `load()` wraps `ElephantBrokerConfig.from_yaml()` — the legacy
+#                 `from_env()` classmethod was deleted in F2/F3, but `from_yaml()`
+#                 is still the actual YAML+env reader and is directly exercised
+#                 by the unit tests. Callers should use `load()`; `from_yaml()`
+#                 remains as the documented implementation target.
 #                 Bindings are tagged inline below as `env: EB_*`. An inverse
 #                 contract test in tests/unit/schemas pins every env var that
 #                 source code references back to a binding here.
