@@ -24,7 +24,7 @@ logger = logging.getLogger("elephantbroker.runtime.procedures.engine")
 class ProcedureEngine(IProcedureEngine):
 
     def __init__(self, graph: GraphAdapter, trace_ledger: ITraceLedger,
-                 dataset_name: str = "elephantbroker", gateway_id: str = "local",
+                 dataset_name: str = "elephantbroker", gateway_id: str = "",
                  redis=None, redis_keys=None, ttl_seconds: int = 172800) -> None:
         self._graph = graph
         self._trace = trace_ledger

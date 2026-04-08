@@ -24,7 +24,7 @@ class CandidateGenerator:
         graph=None, redis=None, config=None,
         embedding_service=None,
         procedure_candidate_config=None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         redis_keys=None,
         metrics=None,
     ) -> None:

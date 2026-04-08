@@ -17,7 +17,7 @@ class GoalRefinementTask:
     """Processes goal hints — Tier 1 (direct) and Tier 2 (LLM-powered)."""
 
     def __init__(self, llm_client=None, config: GoalRefinementConfig | None = None,
-                 trace_ledger=None, metrics=None, gateway_id: str = "local") -> None:
+                 trace_ledger=None, metrics=None, gateway_id: str = "") -> None:
         self._llm = llm_client
         self._config = config or GoalRefinementConfig()
         self._trace = trace_ledger

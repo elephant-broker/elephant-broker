@@ -13,7 +13,7 @@ class SessionContextStore:
     """CRUD for SessionContext and SessionCompactState in Redis."""
 
     def __init__(self, redis, config: ElephantBrokerConfig,
-                 redis_keys: RedisKeyBuilder, gateway_id: str = "local") -> None:
+                 redis_keys: RedisKeyBuilder, gateway_id: str = "") -> None:
         self._redis = redis
         self._config = config
         self._keys = redis_keys

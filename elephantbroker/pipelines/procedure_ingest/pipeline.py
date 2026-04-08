@@ -20,7 +20,7 @@ class ProcedureIngestPipeline:
 
     def __init__(
         self, graph, trace_ledger: ITraceLedger, dataset_name: str = "elephantbroker",
-        gateway_id: str = "local",
+        gateway_id: str = "",
     ):
         self._graph = graph
         self._trace = trace_ledger

@@ -34,7 +34,7 @@ class SessionGoalAuditStore:
                 event_type TEXT NOT NULL,
                 evidence TEXT,
                 timestamp TEXT NOT NULL,
-                gateway_id TEXT NOT NULL DEFAULT 'local'
+                gateway_id TEXT NOT NULL DEFAULT ''
             )
         ''')
         self._conn.commit()
@@ -45,7 +45,7 @@ class SessionGoalAuditStore:
         event_type: str, *,
         parent_goal_id: str | None = None,
         evidence: str | None = None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
     ) -> None:
         if not self._enabled or not self._conn:
             return

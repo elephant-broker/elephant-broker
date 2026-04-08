@@ -19,7 +19,7 @@ class ArtifactIngestPipeline:
 
     def __init__(
         self, artifact_store, memory_facade, llm_client, trace_ledger: ITraceLedger,
-        config=None, gateway_id: str = "local",
+        config=None, gateway_id: str = "",
     ):
         self._store = artifact_store
         self._facade = memory_facade

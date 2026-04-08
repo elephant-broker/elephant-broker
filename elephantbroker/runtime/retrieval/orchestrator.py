@@ -33,7 +33,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         embeddings: EmbeddingService,
         trace_ledger: ITraceLedger,
         dataset_name: str = "elephantbroker",
-        gateway_id: str = "local",
+        gateway_id: str = "",
     ) -> None:
         self._vector = vector
         self._graph = graph

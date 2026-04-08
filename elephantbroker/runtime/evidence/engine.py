@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
 
     def __init__(self, graph: GraphAdapter, trace_ledger: ITraceLedger,
-                 dataset_name: str = "elephantbroker", gateway_id: str = "local") -> None:
+                 dataset_name: str = "elephantbroker", gateway_id: str = "") -> None:
         self._graph = graph
         self._trace = trace_ledger
         self._claims: dict[uuid.UUID, ClaimRecord] = {}

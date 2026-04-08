@@ -37,7 +37,7 @@ class ProcedureAuditStore:
                 proof_type TEXT,
                 proof_value TEXT,
                 timestamp TEXT NOT NULL,
-                gateway_id TEXT NOT NULL DEFAULT 'local'
+                gateway_id TEXT NOT NULL DEFAULT ''
             )
         ''')
         self._conn.commit()
@@ -51,7 +51,7 @@ class ProcedureAuditStore:
         step_instruction: str | None = None,
         proof_type: str | None = None,
         proof_value: str | None = None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
     ) -> None:
         if not self._enabled or not self._conn:
             return

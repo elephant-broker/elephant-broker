@@ -26,7 +26,7 @@ class SessionGoalStore:
     def __init__(self, redis, config: ScoringConfig | None = None,
                  trace_ledger: ITraceLedger | None = None,
                  graph=None, dataset_name: str = "elephantbroker",
-                 gateway_id: str = "local", redis_keys=None,
+                 gateway_id: str = "", redis_keys=None,
                  metrics=None) -> None:
         self._redis = redis
         self._config = config or ScoringConfig()

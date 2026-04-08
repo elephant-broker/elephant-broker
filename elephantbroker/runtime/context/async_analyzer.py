@@ -41,7 +41,7 @@ class AsyncInjectionAnalyzer:
         redis,
         redis_keys: RedisKeyBuilder,
         config: AsyncAnalysisConfig,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         metrics: MetricsContext | None = None,
     ) -> None:
         self._embeddings = embeddings
