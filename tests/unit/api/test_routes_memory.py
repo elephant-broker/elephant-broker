@@ -191,7 +191,10 @@ class TestMemoryGatewayIsolation:
         assert stored_facts[0].gateway_id == "tenant-42"
 
     async def test_store_uses_default_gateway_when_no_header(self, client, container):
-        """Without X-EB-Gateway-ID header, middleware defaults to 'local'."""
+        """Without X-EB-Gateway-ID header, middleware falls back to the container's
+        configured gateway_id. Post-Bucket-A the default is "" (empty string) — the
+        app factory wires container.config.gateway.gateway_id through to the
+        middleware so write and read paths stay byte-identical."""
         stored_facts: list[FactAssertion] = []
 
         async def capture_store(fact, **kwargs):
@@ -204,7 +207,7 @@ class TestMemoryGatewayIsolation:
         r = await client.post("/memory/store", json=body)
         assert r.status_code == 200
         assert len(stored_facts) == 1
-        assert stored_facts[0].gateway_id == "local"
+        assert stored_facts[0].gateway_id == ""
 
     async def test_search_scoped_to_gateway(self, client, container):
         """POST /memory/search returns results only — the gateway scope is enforced

@@ -69,7 +69,10 @@ class TestGoalGatewayIsolation:
         assert captured_goals[0].gateway_id == "tenant-99"
 
     async def test_create_goal_default_gateway(self, client, container):
-        """Without X-EB-Gateway-ID header, middleware defaults to 'local'."""
+        """Without X-EB-Gateway-ID header, middleware falls back to the container's
+        configured gateway_id. Post-Bucket-A the default is "" (empty string) — the
+        app factory wires container.config.gateway.gateway_id through to the
+        middleware so write and read paths stay byte-identical."""
         captured_goals: list[GoalState] = []
 
         async def capture_set_goal(goal, **kwargs):
@@ -82,7 +85,7 @@ class TestGoalGatewayIsolation:
         r = await client.post("/goals/", json=body)
         assert r.status_code == 200
         assert len(captured_goals) == 1
-        assert captured_goals[0].gateway_id == "local"
+        assert captured_goals[0].gateway_id == ""
 
     async def test_session_goal_stamps_gateway_id(self, client, container):
         """POST /goals/session stamps gateway_id on session goals."""

@@ -172,8 +172,16 @@ class TestWorkingSetIntegration:
         assert snapshot is not None
         assert snapshot.session_id == session_id
         assert snapshot.tokens_used <= snapshot.token_budget
-        # Verify gateway_id is stamped
-        assert snapshot.gateway_id != ""
+        # Verify gateway_id is stamped to match the manager's configured value.
+        # Post-Bucket-A the default gateway_id is "" (empty string sentinel for
+        # single-tenant deployments — see TD-41 in TECHNICAL-DEBT.md), so the
+        # pre-Bucket-A `!= ""` check is no longer meaningful. The contract is
+        # "snapshot carries the manager's gateway_id byte-identically", which
+        # holds in both single-tenant ("") and multi-tenant (e.g. "hub-01")
+        # deployments. The manager stamps via
+        # `snapshot.gateway_id or self._gateway_id` at build time
+        # (working_set/manager.py:195).
+        assert snapshot.gateway_id == container.working_set_manager._gateway_id
         # Must contain items (facts and/or goals)
         assert len(snapshot.items) > 0
         # All items should have scores

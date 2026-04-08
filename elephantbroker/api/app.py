@@ -43,9 +43,18 @@ def create_app(container: RuntimeContainer) -> FastAPI:
 
     # Middleware (applied in reverse order — gateway runs first)
     app.add_middleware(AuthMiddleware)
-    default_gw = "local"
+    # Middleware fallback must equal the container's gateway_id exactly. Bucket A
+    # (commit d850186) changed GatewayConfig.gateway_id default from "local" to ""
+    # and added the EB_ALLOW_DEFAULT_GATEWAY_ID opt-out. The prior shim here
+    # re-fabricated "local" as the middleware fallback when config was empty,
+    # which caused a store/lookup mismatch: write paths stamped DataPoints with
+    # gateway_id="local" (from the middleware default) while read paths used the
+    # engine's construction-time gateway_id="" (from the config), and the strict
+    # Cypher filter rejected the mismatch. Passing the config value through
+    # unchanged keeps both sides byte-identical.
+    default_gw = ""
     if hasattr(container, "config") and container.config and hasattr(container.config, "gateway"):
-        default_gw = container.config.gateway.gateway_id or "local"
+        default_gw = container.config.gateway.gateway_id
     app.add_middleware(GatewayIdentityMiddleware, default_gateway_id=default_gw)
     app.middleware("http")(error_handler_middleware)
 

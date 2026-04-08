@@ -64,7 +64,10 @@ class TestActorGatewayIsolation:
         assert captured_actors[0].gateway_id == "tenant-33"
 
     async def test_create_actor_default_gateway(self, client, container):
-        """Without X-EB-Gateway-ID header, middleware defaults to 'local'."""
+        """Without X-EB-Gateway-ID header, middleware falls back to the container's
+        configured gateway_id. Post-Bucket-A the default is "" (empty string) — the
+        app factory wires container.config.gateway.gateway_id through to the
+        middleware so write and read paths stay byte-identical."""
         captured_actors: list[ActorRef] = []
 
         async def capture_register(actor):
@@ -77,4 +80,4 @@ class TestActorGatewayIsolation:
         r = await client.post("/actors/", json=body)
         assert r.status_code == 200
         assert len(captured_actors) == 1
-        assert captured_actors[0].gateway_id == "local"
+        assert captured_actors[0].gateway_id == ""
