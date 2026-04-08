@@ -94,13 +94,20 @@ _PATTERN_BODY_OR = re.compile(
 #
 # Post-Bucket-A the default gateway_id is ``""`` (empty string, falsy), so a
 # truthiness check silently skips the override and the caller's value wins.
-# The canonical pattern is ``if gw_id is not None:``. We anchor on the
-# variable name ``gw_id`` (the consistent name used across the codebase) to
-# avoid false positives on unrelated truthiness checks. The regex matches
-# the bare ``if gw_id:`` form (with no ``is`` / ``is not`` / ``==`` / ``!=``
-# / ``and`` / ``or`` between the identifier and the colon).
+# The canonical pattern is ``if gw_id is not None:``.
+#
+# TODO-3-230 (Bucket A-R3, BSR MED): earlier the regex anchored exclusively on
+# the literal identifier ``gw_id``, which assumed every handler used the same
+# variable name. Callers routinely use variants like ``gateway_id``,
+# ``caller_gw``, ``_state_gw``, or bare ``gw``, and the narrow anchor let
+# those shapes through silently. We now enumerate every identifier that has
+# plausibly held a middleware-extracted gateway_id in this codebase. This is
+# deliberately a closed list (not a catch-all ``\w+``) so unrelated
+# truthiness checks on other variables remain out of scope. If a new handler
+# introduces a new name, add it here as part of the review that lands the
+# handler.
 _PATTERN_IF_TRUTHY = re.compile(
-    r"""^\s*if\s+gw_id\s*:\s*(?:#.*)?$""",
+    r"""^\s*if\s+(?:gw_id|gateway_id|caller_gw|_state_gw|gw)\s*:\s*(?:#.*)?$""",
     re.MULTILINE,
 )
 

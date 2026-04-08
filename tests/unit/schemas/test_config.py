@@ -797,23 +797,66 @@ class TestEnvVarRegistryCompleteness:
     def _walk_source_for_env_vars() -> set[str]:
         """Walk elephantbroker/ source files and extract every EB_* env var
         name that appears inside an `os.environ[...]`, `os.environ.get(...)`,
-        or `os.getenv(...)` call.
+        `os.environ.pop(...)`, `os.getenv(...)`, or `"EB_X" in os.environ`
+        expression.
 
         Implementation note: a naive `EB_[A-Z0-9_]+` grep would also catch
         documentation strings and Python identifiers — we anchor specifically
         on the os.environ/os.getenv access patterns to avoid false positives.
+
+        TODO-3-352 (Bucket A-R3, AR INFO — future-pattern coverage): earlier
+        this walker only matched three shapes — ``os.environ[...]``,
+        ``os.environ.get(...)``, and ``os.getenv(...)``. The F1 inverse
+        contract was therefore blind to three other shapes that any future
+        refactor could introduce without tripping the registry check:
+
+        * ``os.environ.pop("EB_FOO")`` — pop is a destructive read, so a
+          forgotten migration would both leak an unregistered var AND
+          mutate the process environment. **Covered below** by extending
+          the call pattern's method group to ``(?:get|pop)``.
+        * ``"EB_FOO" in os.environ`` — membership-only reads still depend
+          on the registry being complete (otherwise an operator env var
+          silently fails to gate a feature branch). **Covered below** by
+          a second ``membership_pattern`` regex that anchors on the
+          ``in\\s+os\\.environ`` tail.
+        * ``os.environ[f"EB_{name}"]`` — dynamic f-string keys cannot be
+          statically extracted by a regex because the key is computed at
+          runtime. **Deliberately NOT covered here** — see TD-44 for the
+          deferred AST-walker approach that would handle this shape.
+          A grep of the current ``elephantbroker/`` tree finds zero such
+          sites, so the gap is forward-looking only; the first PR that
+          introduces an ``os.environ[f"EB_{name}"]`` expression is
+          expected to also land the TD-44 walker upgrade as part of its
+          review.
+
+        A grep of the current ``elephantbroker/`` tree (on the day this
+        coverage expansion landed) found zero sites using the pop or
+        membership shapes — the regex extensions exist to fail-loud the
+        moment someone adds the first one without updating the registry.
         """
         import re
         from pathlib import Path
 
-        # Anchor pattern: literal `os.environ` or `os.getenv` followed by an
-        # access that contains a quoted EB_* identifier. We allow whitespace
-        # and any chars between the access opener and the var name so calls
-        # like `os.environ.get("EB_FOO", "default")` and `os.environ["EB_BAR"]`
-        # both match. ``re.DOTALL`` is intentionally NOT set — env reads stay
-        # on a single line in this codebase, so we keep `.` line-bounded.
-        pattern = re.compile(
-            r"""os\.(?:environ(?:\.get)?|getenv)\s*[\[\(]\s*['"](EB_[A-Z0-9_]+)['"]"""
+        # Anchor pattern 1 — direct subscription, method call, and getenv.
+        # Matches ``os.environ["EB_X"]``, ``os.environ.get("EB_X", ...)``,
+        # ``os.environ.pop("EB_X")``, and ``os.getenv("EB_X", ...)``. The
+        # method group now includes ``get`` and ``pop``; adding a new
+        # well-known method (e.g. ``setdefault``) is a one-token extension.
+        # ``re.DOTALL`` is intentionally NOT set — env reads stay on a
+        # single line in this codebase, so we keep ``.`` line-bounded.
+        call_pattern = re.compile(
+            r"""os\.(?:environ(?:\.(?:get|pop))?|getenv)\s*[\[\(]\s*['"](EB_[A-Z0-9_]+)['"]"""
+        )
+
+        # Anchor pattern 2 — membership check. Matches ``"EB_X" in os.environ``
+        # with the string literal on the LEFT and ``os.environ`` on the
+        # RIGHT of the ``in`` operator. The reverse shape
+        # (``os.environ in "EB_X"``) is not valid Python for our purposes.
+        # Anchored on the ``in\s+os\.environ`` tail so generic ``in`` uses
+        # (``"x" in some_dict``) don't false-fire. The string literal is
+        # captured for the registry lookup.
+        membership_pattern = re.compile(
+            r"""['"](EB_[A-Z0-9_]+)['"]\s+in\s+os\.environ\b"""
         )
 
         # Resolve elephantbroker/ relative to this test file so the test still
@@ -824,7 +867,9 @@ class TestEnvVarRegistryCompleteness:
         found: set[str] = set()
         for py_file in root.rglob("*.py"):
             text = py_file.read_text(encoding="utf-8")
-            for match in pattern.finditer(text):
+            for match in call_pattern.finditer(text):
+                found.add(match.group(1))
+            for match in membership_pattern.finditer(text):
                 found.add(match.group(1))
         return found
 

@@ -650,10 +650,17 @@ def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
                 sec["api_key"] = llm_key
 
     # Tier 3 (F7): compaction_llm.endpoint ← llm.endpoint
-    # Only compaction_llm participates in endpoint inheritance for now —
-    # successful_use and blocker_extraction still default to host.docker.internal
-    # and have their own per-host overrides via env. F8 fixes those defaults
-    # to localhost; widening endpoint inheritance to them is a follow-up.
+    # TODO-3-231 (Bucket A-R3, BSR LOW): stale F7 comment rewritten to match
+    # post-F8 reality. The earlier comment claimed successful_use and
+    # blocker_extraction "still default to host.docker.internal" — that has
+    # not been true since the F8 endpoint-default migration moved both
+    # defaults to http://localhost:8811/v1 (see SuccessfulUseConfig.endpoint
+    # around line 226 and BlockerExtractionConfig.endpoint around line 421).
+    # Both sections already land on the canonical localhost LiteLLM proxy,
+    # so widening endpoint inheritance to them has no current behavioral
+    # payoff — the asymmetry is kept explicit here so a future operator who
+    # needs per-section endpoint routing can see at a glance that only
+    # compaction_llm is wired.
     llm_endpoint = llm.get("endpoint", "")
     if llm_endpoint:
         compaction = yaml_data.setdefault("compaction_llm", {})
