@@ -130,6 +130,12 @@ cd "$PREFIX"
 if ! git diff-index --quiet HEAD -- 2>/dev/null; then
     warn "Working tree at $PREFIX has uncommitted changes:"
     git status --short
+    warn ""
+    warn "TODO-3-634: if uv.lock is listed above and you are recovering"
+    warn "from a previous --upgrade run that failed validation, revert"
+    warn "uv.lock first:"
+    warn "    sudo git -C $PREFIX checkout uv.lock"
+    warn "then re-run this script."
     die "refusing to update on a dirty tree — commit or stash your changes first"
 fi
 
@@ -242,8 +248,25 @@ log "Step 4/7: validate $CONFIG_DIR/default.yaml against the runtime schema"
 # service. Hard-die BEFORE the restart so the operator fixes the config
 # while the old process is still serving traffic.
 if [[ ! -f "$CONFIG_DIR/default.yaml" ]]; then
-    warn "  $CONFIG_DIR/default.yaml missing — skipping validate"
-    warn "  run install.sh to populate /etc/elephantbroker first"
+    warn "  $CONFIG_DIR/default.yaml is MISSING entirely."
+    warn ""
+    warn "  This is strictly worse than a schema violation:"
+    warn "    - a schema violation means the YAML is broken but exists"
+    warn "      (fixable by editing the file)"
+    warn "    - a missing YAML means the runtime will start with ZERO"
+    warn "      on-disk config and fall through to env vars + compiled"
+    warn "      defaults. Any operator-specific YAML tuning (gateway_id,"
+    warn "      org_id, team_id, profile weights, cognee: block, etc.)"
+    warn "      is silently lost on restart."
+    warn ""
+    warn "  Recovery (TODO-3-635):"
+    warn "    - run install.sh to repopulate $CONFIG_DIR from the template"
+    warn "    - restore any operator edits to default.yaml from backup"
+    warn "    - re-run $PREFIX/deploy/update.sh"
+    warn ""
+    warn "  The OLD runtime is still running — this failure did NOT"
+    warn "  restart any services, so traffic is still being served."
+    die "$CONFIG_DIR/default.yaml missing — refusing to restart services (TODO-3-635)"
 else
     if "$PREFIX/.venv/bin/elephantbroker" config validate \
             --config "$CONFIG_DIR/default.yaml" 2>/tmp/eb-validate.err; then
@@ -262,6 +285,18 @@ else
         warn "    - re-run $PREFIX/deploy/update.sh (idempotent)"
         warn "    - the OLD runtime is still running — this failure did NOT"
         warn "      restart any services, so traffic is still being served"
+        warn ""
+        if [[ "$UPGRADE_LOCK" -eq 1 ]]; then
+            warn ""
+            warn "  NOTE (TODO-3-634): this run used --upgrade, so uv.lock was"
+            warn "  regenerated in Step 2. The updated uv.lock is now dirty in"
+            warn "  the working tree and will block the next update.sh run at"
+            warn "  the dirty-tree check. To recover AFTER fixing the config:"
+            warn "      sudo git -C $PREFIX checkout uv.lock    # revert uv.lock"
+            warn "      sudo $PREFIX/deploy/update.sh --upgrade  # retry"
+            warn "  (or, if you verified the lock upgrade is correct, commit"
+            warn "  uv.lock first and then re-run update.sh without --upgrade)"
+        fi
         die "config validate failed — refusing to restart services with a broken config"
     fi
 fi

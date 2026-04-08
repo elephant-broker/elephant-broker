@@ -286,7 +286,20 @@ log "Step 4/8: post-install fixes (Cognee writable dirs + mistralai safety net)"
 # time) and impossible to silently mis-detect.
 SITE_PACKAGES=$(uv run python -c 'import site; print(site.getsitepackages()[0])')
 if [[ -z "$SITE_PACKAGES" || ! -d "$SITE_PACKAGES" ]]; then
-    die "could not resolve venv site-packages dir from $REPO_DIR/.venv (got: '$SITE_PACKAGES'). Did uv sync fail?"
+    warn "  Could not resolve venv site-packages dir from $REPO_DIR/.venv"
+    warn "  (got: '$SITE_PACKAGES')"
+    warn ""
+    warn "  Common causes:"
+    warn "    - Step 3 uv sync failed silently (rare — sync errors usually"
+    warn "      surface as non-zero exit)"
+    warn "    - the venv was created with a corrupted Python interpreter"
+    warn "    - the venv was deleted or mutated between Step 3 and Step 4"
+    warn ""
+    warn "  Recovery (TODO-3-636):"
+    warn "    - rebuild the venv from scratch:"
+    warn "        sudo rm -rf $REPO_DIR/.venv"
+    warn "    - re-run $REPO_DIR/deploy/install.sh (idempotent)"
+    die "could not resolve venv site-packages dir — see recovery hints above"
 fi
 log "  venv site-packages: $SITE_PACKAGES"
 
@@ -453,6 +466,20 @@ if [[ "$ENV_FRESHLY_COPIED" -eq 1 && "$HITL_ENV_FRESHLY_COPIED" -eq 1 ]]; then
                 warn "  (no spaces, no quotes, empty RHS). Check the template"
                 warn "  at elephantbroker/config/env.example and"
                 warn "  hitl-middleware/hitl.env.example for drift."
+                warn ""
+                warn "  Recovery (TODO-3-633): both env files were freshly"
+                warn "  copied in THIS run (we are inside the"
+                warn "  ENV_FRESHLY_COPIED=1 && HITL_ENV_FRESHLY_COPIED=1"
+                warn "  branch), so reverting them to the template state is"
+                warn "  safe — nothing operator-specific can be lost. Without"
+                warn "  this revert, the next install.sh run would see both"
+                warn "  files as 'already exists — preserved' and skip F11"
+                warn "  entirely, leaving the split-patched state in place"
+                warn "  and silently breaking HITL HMAC verification."
+                rm -f "$CONFIG_DIR/env" "$CONFIG_DIR/hitl.env"
+                warn "  Removed $CONFIG_DIR/env and $CONFIG_DIR/hitl.env."
+                warn "  After fixing the template anchor drift, re-run:"
+                warn "      sudo $REPO_DIR/deploy/install.sh"
                 die "EB_HITL_CALLBACK_SECRET auto-gen failed — refusing to ship a broken HMAC pair"
             fi
         done
