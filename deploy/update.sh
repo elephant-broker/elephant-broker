@@ -285,7 +285,6 @@ else
         warn "    - re-run $PREFIX/deploy/update.sh (idempotent)"
         warn "    - the OLD runtime is still running — this failure did NOT"
         warn "      restart any services, so traffic is still being served"
-        warn ""
         if [[ "$UPGRADE_LOCK" -eq 1 ]]; then
             warn ""
             warn "  NOTE (TODO-3-634): this run used --upgrade, so uv.lock was"

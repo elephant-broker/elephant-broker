@@ -74,6 +74,12 @@ SERVICE_USER="elephantbroker"
 SERVICE_GROUP="elephantbroker"
 CONFIG_DIR="/etc/elephantbroker"
 DATA_DIR="/var/lib/elephantbroker"
+# TODO-3-637: pycache prefix for the editable-source C3/H-R2 narrowing.
+# Python compiles .pyc files on import; the C3 chown narrowing made
+# site-packages read-only for the service user, so on-import compilation
+# fails with EACCES. PYTHONPYCACHEPREFIX redirects the writes to this dir
+# (mirrored in both systemd units via Environment=).
+CACHE_DIR="/var/cache/elephantbroker"
 
 # --- Parse flags ---
 while [[ $# -gt 0 ]]; do
@@ -239,9 +245,11 @@ log "Step 2/8: create directories"
 install -d -o root -g root -m 755 "$PREFIX"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$CONFIG_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$DATA_DIR"
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$CACHE_DIR"
 log "  $PREFIX            (755 root:root — defense in depth, see C3 comment)"
 log "  $CONFIG_DIR  (750 $SERVICE_USER:$SERVICE_GROUP)"
 log "  $DATA_DIR    (750 $SERVICE_USER:$SERVICE_GROUP)"
+log "  $CACHE_DIR  (750 $SERVICE_USER:$SERVICE_GROUP — PYTHONPYCACHEPREFIX target, TODO-3-637)"
 
 # =============================================================================
 log "Step 3/8: install runtime + HITL middleware via uv sync (workspace mode)"

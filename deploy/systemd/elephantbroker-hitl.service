@@ -75,6 +75,9 @@ EnvironmentFile=/etc/elephantbroker/hitl.env
 # with the main runtime unit which uses /opt/elephantbroker/.venv/bin/elephantbroker.
 ExecStart=/opt/elephantbroker/.venv/bin/hitl-middleware
 
+# TODO-3-637: redirect .pyc writes away from the read-only site-packages tree (see C3).
+Environment=PYTHONPYCACHEPREFIX=/var/cache/elephantbroker
+
 # --- Restart policy ---
 Restart=on-failure
 RestartSec=5
@@ -112,7 +115,7 @@ SyslogIdentifier=elephantbroker-hitl
 # compromised HITL process cannot rewrite the main runtime's binaries
 # or its own service definition.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/elephantbroker
+ReadWritePaths=/var/lib/elephantbroker /var/cache/elephantbroker
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

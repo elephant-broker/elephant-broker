@@ -40,6 +40,20 @@ WORKDIR /app
 # the cache boundaries stay correct: lockfile + both pyprojects in the
 # deps layer (cached unless lockfile changes), both source trees in
 # the project layer (cached unless source changes).
+#
+# TODO-3-351 (Bucket D-R3): the layered-caching behavior described above
+# is validated by manual inspection of `docker build` output — the deps
+# layer is cached when only elephantbroker/ or hitl-middleware/ source
+# changes, and invalidated when pyproject.toml or uv.lock changes. It is
+# NOT covered by any CI regression test, so a future uv version that
+# changes `uv sync --no-install-project` + workspace-member interaction
+# semantics could silently regress the cache boundaries. Per CLAUDE.md
+# this Dockerfile is dev/sandbox/CI use only, NOT production — if the
+# image ever becomes production-critical, add a CI job that diffs layer
+# hashes before and after a source-only edit to detect regressions. The
+# minimal form is: build twice (once clean, once after a no-op source
+# touch), compare `docker image inspect` layer IDs, fail if the deps
+# layer ID changed.
 COPY pyproject.toml uv.lock ./
 COPY hitl-middleware/pyproject.toml hitl-middleware/pyproject.toml
 
@@ -64,9 +78,12 @@ RUN uv sync --frozen --no-dev
 
 FROM python:3.11-slim AS runtime
 
-# Copy uv binary into the runtime image too — needed if you want to do
-# in-container ad-hoc package operations. Comment out if you want a smaller
-# image and don't care about ad-hoc uv usage.
+# Copy uv binary into the runtime image too — needed for in-container
+# ad-hoc package operations. Paired with the uv.lock + pyproject.toml
+# copies in the runtime-stage COPY block below (TODO-3-638, Bucket D-R3),
+# so commands like `uv sync` / `uv pip compile` actually work against the
+# pinned lockfile. Comment out both the uv-binary COPY and the uv.lock
+# COPY below if you want a smaller image and don't need ad-hoc uv usage.
 COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
@@ -88,6 +105,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/elephantbroker /app/elephantbroker
 COPY --from=builder /app/hitl-middleware /app/hitl-middleware
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --from=builder /app/uv.lock /app/uv.lock
 
 # Bake in default config so the container has something to read at startup.
 # In production, mount a real config file at /etc/elephantbroker/default.yaml.

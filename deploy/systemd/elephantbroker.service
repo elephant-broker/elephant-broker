@@ -66,6 +66,9 @@ ExecStart=/opt/elephantbroker/.venv/bin/elephantbroker serve \
     --host 0.0.0.0 \
     --port 8420
 
+# TODO-3-637: redirect .pyc writes away from the read-only site-packages tree (see C3).
+Environment=PYTHONPYCACHEPREFIX=/var/cache/elephantbroker
+
 # --- Restart policy ---
 Restart=on-failure
 RestartSec=5
@@ -118,7 +121,7 @@ SyslogIdentifier=elephantbroker
 # the runtime is now write-restricted at BOTH the kernel MAC layer and the
 # DAC ownership layer.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib /var/cache/elephantbroker
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
