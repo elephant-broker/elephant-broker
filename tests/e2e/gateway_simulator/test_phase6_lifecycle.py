@@ -39,12 +39,24 @@ async def reset_cognee_cache():
 
 
 @pytest_asyncio.fixture
-async def app():
-    """Create a fully wired FastAPI app with real infrastructure (per test)."""
+async def app(monkeypatch):
+    """Create a fully wired FastAPI app with real infrastructure (per test).
+
+    R2 integration RED fix (cascade fallout from TODO-3-343 / Bucket A-R2-Test):
+    Bucket A-R2-Test removed the global EB_ALLOW_DEFAULT_GATEWAY_ID opt-out
+    from tests/conftest.py and scoped it to the unit-side test_container.py
+    only. E2E fixtures call RuntimeContainer.from_config() directly without
+    that scoping, and the Bucket A startup safety check (R1 `d850186`)
+    correctly refuses to boot with empty gateway_id. Set a distinctive value
+    here so any cross-test pollution surfaces as a visible mismatch instead of
+    a silent collision. Same pattern as the I-R2 fix to
+    tests/integration/runtime/working_set/test_working_set_integration.py.
+    """
     from elephantbroker.api.app import create_app
     from elephantbroker.runtime.container import RuntimeContainer
     from elephantbroker.schemas.tiers import BusinessTier
 
+    monkeypatch.setenv("EB_GATEWAY_ID", "test-phase6-gateway")
     config = ElephantBrokerConfig.load()
     container = await RuntimeContainer.from_config(config, tier=BusinessTier.FULL)
     application = create_app(container)
