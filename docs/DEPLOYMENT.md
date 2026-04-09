@@ -8,7 +8,7 @@ The runtime runs as a native Python process (venv), NOT in Docker. Infrastructur
 DB VM                                    OpenClaw VM
 ├─ Python venv                           ├─ elephantbroker-memory
 │  ├─ elephantbroker serve  :8420  ←──── │  └─ HTTP to DB_VM:8420
-│  ├─ python -m hitl_middleware :8421 ←──│
+│  ├─ .venv/bin/hitl-middleware :8421 ←──│
 │  └─ ebrun CLI                          ├─ elephantbroker-context
 ├─ Docker Compose (infra only)           │  └─ HTTP to DB_VM:8420
 │  ├─ Neo4j     :7474/:7687             └─ EB_GATEWAY_ID must match DB VM
@@ -42,13 +42,17 @@ exists.
 
 | Path | Owner | Mode | Purpose |
 |---|---|---|---|
-| `/opt/elephantbroker` | `elephantbroker:elephantbroker` | 755 | Source repo + venv install |
-| `/opt/elephantbroker/.venv` | `elephantbroker:elephantbroker` | 755 | Python virtual environment (uv-managed) |
+| `/opt/elephantbroker` | `root:root` | 755 | Source repo + venv install (**root-owned by design** — C3 defense-in-depth narrowing, see below) |
+| `/opt/elephantbroker/.venv` | `root:root` | 755 | Python virtual environment (uv-managed). Only the 3 Cognee runtime paths inside it are chowned to the service user |
+| `/opt/elephantbroker/.venv/lib/pythonX.Y/site-packages/cognee/.cognee_system` | `elephantbroker:elephantbroker` | 750 | Cognee runtime SQLite + state (chowned by install.sh step 6) |
+| `/opt/elephantbroker/.venv/lib/pythonX.Y/site-packages/cognee/.data_storage` | `elephantbroker:elephantbroker` | 750 | Cognee chunk/artifact storage (chowned by install.sh step 6) |
+| `/opt/elephantbroker/.venv/lib/pythonX.Y/site-packages/.anon_id` | `elephantbroker:elephantbroker` | 644 | Cognee anonymous-telemetry id file (chowned by install.sh step 6) |
 | `/etc/elephantbroker` | `elephantbroker:elephantbroker` | 750 | Config directory |
 | `/etc/elephantbroker/default.yaml` | `elephantbroker:elephantbroker` | 640 | Non-secret config (template) |
 | `/etc/elephantbroker/env` | `root:elephantbroker` | 640 | Runtime secrets (root writes, service reads) |
 | `/etc/elephantbroker/hitl.env` | `root:elephantbroker` | 640 | HITL middleware secrets |
 | `/var/lib/elephantbroker` | `elephantbroker:elephantbroker` | 750 | Runtime data dir (SQLite stores, working dir) |
+| `/var/cache/elephantbroker` | `elephantbroker:elephantbroker` | 750 | `PYTHONPYCACHEPREFIX` target for editable-source .pyc writes (post-C3/D-R3 narrowing, see systemd unit `Environment=PYTHONPYCACHEPREFIX=`) |
 | `/etc/systemd/system/elephantbroker*.service` | `root:root` | 644 | systemd unit files |
 
 ### Why a dedicated service user
@@ -110,27 +114,46 @@ sudo git clone https://github.com/elephant-broker/elephant-broker.git /opt/eleph
 sudo /opt/elephantbroker/deploy/install.sh
 ```
 
-What the installer does, in order:
+What the installer does, in order (8 steps + Step 0, matching `install.sh` exactly):
 
-0. Installs `uv` to `/usr/local/bin` via Astral's official installer (if missing)
-1. Creates the `elephantbroker` system user (no shell, home `/var/lib/elephantbroker`)
-2. Creates `/opt/elephantbroker`, `/etc/elephantbroker`, `/var/lib/elephantbroker` with the ownership/modes from the table above
-3. Runs `uv sync --frozen --no-dev` — builds the venv at `/opt/elephantbroker/.venv` and installs the EXACT pinned versions from `uv.lock` (187 packages, all transitive deps locked)
-4. `uv pip install` the HITL middleware into the same venv
-5. Belt-and-suspenders post-install fixes (only matter if someone bypasses uv):
-   - Best-effort removal of any old `mistralai` namespace package directory left by a previous pip install (uv resolves to `mistralai==1.12.4` automatically — a working version — so this is a no-op on uv-only installs)
-   - Pre-creates `cognee/.cognee_system/databases` and `cognee/.data_storage` writable subdirs
-   - Touches the `cognee/.anon_id` telemetry file (telemetry is disabled at import time anyway)
-6. Copies `default.yaml` from the repo into `/etc/elephantbroker/`
-7. Copies `env.example` and `hitl.env.example` into `/etc/elephantbroker/env` and `hitl.env` (only on first install — never overwrites existing secrets)
-8. Final `chown -R elephantbroker:elephantbroker /opt/elephantbroker`
-9. Installs the systemd unit files from `deploy/systemd/` and enables both services (does not start them — operator must edit secrets first)
+**Step 0/8 — Install uv.** Installs `uv` to `/usr/local/bin` via Astral's official versioned installer `https://astral.sh/uv/0.11.3/install.sh` (pinned to 0.11.3 to match `Dockerfile:14`/`:70`). Skipped if `uv` is already on PATH.
+
+**Step 1/8 — Create service user.** Creates the `elephantbroker` system user with `useradd --system --shell /usr/sbin/nologin --home-dir /var/lib/elephantbroker`. Skipped if the user already exists.
+
+**Step 2/8 — Create directories.** Creates `$PREFIX=/opt/elephantbroker` (`root:root 755` — **intentionally root-owned** per C3 defense-in-depth), `$CONFIG_DIR=/etc/elephantbroker` (`elephantbroker:elephantbroker 750`), `$DATA_DIR=/var/lib/elephantbroker` (`elephantbroker:elephantbroker 750`), and `$CACHE_DIR=/var/cache/elephantbroker` (`elephantbroker:elephantbroker 750`, added in D-R3 for the `PYTHONPYCACHEPREFIX` redirect target).
+
+**Step 3/8 — Install runtime + HITL middleware via `uv sync` (workspace mode).** Runs `uv sync --frozen --no-dev` from `$REPO_DIR`, which builds the venv at `/opt/elephantbroker/.venv` and installs BOTH the `elephantbroker` runtime AND the `hitl-middleware` workspace member in a single call. The root `pyproject.toml` declares `[tool.uv.workspace] members = ["hitl-middleware"]`, so the root `uv.lock` is the single source of truth for both packages — no separate `uv pip install hitl-middleware` step. All ~188 direct + transitive deps are installed at exact pinned versions with integrity hashes.
+
+**Step 4/8 — Post-install fixes (Cognee writable dirs + mistralai safety net).**
+  - Resolves the venv's `site-packages` dir authoritatively via `uv run python -c 'import site; print(site.getsitepackages()[0])'` (the `find ... | head -n 1` approach was replaced in C8/TODO-3-325 with this strict resolution to eliminate silent mis-detection).
+  - Belt-and-suspenders `mistralai` cleanup: shape-checks the mistralai directory first, only acts if the broken namespace-package shape is confirmed (missing `dist-info/METADATA`). With `uv` (the supported install path) this is a no-op because uv resolves `mistralai==1.12.4` (a working modern version). The cleanup exists for the edge case of someone running `pip install` against the venv.
+  - Pre-creates `cognee/.cognee_system/databases` and `cognee/.data_storage` writable subdirs.
+  - Touches `cognee/.anon_id` telemetry file (telemetry is disabled at import time via `COGNEE_DISABLE_TELEMETRY=true` in `elephantbroker/__init__.py`).
+
+**Step 5/8 — Install config files into `$CONFIG_DIR`.**
+  - `default.yaml` → copies from `$REPO_DIR/elephantbroker/config/default.yaml` on first install only, preserves operator customizations on re-run.
+  - `env` → copies from `elephantbroker/config/env.example` on first install only.
+  - `hitl.env` → copies from `hitl-middleware/hitl.env.example` on first install only.
+  - **F11 — auto-generate `EB_HITL_CALLBACK_SECRET` (TODO-3-614).** When BOTH `env` and `hitl.env` were freshly copied in this run (fresh install, not a re-run), the installer runs `openssl rand -hex 32` once and patches the same secret into both files via a `mktemp + sed + cat > mv` pattern that preserves the `640 root:elephantbroker` ownership/mode. If only one of the two files was freshly copied (the other already has operator content), auto-gen is skipped with a warning — auto-generating one half would silently break the existing HMAC pair. If `openssl` is missing, falls back to a warning with the manual instructions. On first install with both env files copied, **you do NOT need to manually generate the HITL secret** — the installer does it for you.
+
+**Step 6/8 — Chown writable subdirs only (defense in depth, C3 narrowed model).** The previous version of the installer ran `chown -R elephantbroker:elephantbroker /opt/elephantbroker`, which transferred ownership of the entire install tree (source + venv + binaries) to the runtime user. A compromised runtime process could then rewrite its own code, the cognee binaries, or the config templates. **C3 (TODO-3-010) narrows this to exactly 3 paths:**
+  - `$COGNEE_DIR/.cognee_system` — Cognee's runtime SQLite + state
+  - `$COGNEE_DIR/.data_storage` — Cognee's chunk/artifact storage
+  - `$ANON_ID_PATH` — Cognee's anonymous-telemetry id file
+
+  Everything else — `/opt/elephantbroker` itself, the `.venv` binaries, the runtime source tree — stays **root-owned**. Default file modes from `uv sync` are 644/755 (other-readable + other-executable for dirs), so the service user reads and traverses the venv without owning it. The systemd unit's `ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib /var/cache/elephantbroker` permits writes to those specific paths through the MAC layer, but DAC ownership now blocks unintended writes from a compromised runtime that didn't go through the pre-created Cognee paths.
+
+**Step 7/8 — Install systemd unit files.** Installs `deploy/systemd/elephantbroker.service` and `deploy/systemd/elephantbroker-hitl.service` to `/etc/systemd/system/` (`root:root 644`), runs `systemctl daemon-reload`, and enables both units. The services are **not started** — the operator must review `/etc/elephantbroker/default.yaml` and confirm secrets in `env`/`hitl.env` before starting. Skipped if `--no-systemd` was passed.
+
+**Step 8/8 — Smoke test.** Runs `$REPO_DIR/.venv/bin/elephantbroker config validate --config $CONFIG_DIR/default.yaml` as a pre-systemd-start sanity check (C4/TODO-3-013/TODO-3-222). Any structural failure (`extra="forbid"` violation, embedding model/dim mismatch, malformed YAML, env coercion error) surfaces here as a clear install-log error with recovery hints, instead of a confusing journalctl failure 30 seconds later. Hard-dies on failure — the fresh-install path should pass, and a genuine schema error blocks the install.
 
 > **Note:** The installer does NOT use `chmod 777` on the Cognee directories.
 > Earlier versions of these docs recommended that as a workaround for permission
 > errors, but it was wrong — it left Cognee state world-writable. The correct
-> fix is the dedicated service user with `chown -R` of the venv tree (which the
-> installer does in step 8).
+> fix is the **C3 narrowed chown model** (install.sh step 6): the dedicated
+> service user with targeted ownership of exactly the 3 Cognee runtime paths
+> (`cognee/.cognee_system`, `cognee/.data_storage`, `cognee/.anon_id`), with
+> everything else in `/opt/elephantbroker` left `root:root`.
 
 Optional flags:
 
@@ -144,7 +167,7 @@ sudo /opt/elephantbroker/deploy/install.sh --help
 
 ```bash
 sudo nano /etc/elephantbroker/env       # fill in EB_LLM_API_KEY, EB_NEO4J_PASSWORD, etc
-sudo nano /etc/elephantbroker/hitl.env  # fill in EB_HITL_CALLBACK_SECRET (same value as in env!)
+sudo nano /etc/elephantbroker/hitl.env  # should already have EB_HITL_CALLBACK_SECRET populated by F11 — verify
 ```
 
 The installer copies `env.example` and `hitl.env.example` as starting
@@ -152,10 +175,19 @@ templates. Required secret variables are uncommented at the top of each
 file with blank values — fill them in before starting the services. See
 `elephantbroker/config/env.example` for the complete annotated reference.
 
-> **Critical: `EB_HITL_CALLBACK_SECRET` must be identical** in `/etc/elephantbroker/env`
-> and `/etc/elephantbroker/hitl.env`. Generate it once with `openssl rand -hex 32`
-> and paste the same value in both files. A mismatch causes HITL callbacks to
-> fail silently with 401 responses, leaving approvals stuck in pending state.
+> **`EB_HITL_CALLBACK_SECRET` is auto-generated on first install.** The installer's
+> F11 step (TODO-3-614) detects when both `env` and `hitl.env` are freshly
+> copied in the same run and auto-generates a single `openssl rand -hex 32`
+> secret, patching the same value into both files. Verify with
+> `grep EB_HITL_CALLBACK_SECRET /etc/elephantbroker/env /etc/elephantbroker/hitl.env`
+> — both should show the same 64-hex value. **Manual generation is only needed**
+> in these cases:
+> - `openssl` was missing from the install host (installer falls back to a warning)
+> - Only one of `env` or `hitl.env` was freshly copied (e.g., you preserved one from a previous install) — F11 skips auto-gen and warns, to avoid clobbering an existing operator-rotated value
+> - You intentionally rotate the secret post-install (set the same new value in both files, then `sudo systemctl restart elephantbroker elephantbroker-hitl`)
+>
+> Both values MUST be identical. A mismatch causes HITL callbacks to fail silently
+> with 401 responses, leaving approvals stuck in pending state.
 
 ### 4. Review default.yaml
 
@@ -248,11 +280,33 @@ cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 
 ### 2. Environment
 
-```bash
-EB_GATEWAY_ID=gw-prod                  # must match DB VM
-EB_RUNTIME_URL=http://DB_VM_IP:8420
-EB_GATEWAY_SHORT_NAME=prod
+Plugin env vars are set via the `env.vars` block in `~/.openclaw/openclaw.json`
+(NOT via shell exports). OpenClaw interpolates `${VAR}` references in the plugin
+config block from this env.vars map at config load time. This is the single
+source of truth for plugin configuration — see **docs/OPENCLAW-SETUP.md §
+Plugin Installation → Step 2** for the complete `openclaw.json` example.
+
+Minimum required env vars (set in `~/.openclaw/openclaw.json` → `env.vars`):
+
+```json
+{
+  "env": {
+    "vars": {
+      "EB_GATEWAY_ID": "gw-prod",
+      "EB_RUNTIME_URL": "http://DB_VM_IP:8420",
+      "EB_GATEWAY_SHORT_NAME": "prod"
+    }
+  }
+}
 ```
+
+- **`EB_GATEWAY_ID`** — required. Must match the `gateway.gateway_id` set in the DB VM's `default.yaml`. Example: `gw-prod-us-east-1`. Used by both plugins and stamped on every tenant-scoped API call.
+- **`EB_RUNTIME_URL`** — optional, default `http://localhost:8420`. Points at the DB VM's ElephantBroker runtime. Use the DB VM's routable IP or DNS name from the OpenClaw VM's perspective (NOT `localhost` unless you're running both on the same host).
+- **`EB_GATEWAY_SHORT_NAME`** — optional, defaults to first 8 chars of `EB_GATEWAY_ID`. Human-friendly label for log/trace display.
+- **`EB_ACTOR_ID`** — optional. Fallback actor ID for the `X-EB-Actor-Id` header when OpenClaw's context doesn't provide `actorId`.
+- **`EB_PROFILE`** — optional, default `coding`. Profile name override (can also be set in the per-plugin `config.profileName` field).
+
+See `docs/OPENCLAW-SETUP.md § Required Environment Variables` for the full reference.
 
 ### 3. Workspace Files (Surgical Edit)
 
@@ -273,8 +327,9 @@ See `openclaw-plugins/elephantbroker-memory/workspace/` for reference templates 
 ### 4. Plugin Registration & Gateway Configuration
 
 ```bash
-# Register plugins in slots
+# Register both plugins in their respective slots (FULL mode)
 openclaw config set plugins.slots.memory elephantbroker-memory
+openclaw config set plugins.slots.contextEngine elephantbroker-context
 
 # CRITICAL: tools.profile must be "full" — "coding" blocks 22/24 EB tools
 openclaw config unset tools.profile   # defaults to "full"
@@ -287,8 +342,18 @@ openclaw hooks disable session-memory
 openclaw gateway restart
 ```
 
-Memory plugin (`kind: "memory"`), Context engine plugin (`kind: "context-engine"`).
-See docs/OPENCLAW-SETUP.md for tool definitions and agent prompt instructions.
+The memory plugin uses `kind: "memory"` and the context engine plugin uses
+`kind: "context-engine"` — they register into two different slots and coexist
+without conflict. The context engine plugin sets `ownsCompaction: true`,
+meaning OpenClaw delegates compaction decisions to ElephantBroker.
+
+**Both slots must be registered for FULL mode.** Omitting the `contextEngine`
+slot registration puts the runtime in MEMORY_ONLY mode even if the plugin is
+installed — the context lifecycle features (bootstrap, assemble, compact,
+afterTurn, subagent lifecycle) won't run without the slot binding.
+
+See `docs/OPENCLAW-SETUP.md § Plugin Installation` for tool definitions, agent
+prompt instructions, and the complete `openclaw.json` config example.
 
 ## Firewall
 
@@ -345,7 +410,7 @@ openclaw gateway restart
 ## Known Deployment Gotchas
 
 1. **mistralai ghost package (legacy pip path only)** — `cognee==0.5.3` ships a broken `mistralai` namespace package as a transitive dep that conflicts with `instructor`. With `uv` (the supported install path), this is NOT an issue: uv's holistic resolver picks `mistralai==1.12.4` (a working modern version) automatically. The installer keeps a belt-and-suspenders cleanup step in case someone bypasses uv and runs `pip install` against the venv by habit.
-2. **Cognee writable dirs** — Cognee creates `.cognee_system/` and `.data_storage/` inside its own site-packages directory at runtime. The installer pre-creates these dirs and the final `chown -R elephantbroker:elephantbroker /opt/elephantbroker` makes them writable by the service user. Earlier docs recommended `chmod -R 777 venv/.../cognee/` as a workaround — that was wrong (world-writable Cognee state). Use the dedicated service user instead.
+2. **Cognee writable dirs** — Cognee creates `.cognee_system/` and `.data_storage/` inside its own site-packages directory at runtime. The installer pre-creates these dirs in Step 4 and then Step 6 **targeted-chowns exactly those 3 paths** (`.cognee_system`, `.data_storage`, `.anon_id`) to the service user via the **C3 narrowed model** (TODO-3-010). `/opt/elephantbroker` itself stays `root:root` — the service user can traverse and read the venv without owning it. Earlier docs recommended `chmod -R 777 venv/.../cognee/` as a workaround — that was wrong (world-writable Cognee state). Earlier versions of the installer also ran a broad `chown -R elephantbroker:elephantbroker /opt/elephantbroker` which was also wrong (a compromised runtime could then rewrite its own source). The current narrowed model is the right fix.
 3. **LLM model prefix** — Cognee needs `openai/gemini/gemini-2.5-pro`. Without `openai/` prefix, Cognee hangs on LLM connection test.
 4. **Embedding model + tiktoken** — Cognee tokenizes via tiktoken which only knows OpenAI model names. If you set `EB_EMBEDDING_MODEL` to a non-OpenAI model name (e.g. `gemini/text-embedding-004`), the runtime will crash at first embedding call with `KeyError: Could not automatically map ... to a tokeniser`. Stick to `openai/text-embedding-3-large` (1024 dim) unless you have verified your specific model works with tiktoken.
 5. **Health endpoint trailing slash** — `/health` returns 307 redirect, use `/health/`.
@@ -354,4 +419,4 @@ openclaw gateway restart
 8. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose -f infrastructure/docker-compose.yml down -v` and retry.
 9. **`uv sync --frozen` errors on lockfile drift** — If `pyproject.toml` has been modified since the last `uv lock`, `update.sh` will refuse to install. Run `update.sh --upgrade` to regenerate the lockfile, OR commit a fresh `uv lock` from a dev machine first. See `deploy/UPDATING-DEPS.md` for the full upgrade workflow.
 10. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml`. If upgrading the client, update both compose files to match.
-11. **Service user ownership** — Files inside `/opt/elephantbroker`, `/etc/elephantbroker`, and `/var/lib/elephantbroker` must be owned by `elephantbroker:elephantbroker` (with `root:elephantbroker` for the env files specifically). If you copy files in manually, follow up with `sudo chown -R elephantbroker:elephantbroker <path>` or the systemd unit will fail to read them.
+11. **Service user ownership (C3 narrowed model)** — `/opt/elephantbroker` stays `root:root 755` (service user can read + traverse but not write). Only the 3 Cognee runtime paths inside the venv are chowned to `elephantbroker:elephantbroker`. `/etc/elephantbroker` is `elephantbroker:elephantbroker 750` with `root:elephantbroker 640` for the env files specifically. `/var/lib/elephantbroker` and `/var/cache/elephantbroker` are `elephantbroker:elephantbroker 750`. If you copy files in manually under these paths, follow the C3 model: `/opt/elephantbroker` manual copies stay `root:root`, `/etc/elephantbroker`/`/var/lib/elephantbroker`/`/var/cache/elephantbroker` manual copies get `chown elephantbroker:elephantbroker`, and env files get `chown root:elephantbroker`. Re-running `deploy/install.sh` is the safest way to restore correct ownership.
