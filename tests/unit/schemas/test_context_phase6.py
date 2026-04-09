@@ -204,7 +204,7 @@ class TestContextAssemblyConfig:
 class TestCompactionLLMConfig:
     def test_defaults(self):
         c = CompactionLLMConfig()
-        assert c.model == "gemini/gemini-2.5-flash"
+        assert c.model == "gemini/gemini-2.5-flash-lite"
         assert c.temperature == 0.2
 
 
