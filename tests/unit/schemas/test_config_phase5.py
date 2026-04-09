@@ -77,7 +77,7 @@ class TestGoalRefinementConfig:
         c = GoalRefinementConfig()
         assert c.hints_enabled is True
         assert c.refinement_task_enabled is True
-        assert c.model == "gemini/gemini-2.5-flash"
+        assert c.model == "gemini/gemini-2.5-flash-lite"
         assert c.max_subgoals_per_session == 10
         assert c.progress_confidence_delta == 0.1
         assert c.subgoal_dedup_threshold == 0.6
