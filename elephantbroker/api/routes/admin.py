@@ -326,7 +326,8 @@ async def list_team_members(team_id: str, request: Request):
 async def list_actors(request: Request, org_id: str | None = None):
     await _auth(request, "register_actor")
     container = request.app.state.container
-    gw_id = getattr(request.state, "gateway_id", "local")
+    # Post-Bucket-A: middleware default is "" not "local". See TD-41.
+    gw_id = getattr(request.state, "gateway_id", "")
     if org_id:
         records = await container.graph.query_cypher(
             "MATCH (a:ActorDataPoint) WHERE a.gateway_id = $gw AND a.org_id = $org "
@@ -356,7 +357,7 @@ async def register_actor(request: Request):
         handles=body.get("handles", []),
         org_id=uuid.UUID(body["org_id"]) if body.get("org_id") else None,
         team_ids=[uuid.UUID(t) for t in body.get("team_ids", [])],
-        gateway_id=getattr(request.state, "gateway_id", "local"),
+        gateway_id=getattr(request.state, "gateway_id", ""),
     )
     result = await container.actor_registry.register_actor(actor)
     # Disable bootstrap mode after first actor creation
@@ -420,7 +421,7 @@ async def create_persistent_goal(body: CreatePersistentGoalRequest, request: Req
     action = SCOPE_ACTION_MAP.get(body.scope, "create_global_goal")
     await _auth(request, action, target_org_id=body.org_id, target_team_id=body.team_id)
     container = request.app.state.container
-    gw_id = getattr(request.state, "gateway_id", "local")
+    gw_id = getattr(request.state, "gateway_id", "")
 
     goal = GoalState(
         title=body.title, description=body.description,
@@ -448,7 +449,7 @@ async def create_persistent_goal(body: CreatePersistentGoalRequest, request: Req
 @router.get("/goals")
 async def list_persistent_goals(request: Request, scope: str | None = None, org_id: str | None = None):
     container = request.app.state.container
-    gw_id = getattr(request.state, "gateway_id", "local")
+    gw_id = getattr(request.state, "gateway_id", "")
     cypher = "MATCH (g:GoalDataPoint) WHERE g.gateway_id = $gw AND g.status = 'active'"
     params: dict = {"gw": gw_id}
     if scope:

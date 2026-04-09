@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 from elephantbroker.pipelines.artifact_ingest.pipeline import ArtifactIngestPipeline
 from elephantbroker.pipelines.procedure_ingest.pipeline import ProcedureIngestPipeline
@@ -50,6 +52,114 @@ logger = logging.getLogger("elephantbroker.runtime.container")
 
 def _enabled(tier: BusinessTier, interface_name: str) -> bool:
     return interface_name in TIER_CAPABILITIES[tier]
+
+
+class UnsafeStartupConfigError(RuntimeError):
+    """Raised when the runtime refuses to boot because the operator left a
+    safety-critical default in place (sentinel gateway_id, empty neo4j_password,
+    or attempted dataset rename on a host with persistent state).
+
+    These are deliberate hard-fails: silently booting with a sentinel value
+    would let two prod hosts collide on the same Redis namespace, or let a
+    forgotten EB_NEO4J_PASSWORD silently authenticate against the dev creds.
+    Each guard has an explicit opt-out env var (documented in the message)
+    for dev/test environments that knowingly want the legacy behavior.
+    """
+
+
+# Path used by the dataset-immutability lock-file (A5). Lives under the
+# canonical data directory; absent in test environments, in which case the
+# lock check no-ops gracefully.
+_DATA_DIR_PATH = Path("/var/lib/elephantbroker")
+_DATASET_LOCK_FILE = _DATA_DIR_PATH / ".dataset_lock"
+
+
+def _validate_startup_safety(config: ElephantBrokerConfig) -> None:
+    """Refuse to boot the runtime when safety-critical defaults are still in place.
+
+    Three independent checks, each with an explicit env-var opt-out so that
+    dev/test environments can knowingly accept the legacy behavior:
+
+    * A3 — ``gateway.gateway_id`` must be set to a real, deployment-specific
+      value. The legacy ``"local"`` sentinel and the empty default are both
+      refused unless ``EB_ALLOW_DEFAULT_GATEWAY_ID=true`` is set. Two prod
+      hosts that both default to ``"local"`` would collide on the same
+      Redis namespace, ClickHouse trace partition, and Neo4j gateway scope.
+
+    * A4 — ``cognee.neo4j_password`` must be non-empty unless
+      ``EB_DEV_MODE=true`` is set. Empty passwords would silently fall back
+      to whatever credentials the Neo4j container is configured with — on
+      a fresh dev box that's the unauthenticated default; on prod that's
+      a hard auth failure that surfaces only at first query.
+
+    * A5 — if a previous boot wrote ``/var/lib/elephantbroker/.dataset_lock``
+      with a different ``cognee.default_dataset`` value, refuse to boot
+      unless ``EB_ALLOW_DATASET_CHANGE=true`` is set. Renaming the dataset
+      orphans every existing FactDataPoint, GoalDataPoint, etc. — they
+      remain in Cognee but become invisible to retrieval. The lock check
+      no-ops when ``/var/lib/elephantbroker`` does not exist (test envs).
+    """
+    # --- A3: gateway_id must not be a sentinel ---
+    gw_id = config.gateway.gateway_id
+    if gw_id in ("", "local") and os.environ.get("EB_ALLOW_DEFAULT_GATEWAY_ID", "").lower() != "true":
+        raise UnsafeStartupConfigError(
+            f"Refusing to boot with gateway.gateway_id={gw_id!r}. "
+            "Set EB_GATEWAY_ID (or gateway.gateway_id in YAML) to a "
+            "deployment-specific value before starting the runtime. "
+            "Two hosts sharing 'local' would collide on the same Redis "
+            "namespace, metrics labels, and Neo4j gateway scope. "
+            "For dev/test, set EB_ALLOW_DEFAULT_GATEWAY_ID=true to opt out."
+        )
+
+    # --- A4: neo4j_password must not be empty ---
+    if not config.cognee.neo4j_password and os.environ.get("EB_DEV_MODE", "").lower() != "true":
+        raise UnsafeStartupConfigError(
+            "Refusing to boot with empty cognee.neo4j_password. "
+            "Set EB_NEO4J_PASSWORD (or cognee.neo4j_password in YAML) "
+            "to the production Neo4j password before starting the runtime. "
+            "An empty value would either fail at first query or silently "
+            "authenticate against unauthenticated dev creds. "
+            "For dev/test, set EB_DEV_MODE=true to opt out."
+        )
+
+    # --- A5: dataset rename is forbidden once .dataset_lock exists ---
+    # No-op if the canonical data directory does not exist (test environments
+    # never have /var/lib/elephantbroker). Dataset changes are catastrophic in
+    # production because the FactDataPoint vectors live under the dataset name
+    # and Cognee has no rename API — orphaning the entire memory store.
+    if _DATA_DIR_PATH.is_dir():
+        current_dataset = config.cognee.default_dataset
+        if _DATASET_LOCK_FILE.exists():
+            try:
+                locked_dataset = _DATASET_LOCK_FILE.read_text().strip()
+            except OSError as exc:  # unreadable lock file is itself a bug
+                raise UnsafeStartupConfigError(
+                    f"Could not read dataset lock file at {_DATASET_LOCK_FILE}: {exc}"
+                ) from exc
+            if locked_dataset and locked_dataset != current_dataset:
+                if os.environ.get("EB_ALLOW_DATASET_CHANGE", "").lower() != "true":
+                    raise UnsafeStartupConfigError(
+                        f"Refusing to boot: cognee.default_dataset is "
+                        f"{current_dataset!r} but the persistent lock file "
+                        f"at {_DATASET_LOCK_FILE} records {locked_dataset!r}. "
+                        "Renaming the dataset on a host with persistent "
+                        "state orphans every fact, goal, and procedure "
+                        "currently in the graph (Cognee has no rename "
+                        "API). If you really mean it, delete the lock "
+                        "file by hand or set EB_ALLOW_DATASET_CHANGE=true."
+                    )
+        else:
+            # First boot on this host: write the lock file so future boots
+            # detect renames. Best-effort — failure to write is not fatal
+            # (e.g. read-only data dir on a debug pod).
+            try:
+                _DATASET_LOCK_FILE.write_text(current_dataset)
+            except OSError as exc:
+                logger.warning(
+                    "Could not write dataset lock file %s: %s — runtime will boot but dataset-rename guard is disabled for this host",
+                    _DATASET_LOCK_FILE,
+                    exc,
+                )
 
 
 class RuntimeContainer:
@@ -136,6 +246,14 @@ class RuntimeContainer:
         tier: BusinessTier = BusinessTier.FULL,
     ) -> RuntimeContainer:
         """Build container from config. Adapters are initialized, modules wired."""
+        # --- Startup safety guards (A3/A4/A5) ---
+        # Refuse to boot with sentinel gateway_id, empty neo4j_password, or
+        # an attempted dataset rename on a host with persistent state. Each
+        # guard has an explicit env-var opt-out for dev/test (see
+        # _validate_startup_safety docstring). Runs BEFORE configure_cognee so
+        # we never make a network request with unsafe defaults in place.
+        _validate_startup_safety(config)
+
         c = cls()
         c.config = config
         c.tier = tier
@@ -369,6 +487,8 @@ class RuntimeContainer:
                 from elephantbroker.runtime.consolidation.otel_trace_query_client import OtelTraceQueryClient
                 c.trace_query_client = OtelTraceQueryClient(
                     getattr(config.infra, "clickhouse", None),
+                    trace_ledger=c.trace_ledger,
+                    metrics=c.metrics_ctx,
                 )
             except Exception:
                 pass

@@ -14,7 +14,14 @@ router = APIRouter()
 @router.post("/")
 async def create_actor(actor: ActorRef, request: Request):
     registry = get_actor_registry(request)
-    actor.gateway_id = getattr(request.state, "gateway_id", "") or actor.gateway_id
+    # Middleware wins UNCONDITIONALLY over caller-supplied actor.gateway_id —
+    # this is a tenant-isolation boundary. The old reverse-OR pattern
+    # (`... or actor.gateway_id`) fell through to the caller value whenever
+    # the middleware value was falsy ("" post-Bucket-A), allowing cross-tenant
+    # spoofing. `is not None` is required — truthiness is the bug. See TD-41.
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        actor.gateway_id = _state_gw
     result = await registry.register_actor(actor)
     return result.model_dump(mode="json")
 

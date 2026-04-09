@@ -31,12 +31,22 @@ router = APIRouter()
 
 
 def _stamp_gateway(body, request: Request):
-    """Stamp gateway_id and agent_key from middleware if not set on body."""
-    gw = getattr(request.state, "gateway_id", "")
-    if hasattr(body, "gateway_id") and not body.gateway_id:
+    """Stamp gateway_id and agent_key from middleware onto body.
+
+    The middleware value ALWAYS wins over any caller-supplied body value — this
+    is a tenant-isolation boundary. The pre-fix `if not body.gateway_id`
+    truthiness check would allow a caller to pre-populate body.gateway_id with
+    a victim tenant's ID and silently skip the stamp. `is not None` is required
+    because post-Bucket-A the middleware default is "" (falsy) and a truthiness
+    check would bypass the override entirely. GatewayIdentityMiddleware always
+    sets both fields on request.state, so the `is None` short-circuit only
+    fires when the middleware isn't wired (tests or edge cases). See TD-41.
+    """
+    gw = getattr(request.state, "gateway_id", None)
+    if gw is not None and hasattr(body, "gateway_id"):
         body.gateway_id = gw
-    ak = getattr(request.state, "agent_key", "")
-    if hasattr(body, "agent_key") and not body.agent_key and ak:
+    ak = getattr(request.state, "agent_key", None)
+    if ak is not None and hasattr(body, "agent_key"):
         body.agent_key = ak
 
 

@@ -23,9 +23,16 @@ async def list_traces(request: Request, session_id: uuid.UUID | None = None, lim
 
 @router.post("/query")
 async def query_traces(query: TraceQuery, request: Request):
-    # Enforce gateway isolation
+    # Enforce gateway isolation: the middleware-provided gateway_id always wins
+    # over any caller-supplied value in the request body. `is not None` is
+    # required here (not truthiness): post-Bucket-A the default gateway_id is
+    # "" (empty string, falsy), and a truthiness check would silently skip the
+    # override, allowing a caller to read another tenant's trace events by
+    # posting {"gateway_id": "victim-tenant"}. GatewayIdentityMiddleware always
+    # sets request.state.gateway_id to a string (possibly ""), so this check
+    # only short-circuits when the middleware isn't wired at all.
     gw_id = getattr(request.state, "gateway_id", None)
-    if gw_id:
+    if gw_id is not None:
         query.gateway_id = gw_id
     ledger = get_trace_ledger(request)
     events = await ledger.query_trace(query)
@@ -111,7 +118,10 @@ async def get_trace_event(event_id: uuid.UUID, request: Request):
     ledger = get_trace_ledger(request)
     gw_id = getattr(request.state, "gateway_id", None)
     events = await ledger.get_evidence_chain(event_id)
-    if gw_id:
+    # `is not None` is required here — see POST /query above. Under the
+    # post-Bucket-A "" middleware default, a truthiness check would bypass
+    # this filter entirely and leak evidence chains across gateways.
+    if gw_id is not None:
         events = [e for e in events if e.gateway_id == gw_id]
     if not events:
         raise HTTPException(status_code=404, detail="Event not found")

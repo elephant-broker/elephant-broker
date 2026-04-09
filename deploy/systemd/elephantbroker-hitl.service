@@ -1,0 +1,142 @@
+# =============================================================================
+# ElephantBroker HITL Middleware — systemd service unit
+# =============================================================================
+#
+# Installation:
+#   sudo cp deploy/systemd/elephantbroker-hitl.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable elephantbroker-hitl
+#   sudo systemctl start elephantbroker-hitl
+#
+# Verification:
+#   systemctl status elephantbroker-hitl
+#   journalctl -u elephantbroker-hitl -f
+#   curl http://localhost:8421/health
+#
+# This unit shares the `elephantbroker` system user and the `/opt/elephantbroker`
+# venv with the main runtime — both services live in the same install but run
+# as separate processes on different ports.
+#
+# REQUIRED: /etc/elephantbroker/hitl.env must contain EB_HITL_CALLBACK_SECRET
+# matching the same variable in /etc/elephantbroker/env. A mismatch causes
+# callbacks to fail silently with 401 responses, leaving approvals in pending.
+# =============================================================================
+
+[Unit]
+Description=ElephantBroker HITL Middleware
+Documentation=https://github.com/elephant-broker/elephant-broker
+# HITL is called by the runtime — runtime must come up first so the
+# health check at the end of HITL startup can verify connectivity back.
+#
+# D5 (TODO-3-015): Wants=elephantbroker.service added (soft dependency,
+# not Requires=). Without this, restarting HITL alone leaves the runtime
+# stopped — the operator hits a silent 401 cascade because callbacks
+# can't reach a non-existent runtime. Wants= triggers the runtime to
+# start when HITL is started, but does NOT cascade-fail HITL if the
+# runtime fails to come up (Requires= would, and that's too strict).
+#
+# TODO-3-632: After=/Wants= govern startup ORDER and on-start activation
+# only. Neither directive propagates `systemctl restart elephantbroker`
+# to this unit — an operator bouncing the main runtime leaves HITL
+# running against a briefly-unreachable callback target, and HITL's own
+# retry / reconnect logic is what recovers. That is intentional: HITL is
+# a stateless FastAPI approval proxy, and dragging it through a restart
+# every time the runtime bounces would amplify operator-visible churn
+# (and every in-flight approval would get re-served as a 503) for no
+# correctness benefit. Operators who need tightly-coupled lifecycle
+# (e.g. a maintenance window that flushes both processes) should either
+# restart both units explicitly —
+#
+#     systemctl restart elephantbroker elephantbroker-hitl
+#
+# — or add `PartOf=elephantbroker.service` to a drop-in override at
+# /etc/systemd/system/elephantbroker-hitl.service.d/partof.conf. DO NOT
+# add PartOf= or BindsTo= directly to this unit file: both change the
+# restart semantics for every deployment and are operator-level policy
+# decisions, not packaging decisions.
+After=elephantbroker.service network-online.target
+Wants=network-online.target elephantbroker.service
+
+[Service]
+Type=simple
+
+# --- Identity (same user as the main runtime) ---
+User=elephantbroker
+Group=elephantbroker
+
+# --- Filesystem ---
+WorkingDirectory=/var/lib/elephantbroker
+EnvironmentFile=/etc/elephantbroker/hitl.env
+# Console script entry point installed by `uv sync` from
+# hitl-middleware/pyproject.toml [project.scripts]. The previous form
+# (`python -m hitl_middleware`) worked but bypassed the entry point machinery
+# and made the unit harder to introspect (`systemctl cat` showed only `python`,
+# not the actual binary). Use the binary form for clarity and consistency
+# with the main runtime unit which uses /opt/elephantbroker/.venv/bin/elephantbroker.
+ExecStart=/opt/elephantbroker/.venv/bin/hitl-middleware
+
+# TODO-3-637: redirect .pyc writes away from the read-only site-packages tree (see C3).
+Environment=PYTHONPYCACHEPREFIX=/var/cache/elephantbroker
+
+# --- Restart policy ---
+Restart=on-failure
+RestartSec=5
+# D3 (TODO-3-324): bumped from 30s to 60s for symmetry with the main
+# runtime unit (which sits at 60s). The previous asymmetry had no
+# documented justification — HITL imports FastAPI + httpx + pydantic and
+# can take a few seconds longer than expected on a cold uv-synced venv.
+TimeoutStartSec=60
+TimeoutStopSec=15
+
+# --- Resource limits ---
+# D2 (TODO-3-322): HITL is a thin FastAPI service (no Cognee, no embeddings,
+# no LLM in-process), so the caps are an order of magnitude smaller than
+# the main runtime. MemoryMax still matters: a leaky callback handler
+# should not be able to grow without bound and eat into the runtime's
+# headroom on a co-hosted DB VM.
+MemoryMax=512M
+MemoryHigh=384M
+TasksMax=64
+CPUQuota=100%
+LimitNOFILE=4096
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=elephantbroker-hitl
+
+# --- Filesystem hardening ---
+# D1 (TODO-3-311 + TODO-3-605): /opt/elephantbroker dropped from
+# ReadWritePaths entirely. The HITL middleware does NOT run Cognee,
+# does NOT touch the embedding store, and has no other legitimate write
+# target inside the install tree. Only /var/lib/elephantbroker stays
+# writable for runtime state (callback ledger, etc.). Source code, the
+# venv, and this unit file are all read-only at the kernel level — a
+# compromised HITL process cannot rewrite the main runtime's binaries
+# or its own service definition.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/elephantbroker /var/cache/elephantbroker
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+# --- Privilege hardening ---
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# --- Kernel & namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# --- File creation mask ---
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

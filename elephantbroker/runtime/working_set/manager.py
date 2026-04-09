@@ -42,7 +42,7 @@ class WorkingSetManager(IWorkingSetManager):
         graph=None,
         redis=None,
         config: ElephantBrokerConfig | None = None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         redis_keys=None,
         metrics=None,
         scoring_ledger_store=None,

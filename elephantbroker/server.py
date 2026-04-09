@@ -4,6 +4,7 @@ Usage:
     elephantbroker serve [--config path] [--host 0.0.0.0] [--port 8420]
     elephantbroker health-check [--host localhost] [--port 8420]
     elephantbroker migrate
+    elephantbroker config validate [--config path]
 """
 from __future__ import annotations
 
@@ -32,10 +33,7 @@ def serve(host: str, port: int, log_level: str, config: str | None) -> None:
     from elephantbroker.schemas.config import ElephantBrokerConfig
 
     async def _build_and_run() -> None:
-        if config:
-            eb_config = ElephantBrokerConfig.from_yaml(config)
-        else:
-            eb_config = ElephantBrokerConfig.from_env()
+        eb_config = ElephantBrokerConfig.load(config)
         container = await RuntimeContainer.from_config(eb_config)
 
         from elephantbroker.api.app import create_app
@@ -74,6 +72,56 @@ def health_check(host: str, port: int) -> None:
 def migrate() -> None:
     """Run database migrations (placeholder)."""
     click.echo("No migrations needed.")
+
+
+# ---------------------------------------------------------------------------
+# C4 (TODO-3-013): `config validate` subcommand
+# ---------------------------------------------------------------------------
+# install.sh's old smoke test only verified that `elephantbroker --help`
+# returned non-zero — it could not catch a malformed default.yaml, an unknown
+# YAML key (extra="forbid" violation), an env-binding type coercion failure,
+# or a cross-field validator rejection (e.g. F9's embedding model/dim mismatch).
+# Operators routinely shipped a config that passed --help but blew up at
+# `systemctl start` time, leaving them debugging a service-fail loop instead
+# of a clear pre-install error.
+#
+# This subcommand calls ElephantBrokerConfig.load() — the SAME loader the
+# runtime uses at startup — so any structural failure that would crash the
+# real serve command also surfaces here. install.sh runs it BEFORE
+# `systemctl enable` so the operator gets a clear error in the install log
+# instead of a confusing journalctl failure later.
+
+@cli.group("config")
+def config_group() -> None:
+    """Configuration management."""
+
+
+@config_group.command("validate")
+@click.option(
+    "--config",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML config path to validate (default: packaged default.yaml)",
+)
+def config_validate(config: str | None) -> None:
+    """Validate a config file by running it through the runtime loader.
+
+    Loads the YAML, applies all env-var overrides from ENV_OVERRIDE_BINDINGS,
+    and runs every Pydantic validator in the schema tree. Exits 0 on success
+    and 1 on any validation failure with the error printed to stderr.
+
+    Used by deploy/install.sh as a pre-systemd-enable smoke test so structural
+    config errors fail the install instead of the service start.
+    """
+    from elephantbroker.schemas.config import ElephantBrokerConfig
+
+    target = config or "(packaged default.yaml)"
+    try:
+        ElephantBrokerConfig.load(config)
+    except Exception as exc:
+        click.echo(f"INVALID: {target}: {type(exc).__name__}: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"OK: {target} validates against the runtime schema")
 
 
 def main() -> None:

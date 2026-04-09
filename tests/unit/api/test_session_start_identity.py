@@ -34,13 +34,24 @@ async def test_session_start_without_agent_key(client):
 
 @pytest.mark.asyncio
 async def test_session_start_derives_agent_key_from_parts(client):
-    """When agent_key is not provided but gateway_id + agent_id are, it's derived."""
-    resp = await client.post("/sessions/start", json={
-        "session_key": "agent:main:main",
-        "session_id": "test-sid",
-        "gateway_id": "gw-prod",
-        "agent_id": "main",
-    })
+    """When agent_key is not provided but gateway_id + agent_id are, it's derived.
+
+    Post-Bucket-A-R2: gateway_id is sourced from the X-EB-Gateway-ID header
+    (the middleware) rather than the request body. The route no longer accepts
+    body.gateway_id as a fallback — the middleware wins unconditionally
+    (tenant-isolation boundary, see TD-41).
+    """
+    resp = await client.post(
+        "/sessions/start",
+        json={
+            "session_key": "agent:main:main",
+            "session_id": "test-sid",
+        },
+        headers={
+            "X-EB-Gateway-ID": "gw-prod",
+            "X-EB-Agent-ID": "main",
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["agent_key"] == "gw-prod:main"
@@ -48,16 +59,25 @@ async def test_session_start_derives_agent_key_from_parts(client):
 
 @pytest.mark.asyncio
 async def test_session_end_includes_gateway_in_trace(client, container):
+    """Post-Bucket-A-R2: gateway_id is sourced from the X-EB-Gateway-ID header
+    (the middleware) rather than the request body — the middleware wins
+    unconditionally as a tenant-isolation boundary (see TD-41).
+    """
     # Track trace events
     events = container.trace_ledger._events
     initial_count = len(events)
 
-    resp = await client.post("/sessions/end", json={
-        "session_key": "agent:main:main",
-        "session_id": "test-sid",
-        "gateway_id": "gw-test",
-        "agent_key": "gw-test:main",
-    })
+    resp = await client.post(
+        "/sessions/end",
+        json={
+            "session_key": "agent:main:main",
+            "session_id": "test-sid",
+        },
+        headers={
+            "X-EB-Gateway-ID": "gw-test",
+            "X-EB-Agent-Key": "gw-test:main",
+        },
+    )
     assert resp.status_code == 200
 
     # Check trace event was emitted with gateway_id

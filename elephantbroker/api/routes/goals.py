@@ -224,7 +224,11 @@ async def record_session_goal_progress(
 @router.post("/")
 async def create_goal(goal: GoalState, request: Request):
     manager = get_goal_manager(request)
-    goal.gateway_id = getattr(request.state, "gateway_id", "") or goal.gateway_id
+    # Middleware wins unconditionally over caller-supplied goal.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        goal.gateway_id = _state_gw
     result = await manager.set_goal(goal)
     container = get_container(request)
     metrics = getattr(container, "metrics_ctx", None)

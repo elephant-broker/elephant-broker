@@ -18,9 +18,21 @@ pytestmark = pytest.mark.integration
 
 
 @pytest_asyncio.fixture
-async def container():
-    """Build a full RuntimeContainer wired to Docker test services."""
-    config = ElephantBrokerConfig.from_env()
+async def container(monkeypatch):
+    """Build a full RuntimeContainer wired to Docker test services.
+
+    R2 integration RED fix (cascade fallout from TODO-3-343 / Bucket A-R2-Test):
+    Bucket A-R2-Test removed the global EB_ALLOW_DEFAULT_GATEWAY_ID opt-out
+    from tests/conftest.py and scoped it to the unit-side test_container.py
+    only. Integration fixtures call RuntimeContainer.from_config() directly
+    without that scoping, and the Bucket A startup safety check (R1 `d850186`)
+    correctly refuses to boot with empty gateway_id. Set a distinctive value
+    here so any cross-test pollution surfaces as a visible mismatch instead of
+    a silent collision. Same pattern as the I-R2 fix to
+    tests/integration/runtime/working_set/test_working_set_integration.py.
+    """
+    monkeypatch.setenv("EB_GATEWAY_ID", "test-rerank-gateway")
+    config = ElephantBrokerConfig.load()
     c = await RuntimeContainer.from_config(config, BusinessTier.FULL)
     yield c
     try:

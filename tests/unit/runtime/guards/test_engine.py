@@ -52,6 +52,9 @@ def _make_engine(**overrides):
     queue.get_for_session = AsyncMock(return_value=[])
     goals = AsyncMock()
 
+    # Allow callers to override `config` (e.g. GuardConfig(enabled=False)) without
+    # colliding with the explicit kwarg below.
+    config = overrides.pop("config", GuardConfig())
     engine = RedLineGuardEngine(
         trace_ledger=trace,
         embedding_service=embed,
@@ -59,7 +62,7 @@ def _make_engine(**overrides):
         llm_client=llm,
         profile_registry=registry,
         redis=redis,
-        config=GuardConfig(),
+        config=config,
         gateway_id="test",
         redis_keys=keys,
         metrics=metrics,
@@ -748,3 +751,42 @@ class TestNearMissEscalation:
 
         result = await engine.preflight_check(SID, [_msg("DROP TABLE users")])
         assert result.outcome == GuardOutcome.BLOCK
+
+
+class TestGuardConfigEnabledShortCircuit:
+    """Verify the master kill switch (`config.guards.enabled = False`) bypasses every guard layer.
+
+    This pins the contract that EB_GUARDS_ENABLED → guards.enabled → engine
+    short-circuit. Before the dead `enable_guards` field was removed there
+    were two switches and only this one (`guards.enabled`) was actually wired
+    to the engine — losing this test would re-introduce the same confusion.
+    """
+
+    @pytest.mark.asyncio
+    async def test_disabled_returns_pass_without_invoking_layers(self):
+        engine, classifier, queue, redis, trace = _make_engine(config=GuardConfig(enabled=False))
+
+        # Spy on classifier and approval queue — neither must be touched
+        classifier.classify = MagicMock(side_effect=AssertionError("classifier must not be called when guards disabled"))
+
+        # Even with content that would normally trip Layer 1 (static SQL pattern),
+        # the engine must short-circuit at the very top of preflight_check.
+        result = await engine.preflight_check(SID, [_msg("DROP TABLE users; SELECT * FROM secrets")])
+
+        assert result.outcome == GuardOutcome.PASS
+        # No trace events emitted, no redis history written, no approvals created.
+        trace.append_event.assert_not_called()
+        queue.create.assert_not_called()
+        redis.lpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enabled_default_runs_layers(self):
+        """Sanity counter-test: with the default GuardConfig, classifier IS invoked."""
+        engine, classifier, _, _, _ = _make_engine()
+        # Use a benign message so we don't depend on a specific outcome shape
+        await engine.preflight_check(SID, [_msg("hello")])
+        # The classifier (Layer 0) must have been touched at least once
+        # — proves the short-circuit path is the only difference from above.
+        # We can't strictly assert call_count without coupling to internals,
+        # but we can verify the engine reached _SessionGuardState bookkeeping.
+        assert engine._sessions[SID].last_accessed_at is not None

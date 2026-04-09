@@ -32,7 +32,7 @@ def register_verbose_level() -> None:
     logging.Logger.verbose = verbose  # type: ignore[attr-defined]
 
 
-def setup_tracing(config: InfraConfig, gateway_id: str = "local") -> TracerProvider:
+def setup_tracing(config: InfraConfig, gateway_id: str = "") -> TracerProvider:
     """Configure OTEL tracing with gateway identity resource attributes."""
     global _provider
 
@@ -61,7 +61,7 @@ def setup_tracing(config: InfraConfig, gateway_id: str = "local") -> TracerProvi
     return provider
 
 
-def setup_otel_logging(config: InfraConfig, gateway_id: str = "local"):
+def setup_otel_logging(config: InfraConfig, gateway_id: str = ""):
     """Configure OTEL LoggerProvider for TraceLedger event export to ClickHouse.
 
     Returns an OTEL Logger instance if configured, None otherwise.

@@ -22,7 +22,7 @@ class GoalHintProcessor:
 
     def __init__(self, session_goal_store, goal_refinement_task: GoalRefinementTask,
                  config: GoalRefinementConfig | None = None,
-                 trace_ledger=None, metrics=None, gateway_id: str = "local") -> None:
+                 trace_ledger=None, metrics=None, gateway_id: str = "") -> None:
         self._store = session_goal_store
         self._refinement = goal_refinement_task
         self._config = config or GoalRefinementConfig()

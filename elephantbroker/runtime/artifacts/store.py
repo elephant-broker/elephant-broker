@@ -29,7 +29,7 @@ class ToolArtifactStore(IToolArtifactStore):
         embeddings: EmbeddingService,
         trace_ledger: ITraceLedger,
         dataset_name: str = "elephantbroker",
-        gateway_id: str = "local",
+        gateway_id: str = "",
     ) -> None:
         self._graph = graph
         self._vector = vector

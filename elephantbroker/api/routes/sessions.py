@@ -5,7 +5,7 @@ import logging
 import uuid
 
 from cognee.tasks.storage import add_data_points
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from elephantbroker.api.deps import get_container
 from elephantbroker.runtime.adapters.cognee.datapoints import ActorDataPoint
@@ -23,7 +23,19 @@ router = APIRouter()
 @router.post("/start")
 async def session_start(body: SessionStartRequest, request: Request):
     container = get_container(request)
-    gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+    # Middleware wins UNCONDITIONALLY over body.gateway_id — this is a tenant
+    # isolation boundary. Post-Bucket-A GatewayIdentityMiddleware is mandatory
+    # and ALWAYS stamps request.state.gateway_id to a string (possibly "").
+    # TODO-3-030 (Bucket A-R3, BLR INFO): the earlier pattern here was
+    # ``if gw_id is None: gw_id = body.gateway_id or ""`` — that quietly fell
+    # through to caller-supplied values when the middleware was not wired,
+    # contradicting the "middleware wins UNCONDITIONALLY" spec in this
+    # comment. We now fail loud with HTTP 500 when the middleware is missing:
+    # that is a deployment bug, not a runtime condition. See TD-41 for the
+    # tenant-spoofing history.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        raise HTTPException(status_code=500, detail="gateway_id middleware not installed")
     agent_id = body.agent_id or getattr(request.state, "agent_id", "")
     agent_key = body.agent_key or (f"{gw_id}:{agent_id}" if agent_id else "")
 
@@ -125,7 +137,12 @@ async def session_context_window(request: Request):
     from elephantbroker.schemas.context import ContextWindowReport
     body = ContextWindowReport(**(await request.json()))
     container = get_container(request)
-    gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+    # Middleware wins unconditionally over body.gateway_id — see session_start().
+    # TODO-3-030 (Bucket A-R3): raise on middleware-not-wired instead of
+    # silently falling through to body.gateway_id.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        raise HTTPException(status_code=500, detail="gateway_id middleware not installed")
 
     store = getattr(container, "session_context_store", None)
     if store:
@@ -166,7 +183,12 @@ async def session_token_usage(request: Request):
 
     trace_ledger = getattr(container, "trace_ledger", None)
     if trace_ledger:
-        gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+        # Middleware wins unconditionally over body.gateway_id — see session_start().
+        # TODO-3-030 (Bucket A-R3): raise on middleware-not-wired instead of
+        # silently falling through to body.gateway_id.
+        gw_id = getattr(request.state, "gateway_id", None)
+        if gw_id is None:
+            raise HTTPException(status_code=500, detail="gateway_id middleware not installed")
         await trace_ledger.append_event(TraceEvent(
             event_type=TraceEventType.TOKEN_USAGE_REPORTED,
             gateway_id=gw_id,
@@ -183,7 +205,12 @@ async def session_token_usage(request: Request):
 @router.post("/end")
 async def session_end(body: SessionEndRequest, request: Request):
     container = get_container(request)
-    gw_id = body.gateway_id or getattr(request.state, "gateway_id", "local")
+    # Middleware wins unconditionally over body.gateway_id — see session_start().
+    # TODO-3-030 (Bucket A-R3): raise on middleware-not-wired instead of
+    # silently falling through to body.gateway_id.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        raise HTTPException(status_code=500, detail="gateway_id middleware not installed")
     agent_key = body.agent_key or getattr(request.state, "agent_key", "")
 
     # Force-flush buffer if available.

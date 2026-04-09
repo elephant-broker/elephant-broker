@@ -8,7 +8,12 @@ from elephantbroker.schemas.config import CogneeConfig
 
 
 def _make_adapter() -> VectorAdapter:
-    return VectorAdapter(CogneeConfig(embedding_dimensions=4))
+    # F9: pick a model name that is NOT in KNOWN_EMBEDDING_DIMS so the
+    # cross-validator skips us — these tests use a 4-dim placeholder for
+    # speed and don't care about real model semantics.
+    return VectorAdapter(
+        CogneeConfig(embedding_model="test/fake-4d", embedding_dimensions=4),
+    )
 
 
 class TestVectorAdapter:

@@ -76,7 +76,7 @@ class RedLineGuardEngine(IRedLineGuardEngine):
         profile_registry=None,
         redis=None,
         config: GuardConfig | None = None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         redis_keys=None,
         metrics=None,
         hitl_client=None,

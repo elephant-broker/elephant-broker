@@ -1,0 +1,149 @@
+# =============================================================================
+# ElephantBroker Cognitive Runtime — systemd service unit
+# =============================================================================
+#
+# Installation:
+#   sudo cp deploy/systemd/elephantbroker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable elephantbroker
+#   sudo systemctl start elephantbroker
+#
+# Verification:
+#   systemctl status elephantbroker
+#   journalctl -u elephantbroker -f
+#   curl http://localhost:8420/health/        # note trailing slash
+#
+# This unit assumes the canonical install layout produced by deploy/install.sh:
+#
+#   /opt/elephantbroker/        root:root                      755   install tree (code + venv)
+#   /etc/elephantbroker/        elephantbroker:elephantbroker  750   config dir
+#   /etc/elephantbroker/default.yaml   elephantbroker:elephantbroker  640
+#   /etc/elephantbroker/env            root:elephantbroker            640   secrets
+#   /etc/elephantbroker/hitl.env       root:elephantbroker            640   HITL secrets
+#   /var/lib/elephantbroker/    elephantbroker:elephantbroker  750   runtime state
+#
+# TODO-3-342: /opt/elephantbroker is intentionally root:root, NOT owned by
+# the service user. Only the Cognee runtime subdirs under .venv/lib
+# (.cognee_system/, .data_storage/, and the .anon_id telemetry file) are
+# chowned to elephantbroker individually by install.sh Step 6. This is the
+# DAC half of the C3 (TODO-3-010) defense-in-depth model that pairs with
+# the ReadWritePaths narrowing under `Filesystem hardening` below — a
+# compromised runtime cannot rewrite its own source code, pyproject.toml,
+# uv.lock, or this unit file at EITHER the kernel MAC layer or the DAC
+# ownership layer. An earlier revision of this comment claimed
+# `/opt/elephantbroker  elephantbroker:elephantbroker  755` which was the
+# pre-C3 layout; the doc drifted when C3 landed in Bucket C-R2.
+#
+# The `elephantbroker` system user is created by deploy/install.sh with
+# `useradd --system --shell /usr/sbin/nologin --home-dir /var/lib/elephantbroker`.
+# It exists ONLY to run this service — no interactive login is possible.
+# =============================================================================
+
+[Unit]
+Description=ElephantBroker Cognitive Runtime
+Documentation=https://github.com/elephant-broker/elephant-broker
+# D6 (TODO-3-609): docker.service removed from After=. The documented
+# two-VM topology has Docker only on the infra VM (Neo4j/Qdrant/Redis);
+# the runtime VM where this unit lives has no Docker installed at all.
+# systemd silently ignored the missing unit before, but the After= line
+# implied a dependency that does not exist in the supported deployment.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- Identity ---
+# Dedicated system user. Created by deploy/install.sh.
+User=elephantbroker
+Group=elephantbroker
+
+# --- Filesystem ---
+WorkingDirectory=/var/lib/elephantbroker
+EnvironmentFile=/etc/elephantbroker/env
+ExecStart=/opt/elephantbroker/.venv/bin/elephantbroker serve \
+    --config /etc/elephantbroker/default.yaml \
+    --host 0.0.0.0 \
+    --port 8420
+
+# TODO-3-637: redirect .pyc writes away from the read-only site-packages tree (see C3).
+Environment=PYTHONPYCACHEPREFIX=/var/cache/elephantbroker
+
+# --- Restart policy ---
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# --- Resource limits ---
+# D2 (TODO-3-322): cap runtime resource usage so a runaway extraction
+# loop, embedding storm, or fork bomb cannot OOM the host and take
+# Neo4j/Qdrant/Redis with it. MemoryMax is the load-bearing one — without
+# it a single bad turn can crash the entire DB VM. Tune per host: the
+# 8G/4-core defaults assume a modest 16G runtime VM; bump CPUQuota and
+# MemoryMax in a /etc/systemd/system/elephantbroker.service.d/ override
+# on larger hosts rather than editing this file in place.
+MemoryMax=8G
+MemoryHigh=6G
+# TODO-3-345: TasksMax bumped from 512 → 4096. The runtime holds up to
+# ~100 concurrent sessions under saturated load, each spawning ~5–15
+# async tasks (retrieval fan-out across 5 sources, scoring workers, the
+# compaction background loop, trace ledger writes, guard pipelines).
+# That baseline of 500–1500 tasks put 512 at-or-below normal operation
+# and risked "fork: Resource temporarily unavailable" errors that surface
+# in the journal as mysterious 5xx bursts rather than an obvious quota
+# hit. 4096 gives ~40 tasks per session of headroom — enough to absorb
+# transient spikes (subagent spawns, Cognee cognify bursts, Phase 9
+# consolidation sleep cycles) without removing the runaway-fork ceiling
+# that D2 (TODO-3-322) is here to enforce. HITL's TasksMax stays at 64
+# — it is a thin FastAPI proxy with no fan-out and has not shown any
+# baseline pressure at that cap.
+TasksMax=4096
+CPUQuota=400%
+LimitNOFILE=65536
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=elephantbroker
+
+# --- Filesystem hardening ---
+# D1 (TODO-3-311 + TODO-3-605): ReadWritePaths scoped down from the entire
+# /opt/elephantbroker tree to /opt/elephantbroker/.venv/lib. Cognee's only
+# legitimate write targets live under
+# .venv/lib/python*/site-packages/cognee/.cognee_system/ and .data_storage/,
+# both of which are reachable through the .venv/lib root. The previous
+# permissive form re-granted write access to source code, pyproject.toml,
+# uv.lock, every Python module, AND this systemd unit itself — a compromised
+# runtime could rewrite its own code and its own service definition. This
+# pairs with the C3 DAC narrowing (deploy/install.sh keeps /opt/elephantbroker
+# root-owned, only Cognee's writable subdirs chowned to the service user) so
+# the runtime is now write-restricted at BOTH the kernel MAC layer and the
+# DAC ownership layer.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib /var/cache/elephantbroker
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+# --- Privilege hardening ---
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# --- Kernel & namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# --- File creation mask ---
+# New files default to 640 (owner rw, group r, other none) instead of 644.
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

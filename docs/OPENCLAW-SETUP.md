@@ -36,22 +36,39 @@ Both plugins use OpenClaw's flat extension layout — all `.ts` files at root. O
 
 > **Deployment mode:** Installing **both** plugins (`elephantbroker-memory` + `elephantbroker-context`) configures **FULL mode** — the recommended operating mode for ~90% of deployments. FULL mode enables the complete stack: durable memory (Neo4j + Qdrant-backed), working set scoring (11-dimension), context assembly, compaction, and guards. Installing only `elephantbroker-memory` puts the runtime in MEMORY_ONLY mode (memory storage without context lifecycle). For all standard deployments, install both.
 
+**Prerequisite:** Node.js **24+** (pinned via `engines.node` in each plugin's
+`package.json`). Earlier versions (20, 22) may run but are not supported by
+the lockfiles committed in the repo.
+
 **1. Clone repo and symlink plugins into OpenClaw extensions:**
 
 ```bash
 # Clone the repo on the gateway host
-git clone https://github.com/<your-org>/elephant-broker.git /opt/elephant-broker
+git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
 # Symlink plugins — OpenClaw loads .ts files directly via jiti (no build step)
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies in each plugin directory
-cd ~/.openclaw/extensions/elephantbroker-memory && npm install
-cd ~/.openclaw/extensions/elephantbroker-context && npm install
+# Install dependencies — `npm ci` reads the committed package-lock.json and
+# installs EXACTLY those versions. Errors out if the lockfile is missing or
+# out of sync with package.json. This is the npm equivalent of
+# `uv sync --frozen` on the DB VM and the only supported install command
+# for production gateways.
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 ```
 
-Symlinks make updates easy — `git pull` in `/opt/elephant-broker` updates both plugins. No need to re-copy files.
+> **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
+> ranges to whatever's latest today, regenerates the lockfile if needed, and
+> can silently install different versions on different hosts. `npm ci` is
+> bit-for-bit reproducible — it reads the committed `package-lock.json` and
+> installs exactly the same tree every time. Use `npm install` only when
+> intentionally bumping a dep (and commit the regenerated lockfile).
+
+Symlinks make updates easy — `git pull` in `/opt/elephantbroker` updates both
+plugins. After pulling, re-run `npm ci` in each plugin directory to pick up
+any lockfile changes.
 
 **2. Add to `~/.openclaw/openclaw.json`:**
 
@@ -61,7 +78,6 @@ Symlinks make updates easy — `git pull` in `/opt/elephant-broker` updates both
     "vars": {
       "EB_GATEWAY_ID": "gw-prod",
       "EB_RUNTIME_URL": "http://DB_VM_IP:8420",
-      "EB_HITL_URL": "http://DB_VM_IP:8421",
       "EB_GATEWAY_SHORT_NAME": "prod"
     }
   },
@@ -320,17 +336,22 @@ The agent is the planner. The extraction system is the scorekeeper.
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `EB_GATEWAY_ID` | Recommended | `"local"` | Unique gateway instance identifier |
+| `EB_GATEWAY_ID` | **YES** (production) | `""` (empty string) | Unique gateway instance identifier. **Startup safety guard:** the runtime refuses to boot with `gateway_id == ""` unless `EB_ALLOW_DEFAULT_GATEWAY_ID=true` is set. Post Bucket A-R2 migration (commit `81769bf`). |
+| `EB_ALLOW_DEFAULT_GATEWAY_ID` | No | `false` | Dev/test escape hatch — permits boot with the empty-string `EB_GATEWAY_ID` default. **Production deployments MUST set `EB_GATEWAY_ID` and leave this unset.** Setting this in production disables tenant isolation for gateway-scoped keys and metrics. |
+| `EB_DEV_MODE` | No | `false` | Dev/test escape hatch — permits boot with empty `EB_NEO4J_PASSWORD` (otherwise the runtime refuses to start). **Production deployments MUST set `EB_NEO4J_PASSWORD` and leave this unset.** |
+| `EB_ORG_ID` | No | `""` | Organization binding (stamped on gateway-scoped keys alongside gateway_id) |
+| `EB_TEAM_ID` | No | `""` | Team binding (stamped on gateway-scoped keys alongside gateway_id) |
 | `EB_NEO4J_URI` | Yes | `bolt://localhost:7687` | Neo4j Bolt connection |
+| `EB_NEO4J_USER` | No | `neo4j` | Neo4j user |
+| `EB_NEO4J_PASSWORD` | **YES** (production) | `""` | Neo4j password. Runtime refuses to boot with empty password unless `EB_DEV_MODE=true` is set |
 | `EB_QDRANT_URL` | Yes | `http://localhost:6333` | Qdrant vector store |
 | `EB_REDIS_URL` | Recommended | `redis://localhost:6379` | Redis for session goals, embedding cache, working set snapshots |
 | `EB_LLM_API_KEY` | Yes | `""` | API key for LLM endpoint |
 | `EB_EMBEDDING_API_KEY` | No | `""` | API key for embedding endpoint (if different from LLM) |
-| `EB_HITL_CALLBACK_SECRET` | No | `""` | HMAC-SHA256 secret for HITL callback validation (same value in runtime + HITL) |
+| `EB_HITL_CALLBACK_SECRET` | No | `""` | HMAC-SHA256 secret for HITL callback validation (same value in runtime + HITL). Auto-generated by `install.sh` F11 on first install. |
 | `EB_RERANKER_ENDPOINT` | No | `http://localhost:1235` | Qwen3-Reranker-4B endpoint |
 | `EB_RERANKER_API_KEY` | No | `""` | Reranker API key |
-| `EB_ORG_ID` | No | `""` | Organization binding |
-| `EB_TEAM_ID` | No | `""` | Team binding |
+| `EB_GUARDS_ENABLED` | No | `true` | Master switch for the 6-layer guard pipeline (overrides `guards.enabled` in YAML). Post R1 Bucket A TODO-3-001 fix |
 
 ### HITL Middleware
 
@@ -556,7 +577,7 @@ Additional Phase 7 variable:
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `EB_ENABLE_GUARDS` | No | `true` | Enable/disable the guard engine |
+| `EB_GUARDS_ENABLED` | No | `true` | Master switch for the 6-layer guard pipeline (overrides `guards.enabled` in YAML) |
 
 ---
 

@@ -37,13 +37,14 @@ EB_NEO4J_PASSWORD=elephant_dev
 EB_QDRANT_URL=http://localhost:6333
 EB_REDIS_URL=redis://localhost:6379
 
-# LLM (required)
-EB_LLM_MODEL=openai/gemini-2.5-pro
+# LLM (required) — openai/ prefix REQUIRED (Cognee strips it before sending to LiteLLM)
+EB_LLM_MODEL=openai/gemini/gemini-2.5-pro
 EB_LLM_API_KEY=your-api-key-here
 EB_LLM_ENDPOINT=http://localhost:8811/v1  # LiteLLM proxy
 
-# Embedding (required)
-EB_EMBEDDING_MODEL=openai/text-embedding-3-large
+# Embedding (required) — must match what your LiteLLM proxy serves
+EB_EMBEDDING_MODEL=gemini/text-embedding-004
+EB_EMBEDDING_DIMENSIONS=768
 EB_EMBEDDING_API_KEY=your-api-key-here
 
 # Gateway identity (required)
@@ -69,7 +70,7 @@ python -m elephantbroker.api.app
 2. **YAML file** (`--config path/to/config.yaml`) -- base configuration
 3. **Hardcoded defaults** -- fallback values in Pydantic schemas
 
-Use `ElephantBrokerConfig.from_env()` for env-only or `ElephantBrokerConfig.from_yaml(path)` for YAML + env overrides.
+Use `ElephantBrokerConfig.load(path)` (or `load(None)` for the packaged default) — this is the single entry point after the F2/F3 unification. The legacy `from_env()` classmethod has been removed; the runtime, CLI, and tests all converge on `load()`, which always reads YAML first (the packaged `elephantbroker/config/default.yaml` when no path is given) and then applies every binding in `ENV_OVERRIDE_BINDINGS` on top.
 
 See the [Environment Variables](#environment-variables) section for the complete list, or the [YAML Configuration](#yaml-configuration) section for file-based setup.
 
@@ -93,171 +94,170 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 
 ## ElephantBroker Environment Variable Reference
 
-**Source of truth:** `elephantbroker/schemas/config.py` (`from_env()` and `from_yaml()` methods), TS plugin source files, HITL middleware config.
+**Source of truth:** `elephantbroker/schemas/config.py` — specifically the `ENV_OVERRIDE_BINDINGS` registry (the single canonical list of every `EB_*` → YAML field mapping) and `ElephantBrokerConfig.load()` — plus the TS plugin source files and HITL middleware config.
 
-**Resolution order:** env var (if set) > YAML value > model default. When using `--config` YAML, only a curated set of env vars override YAML values (marked with "Yes" in the `from_yaml()` column).
+**Resolution order:** env var (if set) > YAML value > model default. After the F2/F3 unification there is exactly one config load path: `load()` always reads YAML first (packaged default if no `--config` is given) and then applies every binding in `ENV_OVERRIDE_BINDINGS` on top. There is no longer a "curated subset" — all 72 bindings are honored in both env-only and YAML+env modes. The `Env override` column below records whether a given variable has a binding in the registry.
 
 ---
 
 ### 1. Identity
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_GATEWAY_ID` | **Yes** (TS plugins require it; Python defaults to `"local"`) | `"local"` (Python), none/fail (TS) | string | Python runtime, TS plugins, Docker, `ebrun` CLI | `gw-prod`, `gw-prod-assistant`, `local` | No | Yes |
-| `EB_GATEWAY_SHORT_NAME` | No | First 8 chars of `EB_GATEWAY_ID` | string | Python runtime, TS plugins | `prod`, `admin` | No | No |
+| `EB_GATEWAY_SHORT_NAME` | No | First 8 chars of `EB_GATEWAY_ID` | string | Python runtime, TS plugins | `prod`, `admin` | No | Yes |
 | `EB_ORG_ID` | No | `None` | string | Python runtime, Docker | `org-acme-uuid` | No | Yes |
 | `EB_TEAM_ID` | No | `None` | string | Python runtime, Docker | `team-backend-uuid` | No | Yes |
 | `EB_ACTOR_ID` | No | `""` (falls back to `~/.elephantbroker/config.json`) | string | `ebrun` CLI only | UUID | No | No |
-| `EB_AGENT_AUTHORITY_LEVEL` | No | `0` | int | Python runtime | `0`, `1`, `5` | No | No |
+| `EB_AGENT_AUTHORITY_LEVEL` | No | `0` | int | Python runtime | `0`, `1`, `5` | No | Yes |
 | `EB_PROFILE` | No | `"coding"` | string | TS plugins only | `coding`, `research`, `managerial`, `worker`, `personal_assistant` | No | No |
-| `EB_DEFAULT_PROFILE` | No | `"coding"` | string | Python runtime | `coding`, `research`, `managerial`, `worker`, `personal_assistant` | No | No |
+| `EB_DEFAULT_PROFILE` | No | `"coding"` | string | Python runtime | `coding`, `research`, `managerial`, `worker`, `personal_assistant` | No | Yes |
 
 ### 2. Database
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_NEO4J_URI` | Recommended | `"bolt://localhost:7687"` | string | Python runtime, Docker | `bolt://10.10.0.10:7687` | No | Yes |
-| `EB_NEO4J_USER` | No | `"neo4j"` | string | Python runtime | `neo4j` | No | No |
-| `EB_NEO4J_PASSWORD` | No | `"elephant_dev"` | string | Python runtime | `elephant_dev`, `<production-password>` | **Yes** | No |
+| `EB_NEO4J_USER` | No | `"neo4j"` | string | Python runtime | `neo4j` | No | Yes |
+| `EB_NEO4J_PASSWORD` | No | `"elephant_dev"` | string | Python runtime | `elephant_dev`, `<production-password>` | **Yes** | Yes |
 | `EB_QDRANT_URL` | Recommended | `"http://localhost:6333"` | string | Python runtime, Docker | `http://10.10.0.10:6333` | No | Yes |
 | `EB_REDIS_URL` | Recommended | `"redis://localhost:6379"` | string | Python runtime, Docker | `redis://10.10.0.10:6379` | No | Yes |
-| `EB_DEFAULT_DATASET` | No | `"elephantbroker"` | string | Python runtime | `elephantbroker` | No | No |
+| `EB_DEFAULT_DATASET` | No | `"elephantbroker"` | string | Python runtime | `elephantbroker` | No | Yes |
 
 ### 3. LLM (Primary -- extraction, classification, summarization)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_LLM_API_KEY` | **Yes** (if endpoint needs auth) | `""` (falls back to `EB_EMBEDDING_API_KEY`) | string | Python runtime | API key | **Yes** | Yes |
-| `EB_LLM_MODEL` | No | `"gemini/gemini-2.5-pro"` | string | Python runtime | `openai/gemini/gemini-2.5-pro`, `openai/gpt-4o` | No | Yes |
+| `EB_LLM_MODEL` | No | `"openai/gemini/gemini-2.5-pro"` | string | Python runtime | `openai/gemini/gemini-2.5-pro`, `openai/gpt-4o` | No | Yes |
 | `EB_LLM_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | `http://litellm:8811/v1` | No | Yes |
-| `EB_LLM_MAX_TOKENS` | No | `8192` | int | Python runtime | `8192`, `16384` | No | No |
-| `EB_LLM_TEMPERATURE` | No | `0.1` | float | Python runtime | `0.1`, `0.3` | No | No |
-| `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` | No | `4000` | int | Python runtime | `4000` | No | No |
-| `EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS` | No | `16384` | int | Python runtime | `16384` | No | No |
-| `EB_LLM_EXTRACTION_MAX_FACTS` | No | `10` | int | Python runtime | `10`, `20` | No | No |
-| `EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS` | No | `200` | int | Python runtime | `200` | No | No |
-| `EB_LLM_SUMMARIZATION_MIN_CHARS` | No | `500` | int | Python runtime | `500` | No | No |
+| `EB_LLM_MAX_TOKENS` | No | `8192` | int | Python runtime | `8192`, `16384` | No | Yes |
+| `EB_LLM_TEMPERATURE` | No | `0.1` | float | Python runtime | `0.1`, `0.3` | No | Yes |
+| `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` | No | `4000` | int | Python runtime | `4000` | No | Yes |
+| `EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS` | No | `16384` | int | Python runtime | `16384` | No | Yes |
+| `EB_LLM_EXTRACTION_MAX_FACTS` | No | `10` | int | Python runtime | `10`, `20` | No | Yes |
+| `EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS` | No | `200` | int | Python runtime | `200` | No | Yes |
+| `EB_LLM_SUMMARIZATION_MIN_CHARS` | No | `500` | int | Python runtime | `500` | No | Yes |
 
 ### 4. Embedding
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_EMBEDDING_API_KEY` | No | `""` | string | Python runtime | API key | **Yes** | Yes |
-| `EB_EMBEDDING_PROVIDER` | No | `"openai"` | string | Python runtime | `openai` | No | No |
-| `EB_EMBEDDING_MODEL` | No | `"openai/text-embedding-3-large"` | string | Python runtime | `openai/text-embedding-3-large` | No | No |
-| `EB_EMBEDDING_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | `http://litellm:8811/v1` | No | No |
-| `EB_EMBEDDING_DIMENSIONS` | No | `1024` | int | Python runtime | `1024`, `3072` | No | No |
-| `EB_EMBEDDING_CACHE_ENABLED` | No | `true` | bool | Python runtime | `true`, `false` | No | No |
-| `EB_EMBEDDING_CACHE_TTL` | No | `3600` | int (seconds) | Python runtime | `3600`, `7200` | No | No |
+| `EB_EMBEDDING_PROVIDER` | No | `"openai"` | string | Python runtime | `openai` | No | Yes |
+| `EB_EMBEDDING_MODEL` | No | `"gemini/text-embedding-004"` | string | Python runtime | `gemini/text-embedding-004`, `openai/text-embedding-3-large` | No | Yes |
+| `EB_EMBEDDING_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | `http://litellm:8811/v1` | No | Yes |
+| `EB_EMBEDDING_DIMENSIONS` | No | `768` | int | Python runtime | `768`, `1024`, `3072` | No | Yes |
+| `EB_EMBEDDING_CACHE_ENABLED` | No | `true` | bool | Python runtime | `true`, `false` | No | Yes |
+| `EB_EMBEDDING_CACHE_TTL` | No | `3600` | int (seconds) | Python runtime | `3600`, `7200` | No | Yes |
 
 ### 5. Reranker
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_RERANKER_ENDPOINT` | No | `"http://localhost:1235"` | string | Python runtime | `http://reranker:1235` | No | Yes |
 | `EB_RERANKER_API_KEY` | No | `""` | string | Python runtime | API key | **Yes** | Yes |
-| `EB_RERANKER_MODEL` | No | `"Qwen/Qwen3-Reranker-4B"` | string | Python runtime | `Qwen/Qwen3-Reranker-4B` | No | No |
+| `EB_RERANKER_MODEL` | No | `"Qwen/Qwen3-Reranker-4B"` | string | Python runtime | `Qwen/Qwen3-Reranker-4B` | No | Yes |
 
 ### 6. Compaction LLM (separate from primary LLM)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_COMPACTION_LLM_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | No |
-| `EB_COMPACTION_LLM_ENDPOINT` | No | Falls back to `EB_LLM_ENDPOINT` | string | Python runtime | `http://litellm:8811/v1` | No | No |
-| `EB_COMPACTION_LLM_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_COMPACTION_LLM_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
+| `EB_COMPACTION_LLM_ENDPOINT` | No | Falls back to `EB_LLM_ENDPOINT` | string | Python runtime | `http://litellm:8811/v1` | No | Yes |
+| `EB_COMPACTION_LLM_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
 
 ### 7. Observability (OTEL, Tracing, ClickHouse)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_OTEL_ENDPOINT` | No | `None` (disabled) | string | Python runtime | `http://localhost:4317` | No | Yes |
-| `EB_LOG_LEVEL` | No | `"INFO"` | string | Python runtime | `debug`, `verbose`, `info`, `warning`, `error`, `critical` | No | No |
-| `EB_METRICS_TTL_SECONDS` | No | `3600` | int (seconds) | Python runtime | `3600` | No | No |
-| `EB_TRACE_OTEL_LOGS_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | No |
-| `EB_TRACE_MEMORY_MAX_EVENTS` | No | `10000` | int | Python runtime | `10000`, `50000` | No | No |
-| `EB_ENABLE_TRACE_LEDGER` | No | `true` | bool | Python runtime | `true`, `false` | No | No |
-| `EB_CLICKHOUSE_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | No |
-| `EB_CLICKHOUSE_HOST` | No | `"localhost"` | string | Python runtime | `clickhouse`, `10.10.0.10` | No | No |
-| `EB_CLICKHOUSE_PORT` | No | `8123` | int | Python runtime | `8123` | No | No |
-| `EB_CLICKHOUSE_DATABASE` | No | `"otel"` | string | Python runtime | `otel` | No | No |
+| `EB_LOG_LEVEL` | No | `"INFO"` | string | Python runtime | `DEBUG`, `VERBOSE`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (case-insensitive at parse, normalized upper-case; runtime registers `VERBOSE`=15 — see B10 note in §7) | No | Yes |
+| `EB_METRICS_TTL_SECONDS` | No | `3600` | int (seconds) | Python runtime | `3600` | No | Yes |
+| `EB_TRACE_OTEL_LOGS_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
+| `EB_TRACE_MEMORY_MAX_EVENTS` | No | `10000` | int | Python runtime | `10000`, `50000` | No | Yes |
+| `EB_ENABLE_TRACE_LEDGER` | No | `true` | bool | Python runtime | `true`, `false` | No | Yes |
+| `EB_CLICKHOUSE_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
+| `EB_CLICKHOUSE_HOST` | No | `"localhost"` | string | Python runtime | `clickhouse`, `10.10.0.10` | No | Yes |
+| `EB_CLICKHOUSE_PORT` | No | `8123` | int | Python runtime | `8123` | No | Yes |
+| `EB_CLICKHOUSE_DATABASE` | No | `"otel"` | string | Python runtime | `otel` | No | Yes |
 
 ### 8. Guards & HITL
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_ENABLE_GUARDS` | No | `true` | bool | Python runtime | `true`, `false` | No | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_GUARDS_ENABLED` | No | `true` | bool | Python runtime | `true`, `false` | No | Yes (→ `guards.enabled`) |
 | `EB_HITL_CALLBACK_SECRET` | No (recommended for production) | `""` | string | Python runtime, HITL middleware | `<openssl rand -hex 32>` | **Yes** | Yes |
 
 ### 9. Consolidation (Phase 9 "sleep" pipeline)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_DEV_CONSOLIDATION_AUTO_TRIGGER` | No | `"0"` (disabled) | string | Python runtime | `"0"`, `"5m"`, `"1h"`, `"1d"` | No | No |
-| `EB_CONSOLIDATION_BATCH_SIZE` | No | `500` | int | Python runtime | `500`, `1000` | No | No |
-| `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | No | `172800` (48h) | int (seconds) | Python runtime | `172800`, `86400` | No | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_DEV_CONSOLIDATION_AUTO_TRIGGER` | No | `"0"` (disabled) | string | Python runtime | `"0"`, `"5m"`, `"1h"`, `"1d"` | No | Yes |
+| `EB_CONSOLIDATION_BATCH_SIZE` | No | `500` | int | Python runtime | `500`, `1000` | No | Yes |
+| `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | No | `172800` (48h) | int (seconds) | Python runtime | `172800`, `86400` | No | Yes |
 
 ### 10. Successful-Use Feedback (Phase 9, LLM-based, off by default)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_SUCCESSFUL_USE_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | No |
-| `EB_SUCCESSFUL_USE_ENDPOINT` | No | `"http://host.docker.internal:8811/v1"` | string | Python runtime | LiteLLM URL | No | No |
-| `EB_SUCCESSFUL_USE_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | No |
-| `EB_SUCCESSFUL_USE_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | No |
-| `EB_SUCCESSFUL_USE_BATCH_SIZE` | No | `5` | int | Python runtime | `5`, `10` | No | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_SUCCESSFUL_USE_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
+| `EB_SUCCESSFUL_USE_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
+| `EB_SUCCESSFUL_USE_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
+| `EB_SUCCESSFUL_USE_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
+| `EB_SUCCESSFUL_USE_BATCH_SIZE` | No | `5` | int | Python runtime | `5`, `10` | No | Yes |
 
 ### 11. Blocker Extraction (Phase 9, LLM-based, off by default)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_BLOCKER_EXTRACTION_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | No |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | No | `"http://host.docker.internal:8811/v1"` | string | Python runtime | LiteLLM URL | No | No |
-| `EB_BLOCKER_EXTRACTION_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | No |
-| `EB_BLOCKER_EXTRACTION_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | No |
-| `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | No | `3` | int | Python runtime | `3`, `5` | No | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_BLOCKER_EXTRACTION_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
+| `EB_BLOCKER_EXTRACTION_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
+| `EB_BLOCKER_EXTRACTION_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
+| `EB_BLOCKER_EXTRACTION_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
+| `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | No | `3` | int | Python runtime | `3`, `5` | No | Yes |
 
 ### 12. Ingest Pipeline Tuning
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_INGEST_BATCH_SIZE` | No | `6` | int | Python runtime | `6`, `10` | No | No |
-| `EB_INGEST_BATCH_TIMEOUT` | No | `60.0` | float (seconds) | Python runtime | `60.0`, `120.0` | No | No |
-| `EB_INGEST_BUFFER_TTL` | No | `300` | int (seconds) | Python runtime | `300`, `600` | No | No |
-| `EB_EXTRACTION_CONTEXT_FACTS` | No | `20` | int | Python runtime | `20`, `50` | No | No |
-| `EB_EXTRACTION_CONTEXT_TTL` | No | `3600` | int (seconds) | Python runtime | `3600` | No | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_INGEST_BATCH_SIZE` | No | `6` | int | Python runtime | `6`, `10` | No | Yes |
+| `EB_INGEST_BATCH_TIMEOUT` | No | `60.0` | float (seconds) | Python runtime | `60.0`, `120.0` | No | Yes |
+| `EB_INGEST_BUFFER_TTL` | No | `300` | int (seconds) | Python runtime | `300`, `600` | No | Yes |
+| `EB_EXTRACTION_CONTEXT_FACTS` | No | `20` | int | Python runtime | `20`, `50` | No | Yes |
+| `EB_EXTRACTION_CONTEXT_TTL` | No | `3600` | int (seconds) | Python runtime | `3600` | No | Yes |
 
 ### 13. Scoring & Working Set
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
-| `EB_SCORING_SNAPSHOT_TTL` | No | `300` | int (seconds) | Python runtime | `300`, `600` | No | No |
-| `EB_SESSION_GOALS_TTL` | No | `86400` | int (seconds) | Python runtime | `86400` | No | No |
-| `EB_MAX_CONCURRENT_SESSIONS` | No | `100` | int | Python runtime | `100`, `200` | No | No |
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
+| `EB_SCORING_SNAPSHOT_TTL` | No | `300` | int (seconds) | Python runtime | `300`, `600` | No | Yes |
+| `EB_SESSION_GOALS_TTL` | No | `86400` | int (seconds) | Python runtime | `86400` | No | Yes |
+| `EB_MAX_CONCURRENT_SESSIONS` | No | `100` | int | Python runtime | `100`, `200` | No | Yes |
 
 ### 14. TS Plugins (OpenClaw-side)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_GATEWAY_ID` | **Yes** | None (fail if missing) | string | TS Memory + Context plugins | `gw-prod`, `gw-prod-assistant` | No | N/A (TS-only) |
 | `EB_GATEWAY_SHORT_NAME` | No | First 8 chars of `EB_GATEWAY_ID` | string | TS Memory + Context plugins | `prod` | No | N/A (TS-only) |
 | `EB_RUNTIME_URL` | No | `"http://localhost:8420"` | string | TS plugins, `ebrun` CLI, HITL middleware | `http://10.10.0.10:8420` | No | N/A (TS-only) |
-| `EB_HITL_URL` | No | `"http://localhost:8421"` | string | TS plugins (documented), OpenClaw config | `http://10.10.0.10:8421` | No | N/A (TS-only) |
 | `EB_PROFILE` | No | `"coding"` | string | TS Memory + Context plugins | `coding`, `research` | No | N/A (TS-only) |
 
 ### 15. HITL Middleware (separate service)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `HITL_HOST` | No | `"0.0.0.0"` | string | HITL middleware | `0.0.0.0`, `127.0.0.1` | No | N/A |
 | `HITL_PORT` | No | `8421` | int | HITL middleware | `8421` | No | N/A |
-| `HITL_LOG_LEVEL` | No | `"INFO"` | string | HITL middleware | `debug`, `info`, `warning`, `error` (NOT `verbose`) | No | N/A |
+| `HITL_LOG_LEVEL` | No | `"INFO"` | string | HITL middleware | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` — **NOT `VERBOSE`** (HITL uses stock Python `logging` and never registers the runtime's level-15 `VERBOSE`; setting `HITL_LOG_LEVEL=VERBOSE` raises `ValueError: Unknown level: 'VERBOSE'` at HITL startup) | No | N/A |
 | `EB_HITL_CALLBACK_SECRET` | No (recommended) | `""` | string | HITL middleware (must match runtime) | HMAC-SHA256 hex string | **Yes** | N/A |
 | `EB_RUNTIME_URL` | No | `"http://localhost:8420"` | string | HITL middleware | `http://localhost:8420` | No | N/A |
 
 ### 16. Cognee Internal (set automatically, not user-facing)
 
-| Variable | Required | Default | Type | Read by | Example values | Secret? | `from_yaml()` override |
-|----------|----------|---------|------|---------|----------------|---------|----------------------|
+| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
+|----------|----------|---------|------|---------|----------------|---------|--------------|
 | `COGNEE_DISABLE_TELEMETRY` | No | `"true"` (set by `elephantbroker/__init__.py` at import time) | string | Cognee SDK | `true` | No | N/A |
 | `ENABLE_BACKEND_ACCESS_CONTROL` | No | `"false"` (set by `configure_cognee()`) | string | Cognee SDK | `false` | No | N/A |
 | `COGNEE_SKIP_CONNECTION_TEST` | No | Not set (only needed in test env) | string | Cognee SDK (test only) | `true` | No | N/A |
@@ -277,11 +277,11 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_BLOCKER_EXTRACTION_API_KEY` | Blocker extraction LLM API key (falls back to `EB_LLM_API_KEY`) |
 | `EB_HITL_CALLBACK_SECRET` | HMAC-SHA256 secret for HITL approval callbacks |
 
-### Summary: `from_yaml()` curated override list
+### Summary: env var override registry
 
-These 14 env vars override YAML config values when both are set (all others are `from_env()` only):
+After the F2/F3 unification there is **no curated subset** — every entry in `ENV_OVERRIDE_BINDINGS` (`elephantbroker/schemas/config.py`) is honored on every load. The registry currently contains **72 bindings** spanning identity, Cognee, LLM, compaction LLM, reranker, infra, trace, ClickHouse, embedding cache, scoring, HITL, successful-use, blocker-extraction, consolidation, and the top-level toggles.
 
-`EB_GATEWAY_ID`, `EB_ORG_ID`, `EB_TEAM_ID`, `EB_NEO4J_URI`, `EB_QDRANT_URL`, `EB_REDIS_URL`, `EB_OTEL_ENDPOINT`, `EB_EMBEDDING_API_KEY`, `EB_LLM_API_KEY`, `EB_LLM_MODEL`, `EB_LLM_ENDPOINT`, `EB_RERANKER_ENDPOINT`, `EB_RERANKER_API_KEY`, `EB_HITL_CALLBACK_SECRET`
+Read `ENV_OVERRIDE_BINDINGS` directly when you need the authoritative list — the inverse contract test `tests/test_env_var_registry_completeness.py::TestEnvVarRegistryCompleteness` enforces that the registry, the schema fields, and `default.yaml` stay in sync, so the registry is the canonical source of truth and cannot drift from the docs without breaking CI.
 
 ### Summary: Minimum production env file
 
@@ -314,7 +314,7 @@ COGNEE_DISABLE_TELEMETRY=true
 **Total: 76 distinct environment variables** across all components (57 Python runtime `EB_*`, 5 TS-plugin-specific, 5 HITL middleware, 3 Cognee internal, plus 6 shared between components).
 
 **Key files examined:**
-- `elephantbroker/schemas/config.py` -- all `from_env()` and `from_yaml()` env var reads (canonical source)
+- `elephantbroker/schemas/config.py` -- `ENV_OVERRIDE_BINDINGS` registry + `ElephantBrokerConfig.load()` (canonical source after F2/F3)
 - `elephantbroker/__init__.py` -- `COGNEE_DISABLE_TELEMETRY` early-set
 - `elephantbroker/runtime/adapters/cognee/config.py` -- `COGNEE_DISABLE_TELEMETRY` + `ENABLE_BACKEND_ACCESS_CONTROL`
 - `elephantbroker/cli.py` -- `EB_ACTOR_ID`, `EB_RUNTIME_URL` for `ebrun` CLI
@@ -329,7 +329,7 @@ COGNEE_DISABLE_TELEMETRY=true
 
 ## YAML Configuration
 
-ElephantBroker supports YAML-based configuration via `ElephantBrokerConfig.from_yaml(path)`. The YAML structure mirrors the Pydantic config schema hierarchy.
+ElephantBroker is loaded via `ElephantBrokerConfig.load(path)` (or `load(None)` for the packaged default — both go through the same internal `from_yaml()` reader). The YAML structure mirrors the Pydantic config schema hierarchy.
 
 ### Example `config.yaml`
 
@@ -341,12 +341,12 @@ cognee:
   qdrant_url: http://qdrant:6333
 
 llm:
-  model: openai/gemini-2.5-pro
+  model: openai/gemini/gemini-2.5-pro
   api_key: your-api-key-here
   endpoint: http://litellm:8811/v1
 
 embedding:
-  model: openai/text-embedding-3-large
+  model: gemini/text-embedding-004
 
 redis:
   url: redis://redis:6379
@@ -369,7 +369,7 @@ trace:
 
 ### Environment Override Precedence
 
-When using `from_yaml()`, a curated set of `EB_*` environment variables will override YAML values. See the [Configuration Schemas](#configuration-schemas) section for the full `env_overrides` list.
+After `load()` reads the YAML, every binding in `ENV_OVERRIDE_BINDINGS` (`elephantbroker/schemas/config.py`) is applied on top — there is no curated subset. See the [Configuration Schemas](#configuration-schemas) section, or read `ENV_OVERRIDE_BINDINGS` directly, for the full list of env-var → YAML-field mappings.
 
 
 ---
@@ -379,41 +379,25 @@ When using `from_yaml()`, a curated set of `EB_*` environment variables will ove
 
 ### Overview
 
-All configuration is defined in `elephantbroker/schemas/config.py` with the top-level model `ElephantBrokerConfig`. Configuration can be loaded two ways:
+All configuration is defined in `elephantbroker/schemas/config.py` with the top-level model `ElephantBrokerConfig`. After the F2/F3 unification there is a single load entry point:
 
-- **`from_env()`** -- builds config entirely from `EB_*` environment variables (falling back to hardcoded defaults)
-- **`from_yaml(path)`** -- loads a YAML file first, then applies a curated set of `EB_*` env var overrides on top
+- **`load(path: str | None)`** -- if `path` is given, reads that YAML; if `None`, reads the packaged `elephantbroker/config/default.yaml`. Either way the YAML is parsed and validated first, then every binding in `ENV_OVERRIDE_BINDINGS` is applied on top, then `_apply_inheritance_fallbacks()` runs to populate empty derived secrets and endpoints.
+
+The internal classmethod `from_yaml(path)` is the implementation backbone (and is what `load()` calls). The legacy `from_env()` classmethod has been removed — env-only callers now flow through `load(None)` and the packaged default YAML.
 
 **Resolution order:** `EB_* env var (if set)` > `YAML value` > `model default`
 
-Additionally, `ConsolidationConfig` is lazily loaded via a property on `ElephantBrokerConfig` to avoid a circular import with `elephantbroker/schemas/consolidation.py`.
+`ConsolidationConfig` is now a regular field on `ElephantBrokerConfig` (F4/TODO-3-009 — it used to be a `@property` reading env vars directly, which raced the registry). It is loaded like every other config section.
 
 ---
 
-### `from_env()` -- Full Environment Variable Mapping
+### `EB_*` -- Full Environment Variable Mapping
 
-Every parameter below shows the `EB_*` env var that maps to it in `from_env()`. Parameters without an env var listed are only settable via YAML or code.
+Every parameter below shows the `EB_*` env var that maps to it via `ENV_OVERRIDE_BINDINGS`. Parameters without an env var listed are only settable via YAML or code.
 
-#### `from_yaml()` -- Env Override List
+#### `ENV_OVERRIDE_BINDINGS` -- Env Override Registry
 
-When loading from YAML, only the following env vars override YAML values (the "curated set"):
-
-| Env Var | Config Path |
-|---------|------------|
-| `EB_GATEWAY_ID` | `gateway.gateway_id` |
-| `EB_ORG_ID` | `gateway.org_id` |
-| `EB_TEAM_ID` | `gateway.team_id` |
-| `EB_NEO4J_URI` | `cognee.neo4j_uri` |
-| `EB_QDRANT_URL` | `cognee.qdrant_url` |
-| `EB_REDIS_URL` | `infra.redis_url` |
-| `EB_OTEL_ENDPOINT` | `infra.otel_endpoint` |
-| `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` |
-| `EB_LLM_API_KEY` | `llm.api_key` |
-| `EB_LLM_MODEL` | `llm.model` |
-| `EB_LLM_ENDPOINT` | `llm.endpoint` |
-| `EB_RERANKER_ENDPOINT` | `reranker.endpoint` |
-| `EB_RERANKER_API_KEY` | `reranker.api_key` |
-| `EB_HITL_CALLBACK_SECRET` | `hitl.callback_hmac_secret` |
+The registry is the single canonical list of every env-var → YAML-field mapping. After F2/F3 every binding is honored on every load (no curated subset). Read `elephantbroker/schemas/config.py` directly for the authoritative list — currently 72 bindings — and rely on the inverse contract test (`tests/test_env_var_registry_completeness.py`) to keep it in sync with the schema and packaged YAML.
 
 #### YAML Structure
 
@@ -427,13 +411,13 @@ cognee:
   qdrant_url: "http://10.10.0.10:6333"
   default_dataset: elephantbroker
   embedding_provider: openai
-  embedding_model: "openai/text-embedding-3-large"
+  embedding_model: "gemini/text-embedding-004"
   embedding_endpoint: "http://10.10.0.10:8811/v1"
   embedding_api_key: ""
-  embedding_dimensions: 1024
+  embedding_dimensions: 768
 
 llm:
-  model: "gemini/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://10.10.0.10:8811/v1"
   api_key: ""
   max_tokens: 8192
@@ -462,7 +446,6 @@ infra:
 ## ... all other sub-sections
 default_profile: coding
 enable_trace_ledger: true
-enable_guards: true
 max_concurrent_sessions: 100
 ```
 
@@ -474,7 +457,6 @@ max_concurrent_sessions: 100
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `default_profile` | `str` | `"coding"` | `EB_DEFAULT_PROFILE` | -- | Which profile (coding/research/managerial/worker/personal_assistant) governs scoring weights, retrieval policy, compaction policy, guard strictness, and autorecall when no profile is specified | Wrong profile name causes fallback or error at bootstrap; wrong profile type yields suboptimal scoring weights and retrieval behavior | `coding` / `coding` / `coding` (or per-deployment) |
 | `enable_trace_ledger` | `bool` | `True` | `EB_ENABLE_TRACE_LEDGER` | -- | Enables/disables TraceLedger in-memory event recording and OTEL trace export | Disabling loses all trace/audit visibility; only disable for benchmarks | `true` / `true` / `true` |
-| `enable_guards` | `bool` | `True` | `EB_ENABLE_GUARDS` | -- | Master switch for the 6-layer guard pipeline (autonomy classification, static rules, BM25/semantic, structural validators, reinjection, LLM escalation) | Disabling removes all safety guardrails; only for testing | `true` / `true` / `true` |
 | `max_concurrent_sessions` | `int` | `100` | `EB_MAX_CONCURRENT_SESSIONS` | `ge=1` | Limits concurrent sessions the runtime will accept | Too low causes session rejections under load; too high risks OOM from Redis/Neo4j connection pressure | `10` / `50` / `100`-`500` |
 | `consolidation_min_retention_seconds` | `int` | `172800` (48h) | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `ge=3600` | Minimum age (seconds) a fact must have before consolidation pipeline can decay/archive it | Too low causes premature fact decay (data loss); too high means stale facts linger forever | `3600` / `86400` / `172800` |
 
@@ -492,10 +474,10 @@ Path prefix: `cognee.*`
 | `cognee.qdrant_url` | `str` | `"http://localhost:6333"` | `EB_QDRANT_URL` | -- | Qdrant vector store HTTP URL for embedding storage and similarity search | Wrong URL = no vector search; retrieval degrades to graph-only | `http://localhost:6333` / `http://qdrant-staging:6333` / `http://qdrant-prod:6333` |
 | `cognee.default_dataset` | `str` | `"elephantbroker"` | `EB_DEFAULT_DATASET` | -- | Default Cognee dataset name (prefixed with `{gateway_id}__` at runtime) | Wrong name = data isolation issues between deployments | `elephantbroker` / `elephantbroker` / `elephantbroker` |
 | `cognee.embedding_provider` | `str` | `"openai"` | `EB_EMBEDDING_PROVIDER` | -- | Embedding provider name passed to Cognee config; must be `"openai"` for LiteLLM-compatible endpoints | Wrong provider = embedding calls fail | `openai` / `openai` / `openai` |
-| `cognee.embedding_model` | `str` | `"openai/text-embedding-3-large"` | `EB_EMBEDDING_MODEL` | -- | Embedding model name (must include `openai/` prefix for Cognee compatibility via LiteLLM) | Missing `openai/` prefix causes Cognee to route to wrong provider; wrong model = dimension mismatch or API errors | `openai/text-embedding-3-large` / same / same |
+| `cognee.embedding_model` | `str` | `"gemini/text-embedding-004"` | `EB_EMBEDDING_MODEL` | -- | Embedding model name routed by LiteLLM. Provider-prefixed (`gemini/`, `openai/`, etc.). Cognee uses the OpenAI client style regardless of backend. | Wrong model = dimension mismatch or API errors; must match what your LiteLLM proxy actually serves | `gemini/text-embedding-004` / same / `openai/text-embedding-3-large` |
 | `cognee.embedding_endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_EMBEDDING_ENDPOINT` | -- | OpenAI-compatible embedding API endpoint (typically LiteLLM proxy) | Wrong endpoint = all embedding operations fail, no vector search, no dedup | `http://localhost:8811/v1` / `http://litellm-staging:8811/v1` / `http://litellm-prod:8811/v1` |
-| `cognee.embedding_api_key` | `str` | `""` | `EB_EMBEDDING_API_KEY` | -- | API key for embedding endpoint; also used as fallback for `llm.api_key` in `from_env()` | Missing key = 401 from embedding endpoint (unless endpoint is unauthenticated) | `""` (local) / `sk-...` / `sk-...` |
-| `cognee.embedding_dimensions` | `int` | `1024` | `EB_EMBEDDING_DIMENSIONS` | `ge=1` | Embedding vector dimensionality; must match model's actual output dimensions | Mismatch = Qdrant collection creation failure or corrupted similarity scores | `1024` / `1024` / `1024` |
+| `cognee.embedding_api_key` | `str` | `""` | `EB_EMBEDDING_API_KEY` | -- | API key for embedding endpoint; also used as fallback for `llm.api_key` via `_apply_inheritance_fallbacks()` (post-F2/F3 unification) | Missing key = 401 from embedding endpoint (unless endpoint is unauthenticated) | `""` (local) / `sk-...` / `sk-...` |
+| `cognee.embedding_dimensions` | `int` | `768` | `EB_EMBEDDING_DIMENSIONS` | `ge=1` | Embedding vector dimensionality; MUST match the configured `embedding_model`'s actual output dimensions | Mismatch = Qdrant collection creation failure or corrupted similarity scores. Changing this on existing data orphans the Qdrant collections — requires re-cognify | `768` (gemini/text-embedding-004) / same / `1024` (openai/text-embedding-3-large) |
 
 ---
 
@@ -505,9 +487,9 @@ Path prefix: `llm.*`
 
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
-| `llm.model` | `str` | `"gemini/gemini-2.5-pro"` | `EB_LLM_MODEL` | -- | Primary LLM model name for fact extraction, memory class classification, supersession detection, goal refinement | Wrong model = API errors or poor extraction quality | `gemini/gemini-2.5-pro` / same / same |
+| `llm.model` | `str` | `"openai/gemini/gemini-2.5-pro"` | `EB_LLM_MODEL` | -- | Primary LLM model name for fact extraction, memory class classification, supersession detection, goal refinement. **MUST keep `openai/` prefix** — Cognee requires it for routing through its OpenAI-compatible client and strips it internally before sending to LiteLLM (LiteLLM sees `gemini/gemini-2.5-pro`). | Without `openai/` prefix, Cognee hangs at startup on the LLM connection test. Wrong model = API errors or poor extraction quality | `openai/gemini/gemini-2.5-pro` / same / same |
 | `llm.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_LLM_ENDPOINT` | -- | OpenAI-compatible LLM API endpoint (LiteLLM proxy) | Wrong endpoint = all LLM-based pipelines fail (extraction, classification, summarization) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
-| `llm.api_key` | `str` | `""` | `EB_LLM_API_KEY` | -- | API key for LLM endpoint; in `from_env()`, falls back to `EB_EMBEDDING_API_KEY` if empty | Missing key = 401 from LLM endpoint | `""` (local) / `sk-...` / `sk-...` |
+| `llm.api_key` | `str` | `""` | `EB_LLM_API_KEY` | -- | API key for LLM endpoint; falls back to `cognee.embedding_api_key` via `_apply_inheritance_fallbacks()` if empty after env overrides | Missing key = 401 from LLM endpoint | `""` (local) / `sk-...` / `sk-...` |
 | `llm.max_tokens` | `int` | `8192` | `EB_LLM_MAX_TOKENS` | `ge=1` | Max output tokens for general LLM calls | Too low = truncated responses; too high = wasted tokens/cost | `8192` / `8192` / `8192` |
 | `llm.temperature` | `float` | `0.1` | `EB_LLM_TEMPERATURE` | `ge=0.0, le=2.0` | LLM sampling temperature for extraction/classification tasks | Too high = nondeterministic/hallucinated extractions; too low = overly conservative | `0.1` / `0.1` / `0.1` |
 | `llm.extraction_max_input_tokens` | `int` | `4000` | `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` | `ge=100` | Max input tokens per extraction batch (truncates conversation messages) | Too low = context loss, poor extraction; too high = slow/expensive extraction | `4000` / `4000` / `6000` |
@@ -549,7 +531,7 @@ Path prefix: `infra.*`
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `infra.redis_url` | `str` | `"redis://localhost:6379"` | `EB_REDIS_URL` | -- | Redis connection URL for caching (embedding cache, session state, working set snapshots, ingest buffers, guard history, HITL queue) | Wrong URL = runtime cannot start; all session state, caching, and real-time features break | `redis://localhost:6379` / `redis://redis:6379` / `redis://redis-prod:6379` |
 | `infra.otel_endpoint` | `str \| None` | `None` | `EB_OTEL_ENDPOINT` | -- | OTEL collector gRPC endpoint for distributed tracing export | None = no trace export (traces only in-memory); wrong URL = traces silently dropped | `None` / `http://otel-collector:4317` / `http://otel-prod:4317` |
-| `infra.log_level` | `str` | `"INFO"` | `EB_LOG_LEVEL` | -- | Python logging level (DEBUG/INFO/WARNING/ERROR) | Too verbose (DEBUG) in prod = log volume explosion; too quiet = missed diagnostics | `DEBUG` / `INFO` / `WARNING` |
+| `infra.log_level` | `str` | `"INFO"` | `EB_LOG_LEVEL` | -- | Python logging level. Accepts `DEBUG`, `VERBOSE`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (case-insensitive at parse, normalized upper-case). The runtime registers a custom `VERBOSE`=15 level via `register_verbose_level()` in `runtime/observability.py` (between `DEBUG`=10 and `INFO`=20). **Note:** the HITL middleware uses stock Python `logging` and never registers `VERBOSE` — `HITL_LOG_LEVEL=VERBOSE` raises `ValueError: Unknown level: 'VERBOSE'`. See B10 note in §7. | Too verbose (DEBUG) in prod = log volume explosion; too quiet = missed diagnostics | `DEBUG` / `INFO` / `WARNING` |
 | `infra.metrics_ttl_seconds` | `int` | `3600` | `EB_METRICS_TTL_SECONDS` | `ge=60` | TTL for Prometheus metrics data retained in memory | Too low = metrics disappear before scrape; too high = memory usage grows | `3600` / `3600` / `3600` |
 
 #### `TraceConfig` (nested in `infra.trace.*`)
@@ -654,8 +636,8 @@ Path prefix: `successful_use.*`
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `successful_use.enabled` | `bool` | `False` | `EB_SUCCESSFUL_USE_ENABLED` | -- | Enables LLM-based batch evaluation of which injected facts actually contributed to agent actions | Enabling is expensive (LLM calls per turn); disabling loses D10 scoring accuracy | `false` / `false` / `true` |
-| `successful_use.endpoint` | `str` | `"http://host.docker.internal:8811/v1"` | `EB_SUCCESSFUL_USE_ENDPOINT` | -- | LLM endpoint for use evaluation (typically a cheaper/faster model) | Wrong endpoint = evaluation fails silently (async) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
-| `successful_use.api_key` | `str` | `""` | `EB_SUCCESSFUL_USE_API_KEY` | -- | API key (falls back to `EB_LLM_API_KEY` in `from_env()`) | Missing = auth failure on evaluation calls | `""` / `sk-...` / `sk-...` |
+| `successful_use.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_SUCCESSFUL_USE_ENDPOINT` | -- | LLM endpoint for use evaluation (typically a cheaper/faster model) | Wrong endpoint = evaluation fails silently (async) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
+| `successful_use.api_key` | `str` | `""` | `EB_SUCCESSFUL_USE_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure on evaluation calls | `""` / `sk-...` / `sk-...` |
 | `successful_use.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_SUCCESSFUL_USE_MODEL` | -- | LLM model for use evaluation (flash model for cost efficiency) | Wrong model = evaluation errors | `gemini/gemini-2.5-flash` / same / same |
 | `successful_use.batch_size` | `int` | `5` | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `ge=1` | Number of facts evaluated per LLM call | Too low = many LLM calls (expensive); too high = context window overflow | `5` / `5` / `10` |
 | `successful_use.batch_timeout_seconds` | `float` | `120.0` | -- | `ge=10.0` | Timeout for each use evaluation LLM call | Too low = frequent timeouts; too high = blocks turn processing | `120.0` / `120.0` / `60.0` |
@@ -734,7 +716,7 @@ Path prefix: `guards.*`
 
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
-| `guards.enabled` | `bool` | `True` | -- | -- | Enables the guard engine (separate from `enable_guards` top-level; this controls the GuardEngine module specifically) | Disabling = no guard evaluations even if `enable_guards` is true | `true` / `true` / `true` |
+| `guards.enabled` | `bool` | `True` | `EB_GUARDS_ENABLED` | -- | Master switch for the 6-layer guard pipeline (autonomy classification, static rules, BM25/semantic, structural validators, reinjection, LLM escalation). When `false`, `RedLineGuardEngine.preflight_check()` short-circuits to PASS without invoking any layer. | Disabling removes all safety guardrails; only for testing or controlled benchmarks | `true` / `true` / `true` |
 | `guards.builtin_rules_enabled` | `bool` | `True` | -- | -- | Enables the 12 built-in static guard rules (Layer 2) | Disabling = no static rule matching, only semantic/LLM guards remain | `true` / `true` / `true` |
 | `guards.history_ttl_seconds` | `int` | `86400` | -- | `ge=60` | TTL for guard evaluation history stored in Redis | Too low = guard history lost mid-session; too high = stale history accumulates | `86400` / `86400` / `86400` |
 | `guards.max_history_events` | `int` | `50` | -- | `ge=1` | Maximum guard evaluation events retained per session | Too low = insufficient history for pattern analysis; too high = memory pressure | `50` / `50` / `100` |
@@ -788,8 +770,8 @@ Path prefix: `compaction_llm.*`
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `compaction_llm.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_COMPACTION_LLM_MODEL` | -- | LLM model for compaction summarization (uses cheaper model than extraction) | Wrong model = compaction summarization errors | `gemini/gemini-2.5-flash` / same / same |
-| `compaction_llm.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_COMPACTION_LLM_ENDPOINT` | -- | LLM endpoint for compaction (falls back to `llm.endpoint` in `from_env()`) | Wrong endpoint = compaction summaries fail | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
-| `compaction_llm.api_key` | `str` | `""` | `EB_COMPACTION_LLM_API_KEY` | -- | API key (falls back to `EB_LLM_API_KEY` in `from_env()`) | Missing = auth failure on compaction LLM calls | `""` / `sk-...` / `sk-...` |
+| `compaction_llm.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_COMPACTION_LLM_ENDPOINT` | -- | LLM endpoint for compaction (falls back to `llm.endpoint` via `_apply_inheritance_fallbacks()` Tier 3 / F7) | Wrong endpoint = compaction summaries fail | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
+| `compaction_llm.api_key` | `str` | `""` | `EB_COMPACTION_LLM_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure on compaction LLM calls | `""` / `sk-...` / `sk-...` |
 | `compaction_llm.max_tokens` | `int` | `2000` | -- | `ge=100` | Max output tokens for compaction summaries | Too low = truncated summaries; too high = verbose summaries wasting context | `2000` / `2000` / `2000` |
 | `compaction_llm.temperature` | `float` | `0.2` | -- | `ge=0.0, le=2.0` | Temperature for compaction summarization | Too high = non-deterministic summaries; too low = overly rigid | `0.2` / `0.2` / `0.2` |
 
@@ -856,8 +838,8 @@ Path prefix: `blocker_extraction.*`
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `blocker_extraction.enabled` | `bool` | `False` | `EB_BLOCKER_EXTRACTION_ENABLED` | -- | Enables LLM-based extraction of task blockers from conversation | Enabling is expensive (LLM calls every N turns); disabling = no automatic blocker detection | `false` / `false` / `true` |
-| `blocker_extraction.endpoint` | `str` | `"http://host.docker.internal:8811/v1"` | `EB_BLOCKER_EXTRACTION_ENDPOINT` | -- | LLM endpoint for blocker extraction | Wrong endpoint = extraction fails silently | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
-| `blocker_extraction.api_key` | `str` | `""` | `EB_BLOCKER_EXTRACTION_API_KEY` | -- | API key (falls back to `EB_LLM_API_KEY` in `from_env()`) | Missing = auth failure | `""` / `sk-...` / `sk-...` |
+| `blocker_extraction.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_BLOCKER_EXTRACTION_ENDPOINT` | -- | LLM endpoint for blocker extraction | Wrong endpoint = extraction fails silently | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
+| `blocker_extraction.api_key` | `str` | `""` | `EB_BLOCKER_EXTRACTION_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure | `""` / `sk-...` / `sk-...` |
 | `blocker_extraction.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_BLOCKER_EXTRACTION_MODEL` | -- | LLM model for blocker extraction | Wrong model = extraction errors | `gemini/gemini-2.5-flash` / same / same |
 | `blocker_extraction.run_every_n_turns` | `int` | `3` | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `ge=1` | Run blocker extraction every N turns | Too low = excessive LLM calls; too high = delayed blocker detection | `3` / `3` / `5` |
 | `blocker_extraction.recent_messages_window` | `int` | `10` | -- | `ge=1` | Number of recent messages fed to blocker extraction LLM | Too low = misses blockers in earlier messages; too high = expensive prompts | `10` / `10` / `10` |
@@ -876,11 +858,11 @@ Path prefix: `profile_cache.*`
 
 ### `ConsolidationConfig` -- Consolidation ("Sleep") Pipeline (Phase 9)
 
-Path prefix: `consolidation.*` (accessed via `ElephantBrokerConfig.consolidation` property, lazily loaded from `elephantbroker/schemas/consolidation.py`)
+Path prefix: `consolidation.*`. After F4 (TODO-3-009), `consolidation` is a regular `ElephantBrokerConfig` field — it used to be a `@property` that read env vars directly inside the getter, which raced `ENV_OVERRIDE_BINDINGS`, hid the vars from the inverse contract test, and silently ignored env vars set after the first access. Routing it through the standard registry kills both bugs.
 
-Env vars are read directly in the property (not via `from_env()`):
-- `EB_DEV_CONSOLIDATION_AUTO_TRIGGER` -> `dev_auto_trigger_interval`
-- `EB_CONSOLIDATION_BATCH_SIZE` -> `batch_size`
+The two consolidation env vars now flow through `ENV_OVERRIDE_BINDINGS` like every other binding:
+- `EB_DEV_CONSOLIDATION_AUTO_TRIGGER` → `consolidation.dev_auto_trigger_interval`
+- `EB_CONSOLIDATION_BATCH_SIZE` → `consolidation.batch_size`
 
 #### Fact Loading
 
@@ -978,7 +960,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_AGENT_AUTHORITY_LEVEL` | `gateway.agent_authority_level` | `int` | `0` |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | `str` | `""` (fallback: `EB_LLM_API_KEY`) |
 | `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `bool` | `false` |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `str` | `http://host.docker.internal:8811/v1` |
+| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `int` | `3` |
 | `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `str` | `gemini/gemini-2.5-flash` |
 | `EB_CLICKHOUSE_DATABASE` | `infra.clickhouse.database` | `str` | `otel` |
@@ -996,11 +978,11 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` | `str` | `""` |
 | `EB_EMBEDDING_CACHE_ENABLED` | `embedding_cache.enabled` | `bool` | `true` |
 | `EB_EMBEDDING_CACHE_TTL` | `embedding_cache.ttl_seconds` | `int` | `3600` |
-| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `int` | `1024` |
+| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `int` | `768` |
 | `EB_EMBEDDING_ENDPOINT` | `cognee.embedding_endpoint` | `str` | `http://localhost:8811/v1` |
-| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `str` | `openai/text-embedding-3-large` |
+| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `str` | `gemini/text-embedding-004` |
 | `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `str` | `openai` |
-| `EB_ENABLE_GUARDS` | `enable_guards` | `bool` | `true` |
+| `EB_GUARDS_ENABLED` | `guards.enabled` | `bool` | `true` |
 | `EB_ENABLE_TRACE_LEDGER` | `enable_trace_ledger` | `bool` | `true` |
 | `EB_EXTRACTION_CONTEXT_FACTS` | `llm.extraction_context_facts` | `int` | `20` |
 | `EB_EXTRACTION_CONTEXT_TTL` | `llm.extraction_context_ttl_seconds` | `int` | `3600` |
@@ -1016,7 +998,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` | `llm.extraction_max_input_tokens` | `int` | `4000` |
 | `EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS` | `llm.extraction_max_output_tokens` | `int` | `16384` |
 | `EB_LLM_MAX_TOKENS` | `llm.max_tokens` | `int` | `8192` |
-| `EB_LLM_MODEL` | `llm.model` | `str` | `gemini/gemini-2.5-pro` |
+| `EB_LLM_MODEL` | `llm.model` | `str` | `openai/gemini/gemini-2.5-pro` |
 | `EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS` | `llm.summarization_max_output_tokens` | `int` | `200` |
 | `EB_LLM_SUMMARIZATION_MIN_CHARS` | `llm.summarization_min_artifact_chars` | `int` | `500` |
 | `EB_LLM_TEMPERATURE` | `llm.temperature` | `float` | `0.1` |
@@ -1039,7 +1021,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_SUCCESSFUL_USE_API_KEY` | `successful_use.api_key` | `str` | `""` (fallback: `EB_LLM_API_KEY`) |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `int` | `5` |
 | `EB_SUCCESSFUL_USE_ENABLED` | `successful_use.enabled` | `bool` | `false` |
-| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `str` | `http://host.docker.internal:8811/v1` |
+| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `str` | `gemini/gemini-2.5-flash` |
 | `EB_TEAM_ID` | `gateway.team_id` | `str` | `None` |
 | `EB_TRACE_MEMORY_MAX_EVENTS` | `infra.trace.memory_max_events` | `int` | `10000` |
@@ -1049,21 +1031,19 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 
 ### API Key Fallback Chain
 
-The `from_env()` method implements a fallback chain for API keys:
+After F2/F3, `_apply_inheritance_fallbacks()` (renamed from `_apply_api_key_fallbacks` in F7 once endpoint inheritance was added) runs after env overrides on every `load()`. The chain runs in tiers and only fires when the target field is empty after env override application — explicit YAML or env values are always respected.
 
-1. `EB_EMBEDDING_API_KEY` -- standalone embedding key
-2. `EB_LLM_API_KEY` -- primary LLM key; if empty, falls back to `EB_EMBEDDING_API_KEY`
-3. `EB_COMPACTION_LLM_API_KEY` -- if empty, falls back to resolved `llm_api_key`
-4. `EB_SUCCESSFUL_USE_API_KEY` -- if empty, falls back to resolved `llm_api_key`
-5. `EB_BLOCKER_EXTRACTION_API_KEY` -- if empty, falls back to resolved `llm_api_key`
+**Tier 1:** `llm.api_key` ← `cognee.embedding_api_key` (if `llm.api_key` is empty)
+**Tier 2:** `compaction_llm.api_key`, `successful_use.api_key`, `blocker_extraction.api_key` ← `llm.api_key` (each only if its own value is empty)
+**Tier 3 (F7):** `compaction_llm.endpoint` ← `llm.endpoint` (if `compaction_llm.endpoint` is empty)
 
-In practice, setting `EB_EMBEDDING_API_KEY` alone covers all LLM/embedding calls when using a single LiteLLM proxy.
+In practice, setting `EB_EMBEDDING_API_KEY` alone covers all LLM/embedding calls when using a single LiteLLM proxy. Because there is now exactly one load path (the F2/F3 unification removed the asymmetry between env-only and YAML+env modes), the chain works identically whether you use `--config` or rely on the packaged default.
 
 ---
 
-### Parameters Only Settable via YAML (no env var in `from_env()`)
+### Parameters Only Settable via YAML (not in `ENV_OVERRIDE_BINDINGS`)
 
-These parameters have no `EB_*` env var mapping and can only be configured via YAML or code:
+These parameters have no `EB_*` env var mapping in `ENV_OVERRIDE_BINDINGS` and can only be configured via YAML or code:
 
 - `reranker.enabled`, `reranker.timeout_seconds`, `reranker.batch_size`, `reranker.max_documents`, `reranker.fallback_on_error`, `reranker.top_n`
 - `infra.trace.memory_ttl_seconds`
@@ -1862,35 +1842,41 @@ def main():
 #### Build Stages
 
 ```dockerfile
-## Stage 1: Builder
+## Stage 1: Builder — copies the uv binary from Astral's official image
 FROM python:3.11-slim AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
+
 WORKDIR /app
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock ./
 COPY elephantbroker/ elephantbroker/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir . && \
-    pip install --no-cache-dir --force-reinstall --no-deps 'mistralai>=1.0'
+
+# uv sync --frozen installs EXACTLY what uv.lock specifies
+RUN uv sync --frozen --no-dev
 
 ## Stage 2: Runtime
 FROM python:3.11-slim AS runtime
-WORKDIR /app
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /app/elephantbroker /app/elephantbroker
-COPY elephantbroker/config/default.yaml /app/config/default.yaml
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/elephantbroker /app/elephantbroker
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY elephantbroker/config/default.yaml /etc/elephantbroker/default.yaml
+
+ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8420
-ENTRYPOINT ["elephantbroker", "serve", "--config", "/app/config/default.yaml"]
+ENTRYPOINT ["elephantbroker", "serve", "--config", "/etc/elephantbroker/default.yaml"]
 ```
 
 **Key details:**
 - **Base image:** `python:3.11-slim` (both stages)
-- **Two-stage build:** builder installs deps, runtime copies only installed packages
-- **mistralai workaround:** Force-reinstalled `--no-deps` to fix broken namespace package from cognee transitive dep
-- **Baked-in config:** `elephantbroker/config/default.yaml` copied to `/app/config/default.yaml`
+- **Package manager:** uv (Astral's `ghcr.io/astral-sh/uv:0.11.3` image), not pip — same as the native install path. Bit-for-bit identical environments between Docker and bare-metal deployments.
+- **Lockfile-driven:** `uv sync --frozen` installs exactly what `uv.lock` specifies. No transitive drift.
+- **No mistralai workaround needed:** uv's holistic resolver picks `mistralai==1.12.4` (a working modern version) automatically. The pip-era `--force-reinstall --no-deps 'mistralai>=1.0'` hack has been removed.
+- **Baked-in config:** `elephantbroker/config/default.yaml` copied to `/etc/elephantbroker/default.yaml`
 - **Required env var at runtime:** `EB_GATEWAY_ID` (must be set when running the container)
 - **Optional env vars:** `EB_ORG_ID`, `EB_TEAM_ID`, `EB_ACTOR_ID`, `EB_NEO4J_URI`, `EB_QDRANT_URL`, `EB_REDIS_URL`
-- **NOTE:** DEPLOYMENT.md states the Dockerfile has unresolved dep issues and the runtime should run as a native Python venv, not Docker
+- **NOTE:** Per `CLAUDE.md`, the Dockerfile is for dev/CI only — production deployments use `deploy/install.sh` on a real host.
 
 ---
 
@@ -1935,8 +1921,8 @@ The `ElephantBrokerConfig` Pydantic model contains 25+ config sections. Top-leve
 | Section | Purpose | Key Defaults |
 |---------|---------|-------------|
 | `gateway` | Gateway/agent/org identity | `gateway_id: "local"`, `agent_authority_level: 0` |
-| `cognee` | Neo4j + Qdrant + Embedding config | `embedding_model: "openai/text-embedding-3-large"`, `embedding_dimensions: 1024` |
-| `llm` | LLM for extraction/classification | `model: "gemini/gemini-2.5-pro"`, `temperature: 0.1`, `max_tokens: 8192` |
+| `cognee` | Neo4j + Qdrant + Embedding config | `embedding_model: "gemini/text-embedding-004"`, `embedding_dimensions: 768` |
+| `llm` | LLM for extraction/classification | `model: "openai/gemini/gemini-2.5-pro"`, `temperature: 0.1`, `max_tokens: 8192` |
 | `reranker` | Cross-encoder reranking | `model: "Qwen/Qwen3-Reranker-4B"`, `endpoint: "http://localhost:1235"`, `timeout: 10s` |
 | `infra` | Redis + OTEL + ClickHouse | `redis_url: "redis://localhost:6379"` |
 | `scoring` | Working set scoring pipeline | `neutral_use_prior: 0.5`, `cheap_prune_max_candidates: 80` |
@@ -1956,26 +1942,9 @@ The `ElephantBrokerConfig` Pydantic model contains 25+ config sections. Top-leve
 Environment variable (if set) > YAML value > Pydantic model default
 ```
 
-The `from_yaml()` method loads the YAML file, then checks 15 specific `EB_*` environment variables and overlays them:
+After F2/F3, `ElephantBrokerConfig.load()` (or its internal `from_yaml()` reader, used either directly or via `load(None)` for the packaged default YAML) parses the YAML and then applies every binding in `ENV_OVERRIDE_BINDINGS` on top — currently 72 entries spanning identity, Cognee, LLM, compaction LLM, reranker, infra, trace, ClickHouse, embedding cache, scoring, HITL, successful-use, blocker-extraction, consolidation, and the top-level toggles.
 
-| Env Var | Config Path |
-|---------|------------|
-| `EB_GATEWAY_ID` | `gateway.gateway_id` |
-| `EB_ORG_ID` | `gateway.org_id` |
-| `EB_TEAM_ID` | `gateway.team_id` |
-| `EB_NEO4J_URI` | `cognee.neo4j_uri` |
-| `EB_QDRANT_URL` | `cognee.qdrant_url` |
-| `EB_REDIS_URL` | `infra.redis_url` |
-| `EB_OTEL_ENDPOINT` | `infra.otel_endpoint` |
-| `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` |
-| `EB_LLM_API_KEY` | `llm.api_key` |
-| `EB_LLM_MODEL` | `llm.model` |
-| `EB_LLM_ENDPOINT` | `llm.endpoint` |
-| `EB_RERANKER_ENDPOINT` | `reranker.endpoint` |
-| `EB_RERANKER_API_KEY` | `reranker.api_key` |
-| `EB_HITL_CALLBACK_SECRET` | `hitl.callback_hmac_secret` |
-
-The `from_env()` method reads 60+ `EB_*` env vars with hardcoded defaults, used when no YAML config is provided.
+There is no curated subset and no separate "env-only" path: the env-only callers go through `load(None)` and use the packaged `default.yaml` as their starting point. Read `ENV_OVERRIDE_BINDINGS` in `elephantbroker/schemas/config.py` for the canonical, contract-test-enforced list — every entry has a matching `env: EB_*` tag in `default.yaml` (verified by `tests/test_env_var_registry_completeness.py`).
 
 ---
 
@@ -2155,46 +2124,62 @@ All core infra ports are remapped to 1xxxx range to avoid conflicts with other s
 
 #### systemd Unit Configuration
 
-Two systemd units for production operation:
+Two systemd units for production operation. Versioned in `deploy/systemd/`
+and installed by `deploy/install.sh`. Both run under the dedicated
+`elephantbroker` system user (created by the installer) with strict
+systemd hardening directives — see `deploy/systemd/elephantbroker.service`
+for the full list (`ProtectSystem=strict`, `NoNewPrivileges=true`,
+`PrivateTmp=true`, `PrivateDevices=true`, etc.).
 
 **elephantbroker.service:**
-- `Type=simple`, `User=dbadmin`
+- `Type=simple`, `User=elephantbroker`, `Group=elephantbroker`
 - `WorkingDirectory=/var/lib/elephantbroker`
-- `EnvironmentFile=/etc/elephantbroker/env`
-- `ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420`
+- `EnvironmentFile=/etc/elephantbroker/env` (mode 640 root:elephantbroker)
+- `ExecStart=/opt/elephantbroker/.venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420`
+- `ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker`
 - `Restart=on-failure`, `RestartSec=5`
 
 **elephantbroker-hitl.service:**
-- `Type=simple`, `User=dbadmin`
+- `Type=simple`, `User=elephantbroker`, `Group=elephantbroker`
 - `After=elephantbroker.service`
-- `EnvironmentFile=/etc/elephantbroker/hitl.env`
-- `ExecStart=/opt/elephant-broker/venv/bin/python -m hitl_middleware`
+- `EnvironmentFile=/etc/elephantbroker/hitl.env` (mode 640 root:elephantbroker)
+- `ExecStart=/opt/elephantbroker/.venv/bin/python -m hitl_middleware`
+- Same hardening directives as the main runtime
 - `Restart=on-failure`, `RestartSec=5`
 
 #### Dependencies (`pyproject.toml`)
 
+All direct dependencies are pinned to exact versions for reproducible builds.
+Full transitive lock lives in `uv.lock` (committed alongside `pyproject.toml`).
+See `deploy/UPDATING-DEPS.md` for the upgrade workflow.
+
 ```
-pydantic>=2.0,<3.0
+pydantic==2.12.5
 cognee[neo4j]==0.5.3
-cognee-community-vector-adapter-qdrant>=0.2.2
-httpx>=0.27
-qdrant-client>=1.7
-redis>=5.0
-fastapi>=0.110
-uvicorn[standard]>=0.29
-opentelemetry-api>=1.24
-opentelemetry-sdk>=1.24
-opentelemetry-instrumentation-fastapi>=0.45b0
-click>=8.1
-prometheus_client>=0.21
-pyyaml>=6.0
-clickhouse-connect>=0.7
-mistralai>=1.0
+cognee-community-vector-adapter-qdrant==0.2.2
+httpx==0.28.1
+qdrant-client==1.17.1
+redis==7.4.0
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+opentelemetry-api==1.40.0
+opentelemetry-sdk==1.40.0
+opentelemetry-instrumentation-fastapi==0.61b0
+click==8.3.2
+prometheus_client==0.24.1
+pyyaml==6.0.3
+clickhouse-connect==0.15.1
 ```
 
-Dev dependencies: `pytest>=7.0`, `pytest-asyncio>=0.21`, `ruff>=0.4`, `tiktoken>=0.7`, `websockets>=13.0`.
+Dev dependencies (also pinned): `pytest==9.0.2`, `pytest-asyncio==1.3.0`,
+`ruff==0.15.9`, `tiktoken==0.12.0`, `websockets==15.0.1`, `PyNaCl==1.6.2`.
 
-Python target: `>=3.11` (3.12 tested). Ruff line length: 120 characters.
+Python target: `>=3.11,<3.13` (3.11 and 3.12 supported). Ruff line length: 120 characters.
+
+Package manager: [`uv`](https://docs.astral.sh/uv/) (Astral). Install/update
+scripts use `uv sync --frozen` to install exactly what `uv.lock` specifies.
+The previous `mistralai>=1.0` direct dependency was removed — uv's holistic
+resolver picks `mistralai==1.12.4` automatically as a transitive of cognee.
 
 
 ---
@@ -2277,7 +2262,6 @@ Critical fields:
 | `EB_RUNTIME_URL` | Both plugins | `http://localhost:8420` | ElephantBroker Python runtime base URL |
 | `EB_GATEWAY_SHORT_NAME` | Both plugins | `EB_GATEWAY_ID.substring(0, 8)` | Human-friendly label for logs/traces |
 | `EB_PROFILE` | Both plugins | `coding` | Profile preset name |
-| `EB_HITL_URL` | OPENCLAW-SETUP ref | `http://localhost:8421` | HITL middleware URL (not directly consumed by TS plugins but documented for workspace) |
 
 #### Config Resolution Order
 
@@ -2679,14 +2663,15 @@ export EB_RUNTIME_URL="http://10.10.0.10:8420"
 export EB_GATEWAY_SHORT_NAME="prod"
 
 ## 2. Symlink plugins
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-memory \
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory \
       ~/.openclaw/extensions/elephantbroker-memory
-ln -s /opt/elephant-broker/openclaw-plugins/elephantbroker-context \
+ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context \
       ~/.openclaw/extensions/elephantbroker-context
 
-## 3. Install deps
-cd ~/.openclaw/extensions/elephantbroker-memory && npm install
-cd ~/.openclaw/extensions/elephantbroker-context && npm install
+## 3. Install deps from the committed lockfile (npm ci, NOT npm install)
+##    Requires Node 24+ — pinned via engines.node in each plugin's package.json
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 
 ## 4. Configure openclaw.json (see Section 3 for full example)
 
@@ -2788,7 +2773,7 @@ One exception: the **embedding cache** is globally scoped (`eb:emb_cache:{hash}`
 
 | # | Key Pattern | Data Type | TTL | Written By | Read By | Size Estimate | Eviction Impact |
 |---|-------------|-----------|-----|------------|---------|---------------|-----------------|
-| 20 | `eb:emb_cache:{sha256_hash_32}` | STRING (JSON float array) | `embedding_cache.ttl_seconds` default 3600s (1h) | `CachedEmbeddingService.embed_text()` and `.embed_batch()` via `setex` / pipeline `setex` | `CachedEmbeddingService.embed_text()` / `.embed_batch()` via `get` / `mget` | 4-8 KB per entry (1024-dimension float array as JSON; text-embedding-3-large produces 1024 dims at default config) | Cache miss; triggers a call to the embedding API. Increases latency by ~50-200ms per miss. Fully self-healing. |
+| 20 | `eb:emb_cache:{sha256_hash_32}` | STRING (JSON float array) | `embedding_cache.ttl_seconds` default 3600s (1h) | `CachedEmbeddingService.embed_text()` and `.embed_batch()` via `setex` / pipeline `setex` | `CachedEmbeddingService.embed_text()` / `.embed_batch()` via `get` / `mget` | ~3-6 KB per entry at 768 dims (gemini/text-embedding-004 default); ~4-8 KB at 1024 dims (openai/text-embedding-3-large) | Cache miss; triggers a call to the embedding API. Increases latency by ~50-200ms per miss. Fully self-healing. |
 
 ### 4. TTL Summary
 
@@ -3300,19 +3285,19 @@ Collections are auto-created by Cognee's `add_data_points()` from the `metadata.
 
 | Collection | DataPoint Class | Field | Dimension | Distance | Usage |
 |------------|----------------|-------|-----------|----------|-------|
-| `FactDataPoint_text` | FactDataPoint | text | 1024 | Cosine (Cognee default) | Primary fact search, dedup, direct vector fallback |
-| `ActorDataPoint_display_name` | ActorDataPoint | display_name | 1024 | Cosine | Actor discovery |
-| `GoalDataPoint_title` | GoalDataPoint | title | 1024 | Cosine | Goal search |
-| `GoalDataPoint_description` | GoalDataPoint | description | 1024 | Cosine | Goal search |
-| `ProcedureDataPoint_name` | ProcedureDataPoint | name | 1024 | Cosine | Procedure discovery |
-| `ProcedureDataPoint_description` | ProcedureDataPoint | description | 1024 | Cosine | Procedure discovery |
-| `ClaimDataPoint_claim_text` | ClaimDataPoint | claim_text | 1024 | Cosine | Claim search |
-| `EvidenceDataPoint_ref_value` | EvidenceDataPoint | ref_value | 1024 | Cosine | Evidence search |
-| `ArtifactDataPoint_summary` | ArtifactDataPoint | summary | 1024 | Cosine | Artifact search |
-| `OrganizationDataPoint_name` | OrganizationDataPoint | name | 1024 | Cosine | Org discovery |
-| `TeamDataPoint_name` | TeamDataPoint | name | 1024 | Cosine | Team discovery |
+| `FactDataPoint_text` | FactDataPoint | text | 768 | Cosine (Cognee default) | Primary fact search, dedup, direct vector fallback |
+| `ActorDataPoint_display_name` | ActorDataPoint | display_name | 768 | Cosine | Actor discovery |
+| `GoalDataPoint_title` | GoalDataPoint | title | 768 | Cosine | Goal search |
+| `GoalDataPoint_description` | GoalDataPoint | description | 768 | Cosine | Goal search |
+| `ProcedureDataPoint_name` | ProcedureDataPoint | name | 768 | Cosine | Procedure discovery |
+| `ProcedureDataPoint_description` | ProcedureDataPoint | description | 768 | Cosine | Procedure discovery |
+| `ClaimDataPoint_claim_text` | ClaimDataPoint | claim_text | 768 | Cosine | Claim search |
+| `EvidenceDataPoint_ref_value` | EvidenceDataPoint | ref_value | 768 | Cosine | Evidence search |
+| `ArtifactDataPoint_summary` | ArtifactDataPoint | summary | 768 | Cosine | Artifact search |
+| `OrganizationDataPoint_name` | OrganizationDataPoint | name | 768 | Cosine | Org discovery |
+| `TeamDataPoint_name` | TeamDataPoint | name | 768 | Cosine | Team discovery |
 
-Dimension is set by `CogneeConfig.embedding_dimensions` (default 1024, matching `text-embedding-3-large` with truncation). Distance metric is Cognee's default (cosine similarity).
+Dimension is set by `CogneeConfig.embedding_dimensions` (default 768, matching `gemini/text-embedding-004`). If you switch to `openai/text-embedding-3-large`, set dimensions to 1024 (or 3072 for full output). Distance metric is Cognee's default (cosine similarity).
 
 #### Directly Referenced Collections
 
@@ -3397,7 +3382,7 @@ async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = 
 ```python
 cognee.config.set_llm_config({
     "llm_provider": "openai",
-    "llm_model": llm_config.model,       # default: "gemini/gemini-2.5-pro"
+    "llm_model": llm_config.model,       # default: "openai/gemini/gemini-2.5-pro"
     "llm_endpoint": llm_config.endpoint,  # default: "http://localhost:8811/v1"
     "llm_api_key": llm_config.api_key,
 })
@@ -3406,9 +3391,9 @@ cognee.config.set_llm_config({
 **Embedding configuration (for chunk/triplet embedding during `cognify()`):**
 
 ```python
-embedding_cfg.embedding_provider = config.embedding_provider    # "openai"
-embedding_cfg.embedding_model = config.embedding_model          # "openai/text-embedding-3-large"
-embedding_cfg.embedding_dimensions = config.embedding_dimensions # 1024
+embedding_cfg.embedding_provider = config.embedding_provider    # "openai" (API client style, not vendor)
+embedding_cfg.embedding_model = config.embedding_model          # "gemini/text-embedding-004"
+embedding_cfg.embedding_dimensions = config.embedding_dimensions # 768
 embedding_cfg.embedding_endpoint = config.embedding_endpoint     # "http://localhost:8811/v1"
 embedding_cfg.embedding_api_key = config.embedding_api_key
 ```
@@ -3455,7 +3440,7 @@ The `EmbeddingService` (`elephantbroker/runtime/adapters/cognee/embeddings.py`) 
 
 ```python
 POST {endpoint}/embeddings
-{"model": "openai/text-embedding-3-large", "input": texts}
+{"model": "gemini/text-embedding-004", "input": texts}  # whatever EB_EMBEDDING_MODEL is set to
 ```
 
 - Timeout: 30 seconds
@@ -3651,7 +3636,7 @@ elephantbroker serve --port 8421 --log-level verbose
 elephantbroker serve --host 0.0.0.0 --port 8420 --config ./config/default.yaml --log-level warning
 ```
 
-**Startup sequence:** If `--config` is provided, `ElephantBrokerConfig.from_yaml(path)` is called (YAML values, then env var overrides applied on top). Otherwise, `ElephantBrokerConfig.from_env()` builds the full config from `EB_*` environment variables. The config is passed to `RuntimeContainer.from_config()` which initializes Cognee, adapters, Redis, OTEL tracing, and all runtime modules.
+**Startup sequence:** `ElephantBrokerConfig.load(path)` is called — when `--config` is omitted it falls through to `load(None)` and reads the packaged `elephantbroker/config/default.yaml`. Either way the YAML is parsed first, then every binding in `ENV_OVERRIDE_BINDINGS` is applied on top, then `_apply_inheritance_fallbacks()` populates derived secrets and endpoints. The merged config is passed to `RuntimeContainer.from_config()` which initializes Cognee, adapters, Redis, OTEL tracing, and all runtime modules.
 
 #### `elephantbroker health-check`
 
@@ -4017,11 +4002,11 @@ cognee:
   neo4j_password: "elephant_dev"                     # EB_NEO4J_PASSWORD
   qdrant_url: "http://localhost:6333"                # EB_QDRANT_URL
   default_dataset: "elephantbroker"                  # EB_DEFAULT_DATASET
-  embedding_provider: "openai"                       # EB_EMBEDDING_PROVIDER
-  embedding_model: "openai/text-embedding-3-large"   # EB_EMBEDDING_MODEL
+  embedding_provider: "openai"                       # EB_EMBEDDING_PROVIDER (API client style, not vendor)
+  embedding_model: "gemini/text-embedding-004"       # EB_EMBEDDING_MODEL
   embedding_endpoint: "http://localhost:8811/v1"      # EB_EMBEDDING_ENDPOINT
   embedding_api_key: ""                              # EB_EMBEDDING_API_KEY
-  embedding_dimensions: 1024                         # EB_EMBEDDING_DIMENSIONS
+  embedding_dimensions: 768                          # EB_EMBEDDING_DIMENSIONS — must match model output
 
 ## --- LLM (extraction, classification, summarization) ---
 llm:
@@ -4073,9 +4058,9 @@ infra:
 ## --- Top-level runtime settings ---
 default_profile: "coding"                   # EB_DEFAULT_PROFILE
 enable_trace_ledger: true                    # EB_ENABLE_TRACE_LEDGER
-enable_guards: true                          # EB_ENABLE_GUARDS
 max_concurrent_sessions: 100                 # EB_MAX_CONCURRENT_SESSIONS
 consolidation_min_retention_seconds: 172800  # EB_CONSOLIDATION_MIN_RETENTION_SECONDS (48h)
+# (master guard switch lives at `guards.enabled` above — env: EB_GUARDS_ENABLED)
 
 ## --- Embedding cache (Phase 5) ---
 embedding_cache:
@@ -4113,7 +4098,7 @@ conflict_detection:
 ## --- Successful-use feedback (Phase 9, opt-in) ---
 successful_use:
   enabled: false                             # EB_SUCCESSFUL_USE_ENABLED
-  endpoint: "http://host.docker.internal:8811/v1"  # EB_SUCCESSFUL_USE_ENDPOINT
+  endpoint: "http://localhost:8811/v1"  # EB_SUCCESSFUL_USE_ENDPOINT
   api_key: ""                                # EB_SUCCESSFUL_USE_API_KEY (falls back to EB_LLM_API_KEY)
   model: "gemini/gemini-2.5-flash"           # EB_SUCCESSFUL_USE_MODEL
   batch_size: 5                              # EB_SUCCESSFUL_USE_BATCH_SIZE
@@ -4243,7 +4228,7 @@ compaction_llm:
 ## --- Blocker extraction (Phase 9, opt-in) ---
 blocker_extraction:
   enabled: false                          # EB_BLOCKER_EXTRACTION_ENABLED
-  endpoint: "http://host.docker.internal:8811/v1"  # EB_BLOCKER_EXTRACTION_ENDPOINT
+  endpoint: "http://localhost:8811/v1"  # EB_BLOCKER_EXTRACTION_ENDPOINT
   api_key: ""                             # EB_BLOCKER_EXTRACTION_API_KEY (falls back to EB_LLM_API_KEY)
   model: "gemini/gemini-2.5-flash"        # EB_BLOCKER_EXTRACTION_MODEL
   run_every_n_turns: 3                    # EB_BLOCKER_EXTRACTION_EVERY_N_TURNS
@@ -4265,7 +4250,7 @@ Full consolidation config fields (all have model defaults, no env var mapping be
 
 ### 8. Environment Variable Reference
 
-All env vars use the `EB_` prefix. Below is the complete set recognized by `from_env()` and `from_yaml()` override logic.
+All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_OVERRIDE_BINDINGS` (the single registry that powers `ElephantBrokerConfig.load()` after the F2/F3 unification).
 
 | Env Var | Config Path | Default |
 |---------|------------|---------|
@@ -4280,11 +4265,11 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `from
 | `EB_QDRANT_URL` | `cognee.qdrant_url` | `"http://localhost:6333"` |
 | `EB_DEFAULT_DATASET` | `cognee.default_dataset` | `"elephantbroker"` |
 | `EB_EMBEDDING_PROVIDER` | `cognee.embedding_provider` | `"openai"` |
-| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `"openai/text-embedding-3-large"` |
+| `EB_EMBEDDING_MODEL` | `cognee.embedding_model` | `"gemini/text-embedding-004"` |
 | `EB_EMBEDDING_ENDPOINT` | `cognee.embedding_endpoint` | `"http://localhost:8811/v1"` |
 | `EB_EMBEDDING_API_KEY` | `cognee.embedding_api_key` | `""` |
-| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `1024` |
-| `EB_LLM_MODEL` | `llm.model` | `"gemini/gemini-2.5-pro"` |
+| `EB_EMBEDDING_DIMENSIONS` | `cognee.embedding_dimensions` | `768` |
+| `EB_LLM_MODEL` | `llm.model` | `"openai/gemini/gemini-2.5-pro"` |
 | `EB_LLM_ENDPOINT` | `llm.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_LLM_API_KEY` | `llm.api_key` | `""` |
 | `EB_LLM_MAX_TOKENS` | `llm.max_tokens` | `8192` |
@@ -4314,7 +4299,7 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `from
 | `EB_CLICKHOUSE_DATABASE` | `infra.clickhouse.database` | `"otel"` |
 | `EB_DEFAULT_PROFILE` | `default_profile` | `"coding"` |
 | `EB_ENABLE_TRACE_LEDGER` | `enable_trace_ledger` | `"true"` |
-| `EB_ENABLE_GUARDS` | `enable_guards` | `"true"` |
+| `EB_GUARDS_ENABLED` | `guards.enabled` | `"true"` |
 | `EB_MAX_CONCURRENT_SESSIONS` | `max_concurrent_sessions` | `100` |
 | `EB_EMBEDDING_CACHE_ENABLED` | `embedding_cache.enabled` | `"true"` |
 | `EB_EMBEDDING_CACHE_TTL` | `embedding_cache.ttl_seconds` | `3600` |
@@ -4326,12 +4311,12 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `from
 | `EB_HITL_CALLBACK_SECRET` | `hitl.callback_hmac_secret` | `""` |
 | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `consolidation_min_retention_seconds` | `172800` |
 | `EB_SUCCESSFUL_USE_ENABLED` | `successful_use.enabled` | `"false"` |
-| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `"http://host.docker.internal:8811/v1"` |
+| `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_SUCCESSFUL_USE_API_KEY` | `successful_use.api_key` | (falls back to `EB_LLM_API_KEY`) |
 | `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `"gemini/gemini-2.5-flash"` |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `5` |
 | `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `"false"` |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `"http://host.docker.internal:8811/v1"` |
+| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | (falls back to `EB_LLM_API_KEY`) |
 | `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `"gemini/gemini-2.5-flash"` |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `3` |
@@ -4344,15 +4329,15 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `from
 
 ### 9. Server Config Resolution
 
-When `elephantbroker serve --config path.yaml` is used:
+After the F2/F3 unification there is exactly one path. When `elephantbroker serve [--config path.yaml]` is used:
 
-1. YAML file is parsed into `ElephantBrokerConfig` via Pydantic model validation
-2. A curated set of `EB_*` env vars is checked; if any are explicitly set, they override the corresponding YAML value
-3. The merged config is passed to `RuntimeContainer.from_config()`
+1. `ElephantBrokerConfig.load(path)` is called. If `--config` is omitted, `load(None)` falls back to the packaged `elephantbroker/config/default.yaml`.
+2. The YAML file is parsed and validated through Pydantic.
+3. Every binding in `ENV_OVERRIDE_BINDINGS` (currently 72 entries) is applied on top — any env var that is set in `os.environ` overrides the corresponding YAML field.
+4. `_apply_inheritance_fallbacks()` populates empty derived secrets (`compaction_llm.api_key`, `successful_use.api_key`, `blocker_extraction.api_key` ← `llm.api_key`; `llm.api_key` ← `cognee.embedding_api_key`) and the F7 endpoint inheritance (`compaction_llm.endpoint` ← `llm.endpoint`).
+5. The merged dict is re-validated through `cls.model_validate()` and passed to `RuntimeContainer.from_config()`.
 
-When `--config` is omitted, `ElephantBrokerConfig.from_env()` builds the entire config from env vars with hardcoded defaults.
-
-The 14 env vars checked during YAML override (only these override YAML when both exist): `EB_GATEWAY_ID`, `EB_ORG_ID`, `EB_TEAM_ID`, `EB_NEO4J_URI`, `EB_QDRANT_URL`, `EB_REDIS_URL`, `EB_OTEL_ENDPOINT`, `EB_EMBEDDING_API_KEY`, `EB_LLM_API_KEY`, `EB_LLM_MODEL`, `EB_LLM_ENDPOINT`, `EB_RERANKER_ENDPOINT`, `EB_RERANKER_API_KEY`, `EB_HITL_CALLBACK_SECRET`.
+There is no curated subset of "override-eligible" env vars — all 72 `ENV_OVERRIDE_BINDINGS` entries apply on every load. Read the registry in `elephantbroker/schemas/config.py` for the authoritative list, which the inverse contract test in `tests/test_env_var_registry_completeness.py` keeps in sync with the schema and packaged YAML.
 
 ---
 
@@ -4443,7 +4428,7 @@ python -m tests.scenarios.runner --live \
 **Source files:**
 - `elephantbroker/cli.py` -- ebrun CLI
 - `elephantbroker/server.py` -- elephantbroker server CLI
-- `elephantbroker/schemas/config.py` -- all config models and `from_env()`/`from_yaml()`
+- `elephantbroker/schemas/config.py` -- all config models, `ENV_OVERRIDE_BINDINGS` registry, and `ElephantBrokerConfig.load()` / internal `from_yaml()` reader
 - `elephantbroker/config/default.yaml` -- default YAML config
 - `elephantbroker/schemas/consolidation.py` -- ConsolidationConfig model
 - `tests/scenarios/runner.py` -- scenario test runner CLI
@@ -4819,7 +4804,7 @@ After registration, loggers can use `logger.verbose("message")`.
 
 | Env Var | Default | Effect |
 |---|---|---|
-| `EB_LOG_LEVEL` | `"INFO"` | Python log level. Accepts `DEBUG`, `VERBOSE`, `INFO`, `WARNING`, `ERROR`. |
+| `EB_LOG_LEVEL` | `"INFO"` | Python log level. Accepts `DEBUG`, `VERBOSE`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 
 In `RuntimeContainer.from_config()`:
 ```python
@@ -4891,16 +4876,16 @@ API routes read these from `request.state` and stamp them onto schema objects be
 
 ### 1. schemas/config.py -- Configuration Defaults (env-overridable)
 
-These are the canonical defaults set in `ElephantBrokerConfig.from_env()` and the Pydantic model defaults. All are overridable via `EB_*` environment variables or YAML config. They are listed here because their default values directly affect runtime behavior.
+These are the canonical defaults set in the Pydantic model fields of `ElephantBrokerConfig` (and its nested config models). Every field is overridable either via the corresponding `EB_*` env var (if it has a binding in `ENV_OVERRIDE_BINDINGS`) or via a YAML field. They are listed here because their default values directly affect runtime behavior.
 
 | File:Line | Value | What it controls | Why hardcoded | Risk at extremes |
 |-----------|-------|-----------------|---------------|-----------------|
 | config.py:11 | `"bolt://localhost:7687"` | Neo4j connection URI | Dev default, `EB_NEO4J_URI` overrides | None -- connection fails if wrong |
 | config.py:13 | `"elephant_dev"` | Neo4j password | Dev default, `EB_NEO4J_PASSWORD` overrides | Security risk if deployed with default |
 | config.py:14 | `"http://localhost:6333"` | Qdrant URL | Dev default, `EB_QDRANT_URL` overrides | None -- connection fails |
-| config.py:17 | `"openai/text-embedding-3-large"` | Embedding model name | Required by Cognee SDK (must keep `openai/` prefix) | Wrong model = wrong dimensions |
-| config.py:20 | `1024` | Embedding vector dimensions | Must match the model. `EB_EMBEDDING_DIMENSIONS` overrides | Mismatch = Qdrant errors |
-| config.py:25 | `"gemini/gemini-2.5-pro"` | LLM model for extraction | `EB_LLM_MODEL` overrides | Affects extraction quality and cost |
+| config.py:17 | `"gemini/text-embedding-004"` | Embedding model name | LiteLLM-routed; `openai/` provider prefix optional, depends on model | Wrong model = wrong dimensions |
+| config.py:20 | `768` | Embedding vector dimensions | Must match the embedding model's output dim. `EB_EMBEDDING_DIMENSIONS` overrides | Mismatch = Qdrant errors |
+| config.py:29 | `"openai/gemini/gemini-2.5-pro"` | LLM model for extraction | `EB_LLM_MODEL` overrides; `openai/` prefix is REQUIRED by Cognee | Without prefix, Cognee hangs at startup |
 | config.py:28 | `8192` | LLM max output tokens | `EB_LLM_MAX_TOKENS` overrides | Too low = truncated responses |
 | config.py:29 | `0.1` | LLM temperature | `EB_LLM_TEMPERATURE` overrides | >0.5 = non-deterministic extraction |
 | config.py:30 | `4000` | Max input tokens for fact extraction prompt | `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS` overrides | Too low = truncated context |
@@ -5951,9 +5936,11 @@ No guidance on hardware requirements for any component:
 
 ###### 7.1 Runtime Upgrade
 
-DEPLOYMENT.md documents `pip install --no-deps .` for code-only updates but is missing:
+DEPLOYMENT.md and `deploy/UPDATING-DEPS.md` document the `deploy/update.sh`
+flow (`uv sync --frozen` for code-only updates, `--upgrade` to regenerate
+the lockfile against pyproject.toml). Still missing:
 - Schema migration procedure (the `elephantbroker migrate` CLI command exists per CONFIGURATION.md line 3666, but no documentation of what migrations exist or how to run them pre-upgrade)
-- Rollback procedure (how to revert to previous version)
+- Rollback procedure (how to revert to previous version — git checkout the previous commit + `update.sh` works but is undocumented)
 - Pre-upgrade checklist (backup state, drain sessions, verify health)
 - Zero-downtime upgrade strategy (not possible with single-worker uvicorn)
 - Changelog or breaking-change notification mechanism
@@ -5983,7 +5970,7 @@ DEPLOYMENT.md documents `pip install --no-deps .` for code-only updates but is m
 - Cognee is pinned to `==0.5.3` -- what breaks if upgraded?
 - No documented breaking changes between Cognee 0.5.x versions
 - No migration path for Cognee's internal state databases
-- The mistralai workaround may change with different Cognee versions
+- The mistralai workaround is no longer needed when using uv (uv resolves cleanly), but if Cognee changes its transitive dep tree, the install.sh belt-and-suspenders cleanup may need updating
 
 ###### 7.6 Multi-Gateway Migration
 
@@ -5999,7 +5986,7 @@ DEPLOYMENT.md documents `pip install --no-deps .` for code-only updates but is m
 
 - HITL Dockerfile exists (`hitl-middleware/Dockerfile`) but is not referenced in docker-compose.yml
 - No health check endpoint documented for HITL (exists at `/health` per DEPLOYMENT.md line 179 but not in compose)
-- Webhook configuration (`WebhookConfig` in `hitl-middleware/hitl_middleware/config.py`) cannot be set via environment variables -- only `from_env()` sets 5 basic fields, not webhook endpoints
+- Webhook configuration (`WebhookConfig` in `hitl-middleware/hitl_middleware/config.py`) cannot be set via environment variables -- the HITL middleware's own `HitlMiddlewareConfig.from_env()` (separate from the runtime's `load()` path) sets 5 basic fields, not webhook endpoints
 - No guidance on securing webhook endpoints (TLS, auth headers)
 
 ###### 8.2 Jaeger Storage
@@ -6017,7 +6004,7 @@ Jaeger uses `SPAN_STORAGE_TYPE: memory` -- all traces are lost on container rest
 
 ###### 8.4 Environment Variable Documentation Gap
 
-CONFIGURATION.md documents 60+ env vars via `from_env()` but:
+CONFIGURATION.md documents 72 env vars via `ENV_OVERRIDE_BINDINGS` but:
 - No `.env.example` file in the repository
 - No env var validation at startup (invalid values may cause silent failures)
 - `EB_HITL_CALLBACK_SECRET` generation procedure (`openssl rand -hex 32`) is in DEPLOYMENT.md but not in CONFIGURATION.md
@@ -6263,7 +6250,7 @@ All LLM prompts used by consolidation stages are **hardcoded strings, not config
 6. [TTL Hierarchy and Dependencies](#6-ttl-hierarchy-and-dependencies)
 7. [Compaction Trigger Chain](#7-compaction-trigger-chain)
 8. [Tier Capability Gating](#8-tier-capability-gating)
-9. [from_env() vs from_yaml() Asymmetry](#9-from_env-vs-from_yaml-asymmetry)
+9. [Single Load Path After F2/F3 Unification](#9-single-load-path-after-f2f3-unification)
 10. [Dangerous Combinations](#10-dangerous-combinations)
 11. [Configuration Recipes](#11-configuration-recipes)
 
@@ -6271,23 +6258,25 @@ All LLM prompts used by consolidation stages are **hardcoded strings, not config
 
 ## 1. API Key Fallback Chains
 
-`from_env()` implements a cascading fallback for API keys. Understanding this chain is critical to avoid silent auth failures.
+After F2/F3, `_apply_inheritance_fallbacks()` runs after env overrides on every `load()` and applies a cascading fallback for empty API keys (and the F7 endpoint inheritance). Understanding this chain is critical to avoid silent auth failures.
 
 ### Fallback chain
 
 ```
-EB_LLM_API_KEY  ──(empty?)──>  EB_EMBEDDING_API_KEY  ──(empty?)──>  ""
+cognee.embedding_api_key (Tier 1) ──> llm.api_key (if empty)
        │
-       ├── EB_COMPACTION_LLM_API_KEY      ──(empty?)──>  EB_LLM_API_KEY (resolved)
-       ├── EB_SUCCESSFUL_USE_API_KEY      ──(empty?)──>  EB_LLM_API_KEY (resolved)
-       └── EB_BLOCKER_EXTRACTION_API_KEY  ──(empty?)──>  EB_LLM_API_KEY (resolved)
+       └── llm.api_key (Tier 2) ──> compaction_llm.api_key      (if empty)
+                                 ──> successful_use.api_key     (if empty)
+                                 ──> blocker_extraction.api_key (if empty)
+
+llm.endpoint (Tier 3 / F7) ──> compaction_llm.endpoint (if empty)
 ```
 
-**Source:** `config.py` lines 437-438, 494, 518, 525.
+**Source:** `_apply_inheritance_fallbacks()` in `elephantbroker/schemas/config.py` (search for the function definition — it documents the tier rules inline).
 
 **Implication:** Setting only `EB_EMBEDDING_API_KEY` (and not `EB_LLM_API_KEY`) means all LLM subsystems -- primary extraction, compaction, successful-use, blocker extraction -- share the embedding key. This works when both services use the same LiteLLM proxy and auth, but breaks silently when they use different providers.
 
-**Interaction with `from_yaml()`:** The YAML path does NOT implement this fallback. If you load via YAML and set `llm.api_key: ""`, it stays empty. The fallback chain only runs through `from_env()`. Therefore, YAML configs must set every `api_key` field explicitly.
+**One unified path:** Because `load()` always reads YAML first and then applies env overrides through `ENV_OVERRIDE_BINDINGS`, the inheritance chain runs identically whether you use `--config` or rely on the packaged default. There is no longer an asymmetry between env-only and YAML+env modes — the legacy `from_env()` method has been removed and the only public entry point is `load(path: str | None)`.
 
 ---
 
@@ -6327,7 +6316,6 @@ EB_LLM_API_KEY  ──(empty?)──>  EB_EMBEDDING_API_KEY  ──(empty?)─�
 | Parameter A | Parameter B | Conflict |
 |---|---|---|
 | Profile `scoring_weights` (11 fields) | Consolidation Stage 9 tuning deltas (from `ScoringTuner`) | Both set scoring weights. Tuning deltas are **additive**: `effective_weight = base_weight + tuning_delta`. If you change profile scoring weights via org override AND tuning deltas exist, they stack. Tuning delta caps (`max_weight_adjustment_pct`) are referenced against **base profile + org override**, NOT current tuned weight. This prevents a convergence trap but means the two sources can interact in non-obvious ways. |
-| `enable_guards: false` (top-level) | `guards.enabled: true` (GuardConfig) | `enable_guards` is the master switch checked at the container level. If `enable_guards: false`, the `IRedLineGuardEngine` is still created by the container (it checks the tier, not the config flag), but the `ContextLifecycle.assemble()` guard preflight is gated on `self._guard` being non-None. The `enable_guards` flag is informational to the API layer. The actual guard bypass happens because no guard constraints are returned. |
 | Profile `compaction.cadence: "aggressive"` | Profile `budgets.max_prompt_tokens: 12000` | Aggressive compaction triggers at `target_tokens * 1.5`. With the default `target_tokens: 4000`, the threshold is 6000 tokens. A 12000-token budget means the working set can inject facts that exceed the compaction threshold before they ever reach the message buffer. Compaction triggers on the **message buffer size**, not the working set size. These are independent dimensions. |
 | `consolidation_min_retention_seconds: 172800` | Profile `session_data_ttl_seconds: 86400` | The session store enforces `effective_ttl = max(profile.session_data_ttl_seconds, config.consolidation_min_retention_seconds)`. If the profile TTL (86400s = 24h) is less than the retention floor (172800s = 48h), the retention floor wins. Setting a low profile TTL has **no effect** when the retention floor is higher. |
 
@@ -6613,29 +6601,64 @@ If `RetrievalOrchestrator` is None (CONTEXT_ONLY tier), `WorkingSetManager` is a
 
 ---
 
-## 9. from_env() vs from_yaml() Asymmetry
+## 9. Single Load Path After F2/F3 Unification
 
-### Parameters only settable via `from_env()`
+> **Historical note.** Pre-F2/F3 this section documented the asymmetry between two
+> separate code paths: `from_env()` (env-only, hardcoded defaults) and
+> `from_yaml()` (YAML + a curated 14-var subset). The two paths drifted on every
+> schema change, the curated subset was always smaller than the registry, and
+> `from_env()` had API key fallback logic that `from_yaml()` did not. F2/F3
+> deleted `from_env()` outright. The runtime, CLI, and tests now all converge on
+> `ElephantBrokerConfig.load(path: str | None)` — there is exactly one path, and
+> the asymmetry no longer exists. Re-read this section if you remember the
+> old behavior or hit a stack trace mentioning `from_env`.
 
-These parameters are read by `from_env()` but are NOT in the `from_yaml()` curated override list. They can only be set via environment variables:
+### How `load()` resolves a config
 
-- `EB_NEO4J_USER`, `EB_NEO4J_PASSWORD` -- database credentials
-- `EB_DEFAULT_DATASET` -- Cognee dataset name
-- `EB_EMBEDDING_PROVIDER`, `EB_EMBEDDING_MODEL`, `EB_EMBEDDING_ENDPOINT`, `EB_EMBEDDING_DIMENSIONS` -- embedding config
-- `EB_LLM_MAX_TOKENS`, `EB_LLM_TEMPERATURE`, all `EB_LLM_EXTRACTION_*` params
-- `EB_COMPACTION_LLM_*` -- compaction LLM config
-- `EB_SUCCESSFUL_USE_*`, `EB_BLOCKER_EXTRACTION_*` -- Phase 9 features
-- `EB_SCORING_SNAPSHOT_TTL`, `EB_SESSION_GOALS_TTL`
-- `EB_LOG_LEVEL`, `EB_ENABLE_TRACE_LEDGER`, `EB_ENABLE_GUARDS`
-- All `EB_CLICKHOUSE_*` params
+`ElephantBrokerConfig.load(path)` (`elephantbroker/schemas/config.py:735`) is the
+only public entry point. The internal classmethod `from_yaml(path)` is the
+implementation backbone (and the test harness still calls it directly for some
+fixtures).
 
-**Implication:** If you use YAML config and need to change `embedding_dimensions` or `log_level`, you must set the YAML field directly. The env var will NOT override the YAML value for these parameters.
+1. If `path` is `None`, `load()` resolves the packaged
+   `elephantbroker/config/default.yaml` via `importlib.resources.as_file()` so
+   the runtime can boot with zero on-disk config.
+2. The YAML file is parsed with `yaml.safe_load()` and validated through
+   `cls(**data)` — any malformed YAML or schema violation raises a
+   `ValidationError` *before* env vars are touched, so error reports point at
+   the YAML problem, not at a half-applied env override.
+3. `_apply_env_overrides()` walks `ENV_OVERRIDE_BINDINGS` (currently 72 entries)
+   and, for every binding whose env var is present in `os.environ`, coerces the
+   raw value through `_coerce_env_value()` and writes it into the dotted path.
+   The check is `if env_var not in os.environ` — empty string IS treated as
+   set, which collapses the historical empty-string asymmetry.
+4. `_apply_inheritance_fallbacks()` populates empty derived secrets (Tier 1:
+   `llm.api_key` ← `cognee.embedding_api_key`; Tier 2: derived LLMs ←
+   `llm.api_key`; Tier 3 / F7: `compaction_llm.endpoint` ← `llm.endpoint`).
+5. The merged dict is re-validated through `cls.model_validate()` so any
+   constraint violation introduced by an env override (e.g.
+   `EB_EMBEDDING_DIMENSIONS=0` violating `ge=1`) raises at load time.
+
+### Parameters with an env var binding
+
+Every entry in `ENV_OVERRIDE_BINDINGS` is honored on every load — there is no
+"curated subset". Read the registry directly in `elephantbroker/schemas/config.py`
+for the canonical, contract-test-enforced list. The inverse contract test
+(`tests/test_env_var_registry_completeness.py`) keeps the registry, the schema
+fields, and `default.yaml` in sync, so the registry cannot drift from the docs
+without breaking CI.
+
+If you need to know whether a specific env var has a binding without opening
+the file, the per-section tables in [Section: ElephantBroker Environment
+Variable Reference](#elephantbroker-environment-variable-reference) show
+`Env override = Yes/No` for every variable.
 
 ### Parameters only settable via YAML
 
-These parameters have no `EB_*` env var mapping in `from_env()` and can only be set via YAML or code:
+These parameters have no `EB_*` env var mapping in `ENV_OVERRIDE_BINDINGS` and
+can only be set via YAML or code:
 
-- `reranker.enabled`, `reranker.timeout_seconds`, `reranker.batch_size`, `reranker.max_documents`, `reranker.fallback_on_error`, `reranker.top_n`
+- `reranker.timeout_seconds`, `reranker.batch_size`, `reranker.max_documents`, `reranker.fallback_on_error`, `reranker.top_n` (the `reranker.enabled` toggle does have a binding via F10 / `EB_RERANKER_ENABLED`)
 - `infra.trace.memory_ttl_seconds`
 - All `ScoringConfig` fields except `snapshot_ttl_seconds` and `session_goals_ttl_seconds`
 - All `ConflictDetectionConfig` fields
@@ -6648,19 +6671,33 @@ These parameters have no `EB_*` env var mapping in `from_env()` and can only be 
 - All `ArtifactCaptureConfig` fields
 - All `ArtifactAssemblyConfig` fields
 - All `AsyncAnalysisConfig` fields
-- All `GuardConfig` fields (except master switch)
-- All `HitlConfig` fields (except `callback_hmac_secret`)
+- All `GuardConfig` fields except the master `enabled` toggle
+- All `HitlConfig` fields except `enabled` (F10) and `callback_hmac_secret`
 - All `StrictnessPreset` fields
 - `profile_cache.ttl_seconds`
 
-### API key fallback difference
+### Empty-string semantics (post-unification)
 
-The `from_env()` implementation has explicit API key fallback logic:
+Pre-F2/F3, `from_env()` and `from_yaml()` differed on whether `EB_GATEWAY_ID=""`
+counted as "set". `from_env()` used `os.environ.get(key, default)` and treated
+empty string as a set value; `from_yaml()` used `if os.environ.get(key):` and
+treated empty string as "not set" (falsy). The two paths produced different
+configs from identical environments.
+
+After unification, the only behavior is the `_apply_env_overrides()` rule:
+
 ```python
-llm_api_key = os.environ.get("EB_LLM_API_KEY", "") or embedding_api_key
+if env_var not in os.environ:   # only "not set at all" is skipped
+    continue
+raw = os.environ[env_var]
+value = _coerce_env_value(raw, coercer)
 ```
 
-The `from_yaml()` path does NOT implement this fallback. Keys must be explicitly set in each YAML section. If you rely on the `EB_LLM_API_KEY → EB_EMBEDDING_API_KEY` fallback, you must use `from_env()` or set both YAML fields.
+Empty string IS an override. This matters most for the `str_or_none` coercer
+(which maps `""` to `None`) and for required string fields (which will accept
+`""` and propagate it). Setting `EB_GATEWAY_ID=""` will produce
+`gateway.gateway_id = ""` and trip the startup safety guard — the fix is
+`unset EB_GATEWAY_ID`, not setting it to empty string.
 
 ---
 
@@ -6670,7 +6707,7 @@ The `from_yaml()` path does NOT implement this fallback. Keys must be explicitly
 
 | Combination | Symptom | Root cause |
 |---|---|---|
-| `cognee.embedding_dimensions: 3072` + existing Qdrant collections at 1024 | Qdrant `400 Bad Request` on vector insert/search | Qdrant collection was created with 1024-dim vectors; new embeddings are 3072-dim. Requires dropping and recreating collections. |
+| `cognee.embedding_dimensions: 1024` + existing Qdrant collections at 768 | Qdrant `400 Bad Request` on vector insert/search | Qdrant collection was created with 768-dim vectors; new embeddings are 1024-dim. Requires dropping and recreating collections. Same applies whenever `embedding_model` changes to one with different output dim. |
 | `infra.redis_url` pointing to nonexistent Redis | Runtime starts but all session state, caching, goals, ingest buffering, working set snapshots, guard history, and HITL queues fail. Most operations log warnings but return degraded results. | Redis is a soft dependency at the container level (line 160-170 of `container.py`), but nearly every feature depends on it at runtime. |
 | `llm.model: "gemini-2.5-pro"` (without `openai/` prefix via LiteLLM) | LLM calls fail silently or route to wrong provider | `LLMClient` strips `openai/` before passing to LiteLLM. If the model name doesn't have the prefix and isn't a valid LiteLLM model spec, calls fail. But Cognee requires `openai/` for its own routing. |
 | `cognee.embedding_model` changed after data exists | New embeddings have different dimensionality or distribution; cosine similarity between old and new vectors is meaningless | Similarity searches return garbage results; dedup detection breaks; retrieval quality collapses. Requires re-indexing all data. |
@@ -6712,12 +6749,13 @@ cognee:
   qdrant_url: "http://localhost:6333"
 
 llm:
-  model: "openai/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://localhost:8811/v1"
   api_key: "your-litellm-key"
 
 # Embedding uses same endpoint/key
-# (from_env() fallback: LLM_API_KEY falls back to EMBEDDING_API_KEY)
+# (_apply_inheritance_fallbacks: llm.api_key falls back to cognee.embedding_api_key,
+#  see Section 9 / 14.6 — runs uniformly via load() in both YAML+env and env-only modes)
 
 infra:
   redis_url: "redis://localhost:6379"
@@ -6758,10 +6796,11 @@ cognee:
   neo4j_uri: "bolt://neo4j-staging:7687"
   neo4j_password: "staging-secure-pw"
   qdrant_url: "http://qdrant-staging:6333"
-  embedding_dimensions: 1024
+  embedding_model: "gemini/text-embedding-004"
+  embedding_dimensions: 768
 
 llm:
-  model: "openai/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://litellm-staging:8811/v1"
 
 reranker:
@@ -6809,10 +6848,11 @@ cognee:
   neo4j_uri: "bolt://neo4j-prod:7687"
   # neo4j_password via EB_NEO4J_PASSWORD env var (secret)
   qdrant_url: "http://qdrant-prod:6333"
-  embedding_dimensions: 1024
+  embedding_model: "gemini/text-embedding-004"
+  embedding_dimensions: 768
 
 llm:
-  model: "openai/gemini-2.5-pro"
+  model: "openai/gemini/gemini-2.5-pro"
   endpoint: "http://litellm-prod:8811/v1"
   # api_key via EB_LLM_API_KEY env var (secret)
   extraction_max_facts_per_batch: 15
@@ -6873,7 +6913,6 @@ profile_cache:
 
 default_profile: "coding"
 enable_trace_ledger: true
-enable_guards: true
 max_concurrent_sessions: 200
 ```
 
@@ -6967,7 +7006,7 @@ infra:
 
 3. **Budget resolution picks the minimum:** The effective context budget is the smallest of profile budget, OpenClaw budget, and window-fraction budget. A misconfigured `max_context_window_fraction` can starve context injection.
 
-4. **API key fallbacks only work in `from_env()`:** YAML configs must set every API key explicitly.
+4. **API key fallbacks always run via `_apply_inheritance_fallbacks()`:** Tier 1 (`llm.api_key` ← `cognee.embedding_api_key`), Tier 2 (`compaction_llm`/`successful_use`/`blocker_extraction.api_key` ← `llm.api_key`), Tier 3 (`compaction_llm.endpoint` ← `llm.endpoint`). After F2/F3 the chain runs in YAML+env, env-only, and `--config` modes uniformly — there is no longer an asymmetry where YAML mode skipped fallbacks.
 
 5. **Tier gating silently disables features:** Parameters for modules not in the active tier are accepted without error but have no effect.
 
@@ -6992,7 +7031,7 @@ This section documents what happens when configuration is wrong -- missing, inva
 | Component | Behavior when missing |
 |---|---|
 | **TS plugins** (`ElephantBrokerClient`) | **Hard crash at construction.** Constructor throws `Error("EB_GATEWAY_ID is required. Set it via the gatewayId constructor option or EB_GATEWAY_ID env var.")`. The plugin never registers with OpenClaw. Agent has no memory tools. |
-| **Python runtime** (`GatewayConfig.from_env()`) | **Silent default to `"local"`.** `os.environ.get("EB_GATEWAY_ID", "local")` means the runtime starts fine with gateway_id `"local"`. All Redis keys are prefixed `eb:local:`, all Cypher queries filter by `gateway_id = "local"`, all Cognee datasets are named `local__elephantbroker`. |
+| **Python runtime** (`ElephantBrokerConfig.load()` → `_apply_env_overrides()` → `GatewayConfig`) | **Silent default to `"local"`.** Packaged `default.yaml` ships `gateway.gateway_id: "local"`, and `EB_GATEWAY_ID` only overrides it if the env var is set. The runtime starts fine with gateway_id `"local"`. All Redis keys are prefixed `eb:local:`, all Cypher queries filter by `gateway_id = "local"`, all Cognee datasets are named `local__elephantbroker`. |
 | **GatewayIdentityMiddleware** | **Falls back to config default.** The middleware reads `X-EB-Gateway-ID` from the HTTP header. If the header is absent (standalone mode, no TS plugin), it falls back to `default_gateway_id` set from `config.gateway.gateway_id` during `create_app()`. |
 
 | Symptom | Cause | Fix |
@@ -7004,7 +7043,7 @@ This section documents what happens when configuration is wrong -- missing, inva
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Runtime starts normally, but first LLM call (fact extraction, compaction, goal refinement, guard escalation) returns HTTP 401 or 403 | `EB_LLM_API_KEY` not set; defaults to empty string `""`. `LLMClient` sends `Authorization: Bearer ` (empty) which most LLM proxies reject. | Set `EB_LLM_API_KEY` to a valid API key. In `from_env()`, `EB_LLM_API_KEY` falls back to `EB_EMBEDDING_API_KEY` if set (line 438: `llm_api_key = os.environ.get("EB_LLM_API_KEY", "") or embedding_api_key`). |
+| Runtime starts normally, but first LLM call (fact extraction, compaction, goal refinement, guard escalation) returns HTTP 401 or 403 | `EB_LLM_API_KEY` not set; defaults to empty string `""`. `LLMClient` sends `Authorization: Bearer ` (empty) which most LLM proxies reject. | Set `EB_LLM_API_KEY` to a valid API key. After F2/F3, `_apply_inheritance_fallbacks()` (Tier 1) automatically copies `cognee.embedding_api_key` into `llm.api_key` when the latter is empty — so setting `EB_EMBEDDING_API_KEY` alone unblocks LLM calls too. The chain runs in both YAML+env and env-only modes via `load()`. |
 | `LLMClient` is constructed without error but every `complete()` / `complete_json()` call raises `httpx.HTTPStatusError` | Empty API key passes through constructor validation (it is not validated at construction time) | Set the key in env or YAML. The LLMClient only discovers the problem when it makes an HTTP request. |
 | `AutorecallPolicy` extraction, `CompactionEngine` summaries, and `RedLineGuardEngine` LLM escalation all fail simultaneously | They all share the same `LLMClient` instance (`c.llm_client`), which was constructed with an empty API key | Set one API key -- all LLM features share it |
 
@@ -7057,9 +7096,9 @@ The `RuntimeContainer.from_config()` method handles database connection failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| **Cognee operations hang or fail.** `cognee.cognify()` calls Cognee's internal LLM for entity/relationship extraction. Cognee uses the model name as-is from `cognee.config.set_llm_config()`. Without the `openai/` prefix, Cognee may hang trying to route the model. | `EB_LLM_MODEL` set to `gemini-2.5-pro` instead of `openai/gemini-2.5-pro`. Cognee expects the `openai/` prefix for OpenAI-compatible endpoints. | Always use the `openai/` prefix: `EB_LLM_MODEL=openai/gemini-2.5-pro`. |
+| **Cognee operations hang or fail.** `cognee.cognify()` calls Cognee's internal LLM for entity/relationship extraction. Cognee uses the model name as-is from `cognee.config.set_llm_config()`. Without the `openai/` prefix, Cognee may hang trying to route the model. | `EB_LLM_MODEL` set to `gemini/gemini-2.5-pro` instead of `openai/gemini/gemini-2.5-pro`. Cognee expects the `openai/` prefix for OpenAI-compatible endpoints. | Always use the `openai/` prefix: `EB_LLM_MODEL=openai/gemini/gemini-2.5-pro`. |
 | **Direct `LLMClient` calls work fine** even without the prefix | `LLMClient.__init__()` strips the `openai/` prefix before sending to LiteLLM (line 24: `if model.startswith("openai/"): model = model[len("openai/"):]`). So the LLMClient works either way. | The prefix is required for Cognee, optional for LLMClient. Always include it. |
-| **Embedding model similarly needs `openai/` prefix** | `configure_cognee()` passes `config.embedding_model` directly to `embedding_cfg.embedding_model`. Cognee's embedding pipeline also uses the model name for provider routing. | Use `EB_EMBEDDING_MODEL=openai/text-embedding-3-large`. |
+| **Embedding model — `openai/` prefix is OPTIONAL, depends on backend** | `configure_cognee()` passes `config.embedding_model` directly to Cognee's `embedding_cfg.embedding_model`. Unlike the LLM model, the embedding model name is just routed by LiteLLM — `gemini/text-embedding-004` works without prefix because LiteLLM recognizes the `gemini/` provider prefix. | Use the model name your LiteLLM proxy actually serves, e.g. `EB_EMBEDDING_MODEL=gemini/text-embedding-004` (default) or `openai/text-embedding-3-large`. |
 
 #### Wrong LLM Endpoint
 
@@ -7117,8 +7156,8 @@ The `RuntimeContainer.from_config()` method handles database connection failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `yaml.scanner.ScannerError` or `yaml.parser.ParserError` at startup; server does not start | The YAML file has syntax errors (bad indentation, missing colons, tabs instead of spaces). `from_yaml()` uses `yaml.safe_load(f)` (line 374) which raises on parse errors. | Fix the YAML syntax. Use a YAML linter. Common errors: inconsistent indentation, unquoted special characters, tabs. |
-| `ValidationError` from Pydantic at startup | YAML parses successfully but the data structure doesn't match `ElephantBrokerConfig` fields. `cls(**data)` (line 376) passes the parsed dict to the Pydantic constructor. | Check field names and nesting against the schema in `schemas/config.py`. |
+| `yaml.scanner.ScannerError` or `yaml.parser.ParserError` at startup; server does not start | The YAML file has syntax errors (bad indentation, missing colons, tabs instead of spaces). `ElephantBrokerConfig.from_yaml()` (the internal reader called by `load()`) uses `yaml.safe_load(f)` which raises on parse errors. | Fix the YAML syntax. Use a YAML linter. Common errors: inconsistent indentation, unquoted special characters, tabs. |
+| `ValidationError` from Pydantic at startup | YAML parses successfully but the data structure doesn't match `ElephantBrokerConfig` fields. `cls(**data)` passes the parsed dict to the Pydantic constructor — this happens BEFORE env overrides are applied, so the error message points at the YAML, not the env. | Check field names and nesting against the schema in `schemas/config.py`. |
 | `FileNotFoundError` at startup | `--config path/to/config.yaml` points to a nonexistent file. The Click option uses `type=click.Path(exists=True)` (server.py line 24) which validates file existence. | Fix the file path. Click will print `Error: Invalid value for '--config': Path 'bad/path' does not exist.` and refuse to start. |
 
 #### Missing Sections
@@ -7126,42 +7165,52 @@ The `RuntimeContainer.from_config()` method handles database connection failures
 | Symptom | Cause | Fix |
 |---|---|---|
 | No error -- defaults are used | Every section in `ElephantBrokerConfig` has `default_factory` (e.g., `cognee: CogneeConfig = Field(default_factory=CogneeConfig)`). Missing YAML sections simply use Pydantic defaults. | This is by design. Only specify sections you want to override. |
-| `yaml.safe_load(f)` returns `None` for an empty file | Empty YAML file. `from_yaml()` handles this: `data = yaml.safe_load(f) or {}` (line 374). An empty file produces a fully-defaulted config. | An empty YAML file is valid -- it means "use all defaults". |
+| `yaml.safe_load(f)` returns `None` for an empty file | Empty YAML file. The `from_yaml()` reader handles this: `data = yaml.safe_load(f) or {}`. An empty file produces a fully-defaulted config (which env overrides then layer onto). | An empty YAML file is valid -- it means "use all defaults plus env overrides". |
 
 #### Wrong Types
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ValidationError: Input should be a valid integer` at startup | YAML value is a string where int is expected (e.g., `max_tokens: "eight thousand"`). Pydantic v2 strict mode is not enabled, so `"8192"` (string of digits) is coerced to `8192`, but `"eight thousand"` fails. | Use numeric values without quotes in YAML. `max_tokens: 8192` not `max_tokens: "eight thousand"`. |
-| `ValidationError: Input should be greater than or equal to 1` at startup | Value violates a Pydantic `Field` constraint. For example, `embedding_dimensions: 0` fails because `Field(default=1024, ge=1)`. | Check the `ge`, `le`, and value constraints defined in `schemas/config.py`. |
+| `ValidationError: Input should be greater than or equal to 1` at startup | Value violates a Pydantic `Field` constraint. For example, `embedding_dimensions: 0` fails because `Field(default=768, ge=1)`. | Check the `ge`, `le`, and value constraints defined in `schemas/config.py`. |
 | Boolean field gets unexpected value | YAML `true`/`false` are native booleans. But `"true"` (quoted) is a string. Pydantic coerces `"true"` -> `True` in non-strict mode, but `"yes"` may not coerce. | Use unquoted `true`/`false` in YAML. |
 | Float field loses precision | YAML float `0.1` is parsed as Python float. This is standard floating-point behavior, not a config error. | Not a problem in practice. |
 
 ---
 
-### 14.6 `from_yaml()` vs `from_env()` Edge Cases
+### 14.6 Env Override Edge Cases (post-F2/F3)
+
+> **Historical note.** This section used to document the asymmetry between
+> `from_env()` (which treated empty string as a set value) and `from_yaml()`
+> (which treated empty string as falsy and skipped the override). After the
+> F2/F3 unification there is exactly one path through `_apply_env_overrides()`,
+> and the empty-string asymmetry no longer exists. The `from_env()` behavior
+> won — empty string IS an override.
 
 #### Environment Variable Set to Empty String vs Not Set
 
-| Scenario | `from_env()` behavior | `from_yaml()` behavior |
-|---|---|---|
-| `EB_GATEWAY_ID=""` (set but empty) | `os.environ.get("EB_GATEWAY_ID", "local")` returns `""` because the var IS set. Gateway ID becomes empty string. | `from_yaml()` checks `if os.environ.get("EB_GATEWAY_ID"):` (line 383). An empty string is falsy, so the env override is NOT applied. YAML value (or its default) wins. |
-| `EB_GATEWAY_ID` not set at all | `os.environ.get("EB_GATEWAY_ID", "local")` returns `"local"` (the default). | `os.environ.get("EB_GATEWAY_ID")` returns `None`, which is falsy. No override applied. |
-| `EB_ORG_ID=""` (set but empty) | `os.environ.get("EB_ORG_ID") or None` returns `None` because `"" or None` is `None` in Python. Same as not set. | `os.environ.get("EB_ORG_ID")` returns `""`, which is falsy. No override. |
-| `EB_ORG_ID="myorg"` | Gateway config gets `org_id="myorg"`. | Override IS applied: line 386 `if os.environ.get("EB_ORG_ID"):` is truthy. |
+`_apply_env_overrides()` uses `if env_var not in os.environ` as the gate.
+Only "not in `os.environ` at all" skips the override. Empty string is treated
+as a set value and goes through the coercer like any other input.
 
-**Critical difference:** `from_env()` uses `os.environ.get(key, default)` which cannot distinguish "not set" from "set to empty". `from_yaml()` uses `if os.environ.get(key):` which treats both "not set" and "set to empty" as "no override". This means:
+| Scenario | Result |
+|---|---|
+| `EB_GATEWAY_ID="prod-01"` | `gateway.gateway_id = "prod-01"` (override applied). |
+| `EB_GATEWAY_ID=""` (set but empty) | `gateway.gateway_id = ""` (override applied as empty string — trips the startup safety guard, which refuses to boot with an empty gateway ID). |
+| `EB_GATEWAY_ID` not set at all | YAML value (or default `"local"` from the packaged YAML) is preserved. |
+| `EB_ORG_ID=""` (set but empty) | `gateway.org_id = None` because the binding uses the `str_or_none` coercer (`""` → `None`). |
+| `EB_ORG_ID="acme"` | `gateway.org_id = "acme"` (override applied). |
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `EB_GATEWAY_ID=""` produces different results via `from_env()` vs `from_yaml()` | `from_env()`: gateway_id becomes `""`. `from_yaml()`: gateway_id keeps YAML value or default `"local"`. | Never set `EB_GATEWAY_ID` to empty string. Either set it to a real value or leave it unset. |
-| API key set to empty string causes 401 errors in `from_env()` mode but not in `from_yaml()` mode | `from_env()` treats `EB_LLM_API_KEY=""` as an explicit empty key. `from_yaml()` does not override the YAML value because empty string is falsy. | If using YAML, set the API key in the YAML file. If using env, set a real key. |
+| Runtime refuses to boot with `EB_GATEWAY_ID="" ` | The startup safety guard rejects an empty gateway ID. After F2/F3 the empty string IS the value the env override applies — it does not silently fall back to the YAML default. | `unset EB_GATEWAY_ID` (do not export it as empty). |
+| `EB_LLM_API_KEY=""` causes 401 errors at first LLM call | Empty string is now applied as the override and the inheritance fallback only fires if the field is empty AFTER overrides — and `""` IS empty, so the fallback DOES kick in and copy `cognee.embedding_api_key`. If that is also empty, you hit the 401. | Set `EB_LLM_API_KEY` to a real key, OR set `EB_EMBEDDING_API_KEY` so the Tier-1 inheritance can populate it. |
 
 #### YAML `null` vs Absent Key
 
 | Scenario | Behavior |
 |---|---|
-| Key absent from YAML | Pydantic uses the `default_factory` or default value. This is the normal case. |
+| Key absent from YAML | Pydantic uses the `default_factory` or default value. This is the normal case. Env overrides still apply on top. |
 | Key set to `null` in YAML (e.g., `gateway: null`) | `yaml.safe_load()` parses `null` as Python `None`. Pydantic receives `gateway=None`. For a field typed as `GatewayConfig = Field(default_factory=GatewayConfig)`, Pydantic v2 rejects `None` with `ValidationError: Input should be a valid dictionary`. |
 | Nested key set to `null` (e.g., `gateway: { org_id: null }`) | The field `org_id: str | None = None` accepts `None`. This is fine. But a field like `gateway_id: str = "local"` does NOT accept `None` because it's not `str | None`. |
 
@@ -7170,16 +7219,16 @@ The `RuntimeContainer.from_config()` method handles database connection failures
 | `ValidationError: Input should be a valid dictionary` at startup | Top-level config section set to `null` in YAML instead of being omitted | Remove the line entirely, or provide a dict value `{}` |
 | `ValidationError: Input should be a valid string` | String field set to `null` in YAML but the field type is `str` not `str | None` | Remove the line or provide a string value |
 
-#### API Key Fallback Chain Difference
+#### API Key Inheritance (post-unification)
 
-| Scenario | `from_env()` | `from_yaml()` |
-|---|---|---|
-| Only `EB_EMBEDDING_API_KEY` set | `llm_api_key = os.environ.get("EB_LLM_API_KEY", "") or embedding_api_key` -- LLM key falls back to embedding key. `compaction_llm_api_key = os.environ.get("EB_COMPACTION_LLM_API_KEY", "") or llm_api_key` -- compaction falls back to LLM key. | No fallback chain. YAML must explicitly set `llm.api_key` and `compaction_llm.api_key`. If omitted, they default to `""` (empty). |
-| `EB_SUCCESSFUL_USE_API_KEY` not set | Falls back to `llm_api_key` (which may itself have fallen back to embedding key) | No fallback. Field defaults to `""`. |
+| Scenario | Result |
+|---|---|
+| Only `EB_EMBEDDING_API_KEY` set | `cognee.embedding_api_key` gets the value from the env override. After overrides, `_apply_inheritance_fallbacks()` Tier 1 copies it to `llm.api_key` (which is empty), then Tier 2 copies that into `compaction_llm.api_key`, `successful_use.api_key`, and `blocker_extraction.api_key`. Every subsystem ends up with the embedding key. |
+| `EB_SUCCESSFUL_USE_API_KEY` not set | After overrides, the field is still empty, so Tier 2 copies `llm.api_key` into it. |
+| `EB_LLM_API_KEY` set to a non-empty value, `EB_COMPACTION_LLM_API_KEY` not set | Tier 2 copies `llm.api_key` into `compaction_llm.api_key`. |
+| `EB_LLM_API_KEY` set to a non-empty value, `EB_COMPACTION_LLM_API_KEY` also set | Both env overrides apply. The Tier-2 fallback only fires if the target is empty after overrides — explicit values are always respected. |
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| LLM works in env-only mode but fails after switching to YAML config | YAML does not replicate the `from_env()` API key fallback chain. Keys that were auto-populated from `EB_EMBEDDING_API_KEY` must be explicitly set in YAML. | In YAML, explicitly set `llm.api_key`, `compaction_llm.api_key`, `successful_use.api_key`, and `blocker_extraction.api_key`. |
+The chain runs identically in both YAML+env and env-only modes (via `load(None)` + the packaged YAML). There is no longer a separate "from_env() fallback chain" that YAML mode lacked — every load goes through the same `_apply_inheritance_fallbacks()` after env overrides.
 
 ---
 
@@ -7825,7 +7874,7 @@ Do NOT mark a fact as used if the agent would have done the same without it.
 - `goal_list` -- session goal titles and descriptions, or "(none)"
 - `conversation` -- all messages from `turn_messages` batches, each content truncated to 500 chars, total truncated to 4000 chars
 - `turn_count` -- number of turn batches
-- Uses own dedicated httpx client with `SuccessfulUseConfig.endpoint` (default: `http://host.docker.internal:8811/v1`)
+- Uses own dedicated httpx client with `SuccessfulUseConfig.endpoint` (default: `http://localhost:8811/v1`)
 - Uses raw OpenAI-compatible API (`/chat/completions`), not `LLMClient`
 
 ---
@@ -7884,7 +7933,7 @@ Return JSON: [{"goal_index": int, "blocker_text": "description of the blocker"}]
 **Parameters injected:**
 - `goal_list` -- indexed goals with titles, descriptions, and existing blockers
 - `messages` -- last `recent_messages_window` messages (default: 10), each content truncated to 500 chars, total truncated to 4000 chars
-- Uses own dedicated httpx client with `BlockerExtractionConfig.endpoint` (default: `http://host.docker.internal:8811/v1`)
+- Uses own dedicated httpx client with `BlockerExtractionConfig.endpoint` (default: `http://localhost:8811/v1`)
 - Uses raw OpenAI-compatible API (`/chat/completions`), not `LLMClient`
 
 ---
@@ -8764,17 +8813,27 @@ Cognee datasets are gateway-scoped: `f"{gateway_id}__{base}"`. This provides iso
 
 ### 5.1 ALL Default Passwords/Keys That MUST Be Changed
 
-| Default | Location | Replacement |
-|---------|----------|-------------|
-| Neo4j: `elephant_dev` | `config.py:13`, `default.yaml:14`, `docker-compose.yml:10`, `from_env()` fallback | Strong random password (32+ chars) |
-| ClickHouse: `""` (empty) | `docker-compose.yml:52`, `otel-collector-config.yaml:15` | Strong random password; update both compose and collector config |
-| Redis: no auth | `docker-compose.yml` (no `--requirepass`) | Set `requirepass` in redis.conf; update `EB_REDIS_URL` to include password |
-| HITL HMAC: `""` (empty) | `config.py:295` HitlConfig default | `openssl rand -hex 32`; set in both runtime and HITL env files |
-| Gateway ID: `"local"` | `config.py:196` GatewayConfig default, `default.yaml:6` | Unique per-deployment identifier (e.g., `gw-prod-us-east-1`) |
+> **B7 line-number audit:** Path:line references in this table drift on every
+> schema reorg (the F2/F3 unification alone shifted every `schemas/config.py`
+> line by hundreds). Locations are now expressed as search anchors against the
+> file — grep for the quoted token to find the current line.
+
+| Default | Location (search anchor) | Replacement |
+|---------|--------------------------|-------------|
+| Neo4j: `elephant_dev` | `elephantbroker/schemas/config.py` (search `neo4j_password: str = "elephant_dev"` in `CogneeConfig`); `elephantbroker/config/default.yaml` (search `neo4j_password:`); `infrastructure/docker-compose.yml` (search `NEO4J_AUTH=neo4j/elephant_dev`); `_apply_inheritance_fallbacks()` does NOT cover this — set `EB_NEO4J_PASSWORD` explicitly | Strong random password (32+ chars) |
+| ClickHouse: `""` (empty) | `infrastructure/docker-compose.yml` (search `CLICKHOUSE_PASSWORD`), `infrastructure/otel-collector-config.yaml` (search `clickhouse:` exporter block) | Strong random password; update both compose and collector config |
+| Redis: no auth | `infrastructure/docker-compose.yml` (no `--requirepass` in the `redis:` service command) | Set `requirepass` in redis.conf; update `EB_REDIS_URL` to include password |
+| HITL HMAC: `""` (empty) | `elephantbroker/schemas/config.py` (search `class HitlConfig` → `callback_hmac_secret: str = ""`) | `openssl rand -hex 32`; set in both runtime (`EB_HITL_CALLBACK_SECRET`) and HITL env files |
+| Gateway ID: `"local"` | `elephantbroker/schemas/config.py` (search `class GatewayConfig` → `gateway_id: str = "local"`); `elephantbroker/config/default.yaml` (search `gateway_id:` under the top-level `gateway:` block) | Unique per-deployment identifier (e.g., `gw-prod-us-east-1`) — set via `EB_GATEWAY_ID` |
 | Grafana: default `admin/admin` | Docker image default | Set `GF_SECURITY_ADMIN_PASSWORD` in compose env |
 | Jaeger: no auth | Docker image default | Deploy behind reverse proxy with auth; or use production Jaeger with auth |
 
 ### 5.2 Pre-Deployment Security Checklist
+
+> **B4 PR #3 status markers:** Items marked `(✓ PR #3)` are now implemented by
+> `deploy/install.sh`, `deploy/update.sh`, the systemd unit files, or the
+> packaged config. They still belong on the checklist as gates the operator
+> should verify, but they no longer require manual scripting work.
 
 ```
 SECRETS
@@ -8786,12 +8845,23 @@ SECRETS
 [ ] ClickHouse password set (non-empty)
 [ ] OTEL collector config updated with ClickHouse password
 [ ] EB_HITL_CALLBACK_SECRET generated (openssl rand -hex 32)
+    (✓ PR #3: install.sh F11 block auto-generates and writes the secret to
+     both /etc/elephantbroker/env and /etc/elephantbroker/hitl.env on first
+     install — operator only needs to verify post-install that both files
+     contain the same value)
 [ ] EB_HITL_CALLBACK_SECRET set in BOTH env and hitl.env
+    (✓ PR #3: install.sh F11 enforces this; update.sh preserves the
+     existing secret across upgrades)
 [ ] EB_LLM_API_KEY set (not empty)
 [ ] EB_EMBEDDING_API_KEY set (not empty)
 [ ] Grafana admin password changed (if observability profile used)
 [ ] No secrets committed to git repository
-[ ] Env files have 0600 permissions, owned by service user
+[ ] Env files have 0640 permissions, owned by root:elephantbroker
+    (✓ PR #3 / Bucket C C2: install.sh writes /etc/elephantbroker/env and
+     hitl.env as root:elephantbroker mode 0640 — root owns the files so a
+     compromised runtime cannot rewrite its own secrets, but the service
+     group can read them. The previous 0600/service-user form let the
+     runtime overwrite its own credentials.)
 
 NETWORK
 [ ] Firewall rules restrict port 8420 to OpenClaw VM IP only
@@ -8816,10 +8886,25 @@ DATA ISOLATION
 
 CONTAINER/PROCESS
 [ ] Runtime runs as non-root dedicated service user
+    (✓ PR #3 / Bucket C C1: install.sh creates the dedicated `elephantbroker`
+     system user with `useradd --system --shell /usr/sbin/nologin
+     --home-dir /var/lib/elephantbroker` — no interactive login possible)
 [ ] Dockerfile uses non-root USER directive
 [ ] systemd service has security hardening directives
+    (✓ PR #3 / Bucket D: ProtectSystem=strict, NoNewPrivileges=true,
+     RestrictAddressFamilies, ProtectKernelTunables/Modules/Logs/Clock,
+     RestrictNamespaces, LockPersonality, UMask=0027, MemoryMax/CPUQuota
+     resource caps, and ReadWritePaths narrowed to /var/lib/elephantbroker
+     plus /opt/elephantbroker/.venv/lib only — see deploy/systemd/)
 [ ] Data directory permissions restricted to service user
+    (✓ PR #3 / Bucket C C3: /opt/elephantbroker/ stays root-owned;
+     only /var/lib/elephantbroker and the Cognee writable subdirs under
+     .venv/lib/.../cognee/ are chowned to elephantbroker:elephantbroker)
 [ ] Cognee writable directories have minimal permissions (not 777)
+    (✓ PR #3 / Bucket C C3: install.sh now uses dedicated user ownership
+     instead of the old `chmod -R 777` workaround — Cognee's
+     .cognee_system/ and .data_storage/ are chowned to elephantbroker
+     with the default 0750 mode)
 [ ] Log files do not contain API keys or passwords
 ```
 
@@ -8829,54 +8914,66 @@ CONTAINER/PROCESS
 
 ### 6.1 Dockerfile Improvements
 
-Current `Dockerfile` issues:
-- Runs as root (no `USER` directive)
-- No `HEALTHCHECK` instruction
-- No read-only filesystem
-- Copies entire site-packages (includes dev tools)
-- No `.dockerignore` audit for secrets
+> **STATUS: PARTIALLY IMPLEMENTED.** The `Dockerfile` was rewritten to use
+> `uv sync --frozen` (matching the native install path) and the broken
+> `pip install --force-reinstall mistralai` hack was removed. However, the
+> Dockerfile is still labeled as dev/CI-only per `CLAUDE.md` — production
+> deployments use `deploy/install.sh` on a real host with the dedicated
+> `elephantbroker` system user.
+>
+> Remaining gaps for hardening the Dockerfile (if you want to run the
+> container in production):
+> - No `USER` directive (runs as root inside the container)
+> - No `HEALTHCHECK` instruction
+> - No read-only filesystem
+> - No `.dockerignore` audit for secrets
+>
+> The Recommended Dockerfile below shows what a fully-hardened version
+> would look like — it builds on the current uv-based Dockerfile and adds
+> a non-root user and HEALTHCHECK. Apply only if you intend to run the
+> container in production despite the CLAUDE.md guidance.
 
-**Recommended Dockerfile:**
+**Recommended Dockerfile (extends the current uv-based one):**
 ```dockerfile
 FROM python:3.11-slim AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
+
 WORKDIR /app
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock ./
 COPY elephantbroker/ elephantbroker/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir . && \
-    pip install --no-cache-dir --force-reinstall --no-deps 'mistralai>=1.0'
+
+RUN uv sync --frozen --no-dev
 
 FROM python:3.11-slim AS runtime
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 
 # Create non-root user
-RUN groupadd -r ebruntime && useradd -r -g ebruntime -d /app -s /sbin/nologin ebruntime
+RUN groupadd -r elephantbroker && useradd -r -g elephantbroker -d /app -s /sbin/nologin elephantbroker
 
 WORKDIR /app
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder /app/elephantbroker /app/elephantbroker
-COPY elephantbroker/config/default.yaml /app/config/default.yaml
-
-# Cognee writable directories (owned by non-root user)
-RUN mkdir -p /app/data /app/config && \
-    chown -R ebruntime:ebruntime /app
+COPY --from=builder --chown=elephantbroker:elephantbroker /app/.venv /app/.venv
+COPY --from=builder --chown=elephantbroker:elephantbroker /app/elephantbroker /app/elephantbroker
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --chown=elephantbroker:elephantbroker elephantbroker/config/default.yaml /etc/elephantbroker/default.yaml
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8420/health/')" || exit 1
 
-USER ebruntime
+USER elephantbroker
+ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8420
 
 # Read-only root filesystem (data volume mounted separately)
 # Use --read-only flag in docker run / compose
 
-ENTRYPOINT ["elephantbroker", "serve", "--config", "/app/config/default.yaml"]
+ENTRYPOINT ["elephantbroker", "serve", "--config", "/etc/elephantbroker/default.yaml"]
 ```
 
 ### 6.2 HITL Middleware Dockerfile
 
-Current `hitl-middleware/Dockerfile` has the same issues. Apply identical hardening (non-root user, HEALTHCHECK, minimal base).
+`hitl-middleware/Dockerfile` has the same hardening gaps. Apply identical
+hardening (non-root user, HEALTHCHECK, minimal base) if running in production.
 
 ### 6.3 Docker Compose Network Isolation
 
@@ -8911,63 +9008,96 @@ services:
 
 ### 6.4 systemd Hardening Directives
 
-The current `elephantbroker.service` unit file lacks security hardening. Add these directives:
+> **STATUS: IMPLEMENTED.** The systemd unit files in `deploy/systemd/` ship
+> with full security hardening directives. They are installed by
+> `deploy/install.sh` and run under the dedicated `elephantbroker` system
+> user (no shell, no interactive login). The list below documents the
+> directives that are actually applied — see `deploy/systemd/elephantbroker.service`
+> for the canonical source.
 
 ```ini
 [Service]
 Type=simple
-User=ebruntime
-Group=ebruntime
+User=elephantbroker
+Group=elephantbroker
 WorkingDirectory=/var/lib/elephantbroker
 
 EnvironmentFile=/etc/elephantbroker/env
-ExecStart=/opt/elephant-broker/venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
+ExecStart=/opt/elephantbroker/.venv/bin/elephantbroker serve --config /etc/elephantbroker/default.yaml --host 0.0.0.0 --port 8420
 
 Restart=on-failure
 RestartSec=5
 
-# Security hardening
-NoNewPrivileges=yes
+# Filesystem hardening
 ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-MemoryDenyWriteExecute=yes
-LockPersonality=yes
+# Bucket D D1: ReadWritePaths narrowed from the entire /opt/elephantbroker
+# tree to /opt/elephantbroker/.venv/lib only. Cognee's writable state
+# (.venv/lib/python*/site-packages/cognee/.cognee_system/ and .data_storage/)
+# is reachable through .venv/lib, but source code, pyproject.toml, uv.lock,
+# the venv binaries, and this systemd unit file are now read-only at the
+# kernel MAC layer. Pairs with the C3 DAC narrowing where /opt/elephantbroker/
+# stays root-owned.
+ReadWritePaths=/var/lib/elephantbroker /opt/elephantbroker/.venv/lib
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
 
-# Allow writes only to data directory and Cognee dirs
-ReadWritePaths=/var/lib/elephantbroker/data
-ReadWritePaths=/opt/elephant-broker/venv/lib/python3.12/site-packages/cognee/.cognee_system
-ReadWritePaths=/opt/elephant-broker/venv/lib/python3.12/site-packages/cognee/.data_storage
-
-# Restrict network to only needed ports
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-
-# Resource limits
+# Resource limits (Bucket D D2)
+MemoryMax=8G
+MemoryHigh=6G
+TasksMax=512
+CPUQuota=400%
 LimitNOFILE=65536
-LimitNPROC=4096
+
+# Privilege hardening
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Kernel & namespace hardening
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# File creation mask (640 by default instead of 644)
+UMask=0027
 ```
 
-Apply identical hardening to `elephantbroker-hitl.service`.
+`elephantbroker-hitl.service` ships with the same hardening directives —
+both unit files share identical security configuration since they run as the
+same service user against the same filesystem layout.
 
 ### 6.5 Cognee Writable Directories
 
-The current deployment guide sets `chmod -R 777` on Cognee's package directory. This is an overly broad permission. Instead:
+> **STATUS: IMPLEMENTED (post-Bucket C C3).** `deploy/install.sh` pre-creates
+> Cognee's writable state directories and chowns ONLY those subdirs to the
+> service user — `/opt/elephantbroker/` itself stays root-owned. The old
+> `chmod -R 777` workaround from earlier docs has been removed (it left
+> Cognee state world-writable), and the previous `chown -R
+> elephantbroker:elephantbroker /opt/elephantbroker` has been narrowed to a
+> targeted chown of just the Cognee writable subtree. Pairs with the
+> Bucket D D1 systemd `ReadWritePaths` narrowing — together, the runtime
+> can write Cognee state but cannot rewrite its own source, lockfile,
+> venv binaries, or systemd unit file.
 
 ```bash
-# Create Cognee state dirs owned by service user (not world-writable)
-mkdir -p venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
-mkdir -p venv/lib/python3.*/site-packages/cognee/.data_storage
-chown -R ebruntime:ebruntime venv/lib/python3.*/site-packages/cognee/.cognee_system
-chown -R ebruntime:ebruntime venv/lib/python3.*/site-packages/cognee/.data_storage
-chmod -R 750 venv/lib/python3.*/site-packages/cognee/.cognee_system
-chmod -R 750 venv/lib/python3.*/site-packages/cognee/.data_storage
+# What deploy/install.sh actually does after Bucket C:
+# Step 5b — pre-create Cognee writable subdirs:
+mkdir -p /opt/elephantbroker/.venv/lib/python3.*/site-packages/cognee/.cognee_system/databases
+mkdir -p /opt/elephantbroker/.venv/lib/python3.*/site-packages/cognee/.data_storage
+
+# Step 7 — narrowed ownership (NOT a recursive chown of /opt/elephantbroker):
+chown -R elephantbroker:elephantbroker \
+    /opt/elephantbroker/.venv/lib/python3.*/site-packages/cognee/.cognee_system \
+    /opt/elephantbroker/.venv/lib/python3.*/site-packages/cognee/.data_storage
+chown -R elephantbroker:elephantbroker /var/lib/elephantbroker
+# /opt/elephantbroker/ itself, the venv binaries, source code, pyproject.toml,
+# and uv.lock all remain root-owned. A compromised runtime cannot rewrite them.
 ```
 
 ### 6.6 Error Message Information Leakage
@@ -8991,24 +9121,29 @@ return JSONResponse(status_code=500, content=detail.model_dump())
 
 ## Summary of Critical Items by Priority
 
-| Priority | Item | Section |
-|----------|------|---------|
-| **CRITICAL** | AuthMiddleware is a stub -- all endpoints unauthenticated | 3.1 |
-| **CRITICAL** | Neo4j default password `elephant_dev` hardcoded in 4 locations | 5.1 |
-| **CRITICAL** | Redis has no authentication configured | 5.1 |
-| **CRITICAL** | Gateway identity headers trusted without validation | 3.2 |
-| **HIGH** | `get_entity()` calls without `gateway_id` enable cross-gateway data access | 4.2 |
-| **HIGH** | Bootstrap mode allows unauthenticated org/actor creation | 3.3 |
-| **HIGH** | HITL intent endpoints (`/intents/*`) have no authentication | 3.4 |
-| **HIGH** | ClickHouse has empty password | 5.1 |
-| **HIGH** | Runtime/HITL serve plain HTTP (no TLS) | 2.4 |
-| **HIGH** | Dockerfile runs as root | 6.1 |
-| **MEDIUM** | Error handler leaks internal exception messages | 6.6 |
-| **MEDIUM** | No rate limiting on any endpoint | 3.5 |
-| **MEDIUM** | GDPR delete does not clean Cognee internal artifacts | 4.5 |
-| **MEDIUM** | Cognee directories set to 777 | 6.5 |
-| **MEDIUM** | systemd units lack security hardening | 6.4 |
-| **MEDIUM** | Docker Compose exposes infrastructure ports on host | 2.3 |
+> **Status column key:** `(✓ PR #3)` indicates the item is implemented in the
+> deploy/install + systemd hardening work that shipped with PR #3 (Buckets A,
+> C, D, E, F). Items without a status marker are still open and require
+> operator action or follow-up work.
+
+| Priority | Item | Section | Status |
+|----------|------|---------|--------|
+| **CRITICAL** | AuthMiddleware is a stub -- all endpoints unauthenticated | 3.1 | open |
+| **CRITICAL** | Neo4j default password `elephant_dev` hardcoded in 4 locations | 5.1 | open |
+| **CRITICAL** | Redis has no authentication configured | 5.1 | open |
+| **CRITICAL** | Gateway identity headers trusted without validation | 3.2 | open |
+| **HIGH** | `get_entity()` calls without `gateway_id` enable cross-gateway data access | 4.2 | open |
+| **HIGH** | Bootstrap mode allows unauthenticated org/actor creation | 3.3 | open |
+| **HIGH** | HITL intent endpoints (`/intents/*`) have no authentication | 3.4 | open |
+| **HIGH** | ClickHouse has empty password | 5.1 | open |
+| **HIGH** | Runtime/HITL serve plain HTTP (no TLS) | 2.4 | open |
+| **HIGH** | Dockerfile runs as root | 6.1 | open (Dockerfile is dev/CI-only per CLAUDE.md; production uses install.sh + native systemd as a non-root service user — see 6.4) |
+| **MEDIUM** | Error handler leaks internal exception messages | 6.6 | open |
+| **MEDIUM** | No rate limiting on any endpoint | 3.5 | open |
+| **MEDIUM** | GDPR delete does not clean Cognee internal artifacts | 4.5 | open |
+| **MEDIUM** | Cognee directories set to 777 | 6.5 | **(✓ PR #3 / Bucket C C3)** install.sh now uses dedicated user ownership instead of `chmod -R 777`; only Cognee writable subdirs are chowned to elephantbroker, the rest of /opt/elephantbroker stays root-owned |
+| **MEDIUM** | systemd units lack security hardening | 6.4 | **(✓ PR #3 / Bucket D)** ProtectSystem=strict, NoNewPrivileges, RestrictAddressFamilies, ProtectKernel*, RestrictNamespaces, LockPersonality, UMask=0027, MemoryMax/CPUQuota caps, ReadWritePaths narrowed to /var/lib/elephantbroker + .venv/lib only |
+| **MEDIUM** | Docker Compose exposes infrastructure ports on host | 2.3 | open |
 | **LOW** | No CORS policy configured | 3.5 |
 | **LOW** | Grafana default admin password | 5.1 |
 | **LOW** | Qdrant vector delete is best-effort | 4.5 |

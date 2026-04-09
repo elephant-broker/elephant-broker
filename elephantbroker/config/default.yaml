@@ -1,35 +1,451 @@
-# ElephantBroker default configuration — FULL tier (memory + context).
-# Literal defaults — environment variables override at runtime.
-# See: EB_GATEWAY_ID, EB_ORG_ID, EB_TEAM_ID, EB_NEO4J_URI, etc.
+# =============================================================================
+# ElephantBroker — comprehensive default configuration (FULL tier)
+# =============================================================================
+#
+# This file is the source of truth for ~90% of runtime configuration. Per
+# deployment convention, env files only carry secrets and infra-specific
+# overrides — everything else lives here.
+#
+# Source schema:  elephantbroker/schemas/config.py
+# Loading:        elephantbroker serve --config /etc/elephantbroker/default.yaml
+#                 (or omit --config to load THIS file as the packaged resource
+#                  via ElephantBrokerConfig.load())
+# Env overrides:  Every entry in `ENV_OVERRIDE_BINDINGS` (elephantbroker/schemas/config.py)
+#                 overrides its YAML field at load time — currently 72 bindings.
+#                 After the F2/F3 unification (PR #3), there is exactly one
+#                 config load path: `ElephantBrokerConfig.load()`, which parses
+#                 the YAML, applies env overrides, runs the inheritance fallbacks,
+#                 then validates against the Pydantic schema. Under the hood,
+#                 `load()` wraps `ElephantBrokerConfig.from_yaml()` — the legacy
+#                 `from_env()` classmethod was deleted in F2/F3, but `from_yaml()`
+#                 is still the actual YAML+env reader and is directly exercised
+#                 by the unit tests. Callers should use `load()`; `from_yaml()`
+#                 remains as the documented implementation target.
+#                 Bindings are tagged inline below as `env: EB_*`. An inverse
+#                 contract test in tests/unit/schemas pins every env var that
+#                 source code references back to a binding here.
+#                 See docs/CONFIGURATION.md §1 for the full env var matrix and
+#                 elephantbroker/config/env.example for a runnable env file.
+#
+# Conventions:
+#   `env: EB_X`   — field is overridable by env var EB_X via ENV_OVERRIDE_BINDINGS
+#   `(secret)`    — value should NOT be committed; set via env on the deployment host
+#   `(off)`       — feature disabled by default; comment explains what enabling it does
+#
+# Bind host/port for the FastAPI server are CLI flags, NOT YAML keys:
+#   elephantbroker serve --config <this-file> --host 0.0.0.0 --port 8420
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Identity — gateway, org, team
+# -----------------------------------------------------------------------------
+# `gateway_id` is the runtime's *fallback* identity. In production, the TS
+# plugin sends `X-EB-Gateway-ID` per request and that header value is the real
+# identity used for Redis namespacing, metrics, traces, and Cypher filters.
+# This YAML value is only used when the header is absent (standalone/dev mode).
+#
+# `org_id` and `team_id` are NOT sent per-request — they bind THIS runtime to
+# an org/team for profile inheritance, scope-aware goal visibility, and
+# consolidation routing. They MUST be the UUIDs emitted by `ebrun bootstrap`.
 
 gateway:
-  gateway_id: "local"
-  org_id: ""
-  team_id: ""
-  agent_authority_level: 0
+  gateway_id: ""                     # env: EB_GATEWAY_ID — REQUIRED. Runtime refuses to boot if empty (set EB_ALLOW_DEFAULT_GATEWAY_ID=true to override for dev/test)
+  gateway_short_name: ""             # env: EB_GATEWAY_SHORT_NAME — human-friendly log/trace label; defaults to first 8 chars of gateway_id
+                                     # WARNING: also a TS-plugin env var; keep both VMs in sync to avoid mismatched log labels
+  register_agent_identity: true      # auto-register agent self-ActorRef on session_start
+  register_agent_actor: true         # create ActorDataPoint for the agent (required for OWNS_GOAL edges)
+  org_id: null                       # env: EB_ORG_ID — UUID from `ebrun bootstrap` (required for org-scoped features)
+  team_id: null                      # env: EB_TEAM_ID — UUID from `ebrun bootstrap` (required for team-scoped features)
+  agent_authority_level: 0           # env: EB_AGENT_AUTHORITY_LEVEL — 0=worker, higher=more authority for admin operations (see profiles)
+
+
+# -----------------------------------------------------------------------------
+# Cognee knowledge plane — Neo4j (graph) + Qdrant (vector) + Embedding
+# -----------------------------------------------------------------------------
+# Cognee owns both the graph and vector stores. This block configures all 3.
+# Direct adapter access (GraphAdapter/VectorAdapter) reads from these same
+# instances but uses Cypher and qdrant-client respectively.
 
 cognee:
-  neo4j_uri: "bolt://localhost:7687"
-  neo4j_user: "neo4j"
-  neo4j_password: "elephant_dev"  # dev/test default — override via EB_NEO4J_PASSWORD in production
-  qdrant_url: "http://localhost:6333"
-  embedding_endpoint: "http://localhost:8811/v1"
+  neo4j_uri: "bolt://localhost:7687"            # env: EB_NEO4J_URI
+  neo4j_user: "neo4j"                           # env: EB_NEO4J_USER
+  neo4j_password: ""                            # env: EB_NEO4J_PASSWORD — (secret) REQUIRED. Runtime refuses to boot with empty password unless EB_DEV_MODE=true
+  qdrant_url: "http://localhost:6333"           # env: EB_QDRANT_URL
+  default_dataset: "elephantbroker"             # env: EB_DEFAULT_DATASET — DANGER: changing this orphans all existing Cognee data
+  embedding_provider: "openai"                  # env: EB_EMBEDDING_PROVIDER — API client style (openai SDK shape) — works for any LiteLLM-routed backend
+  embedding_model: "gemini/text-embedding-004"  # env: EB_EMBEDDING_MODEL — must match what your LiteLLM proxy actually serves
+  embedding_endpoint: "http://localhost:8811/v1" # env: EB_EMBEDDING_ENDPOINT
+  embedding_api_key: ""                         # env: EB_EMBEDDING_API_KEY (secret)
+  embedding_dimensions: 768                     # env: EB_EMBEDDING_DIMENSIONS — MUST match the embedding_model output dim (gemini/text-embedding-004 = 768; openai/text-embedding-3-large = 1024)
 
-llm:
-  # IMPORTANT: Cognee requires the "openai/" prefix — it strips it internally
-  # and sends "gemini/gemini-2.5-pro" to the LiteLLM proxy.
-  model: "openai/gemini/gemini-2.5-pro"
-  endpoint: "http://localhost:8811/v1"
+
+# -----------------------------------------------------------------------------
+# Infrastructure — Redis, OTEL, ClickHouse
+# -----------------------------------------------------------------------------
 
 infra:
-  redis_url: "redis://localhost:6379"
-  # Supported: debug, verbose, info, warning, error, critical
-  # "verbose" shows per-item assembly decisions without full DEBUG payloads
-  log_level: "info"
+  redis_url: "redis://localhost:6379"   # env: EB_REDIS_URL — required for nearly every feature (sessions, goals, working set, ingest buffers)
+  otel_endpoint: null                   # env: EB_OTEL_ENDPOINT — set to e.g. "http://localhost:4317" to ship spans to Jaeger/Collector. null = @traced spans are no-ops
+  log_level: "INFO"                     # env: EB_LOG_LEVEL — debug | verbose | info | warning | error | critical (verbose = per-item assembly decisions, no DEBUG dumps; the runtime registers a custom VERBOSE level at level 15 — see runtime/observability.py — note that the HITL middleware uses standard Python logging and does NOT support `verbose`)
+  metrics_ttl_seconds: 3600             # env: EB_METRICS_TTL_SECONDS — how long Prometheus counter samples stay in the in-memory store before pruning
 
-profile_cache:
-  ttl_seconds: 300
+  # In-memory TraceLedger retention + OTEL log export.
+  # TraceLedger persists every lifecycle event (FACT_EXTRACTED, CONTEXT_ASSEMBLED, etc.)
+  # for /trace API queries. Higher memory_max_events = better forensics, more RAM.
+  # B9 (TODO-3-103): event name was previously documented as ASSEMBLE_COMPLETE which
+  # is not a valid TraceEventType — the canonical name is CONTEXT_ASSEMBLED
+  # (see elephantbroker/schemas/trace.py TraceEventType enum).
+  trace:
+    memory_max_events: 10000            # env: EB_TRACE_MEMORY_MAX_EVENTS — ring buffer size for in-memory trace events
+    memory_ttl_seconds: 3600            # individual events evicted after this age
+    otel_logs_enabled: false            # env: EB_TRACE_OTEL_LOGS_ENABLED — bridge trace events to OTEL log exporter (requires otel_endpoint set)
+
+  # ClickHouse — durable cross-session analytics for trace events.
+  # When enabled, trace events flow OTEL Collector → ClickHouse for querying via /trace API.
+  # Required for Phase 9 consolidation Stage 7 (procedure pattern detection from history).
+  clickhouse:
+    enabled: false                      # env: EB_CLICKHOUSE_ENABLED — (off) without this, /trace queries are limited to in-memory ring buffer only
+    host: "localhost"                   # env: EB_CLICKHOUSE_HOST
+    port: 8123                          # env: EB_CLICKHOUSE_PORT
+    database: "otel"                    # env: EB_CLICKHOUSE_DATABASE
+    user: "default"                     # env: EB_CLICKHOUSE_USER — managed clusters (Aiven, ClickHouse Cloud, Altinity) require non-default users
+    password: ""                        # env: EB_CLICKHOUSE_PASSWORD — REQUIRED on any auth-enabled cluster; leave empty for unauthenticated local dev
+    logs_table: "otel_logs"             # env: EB_CLICKHOUSE_LOGS_TABLE — override if your OTEL Collector writes to a non-default table name
+
+
+# -----------------------------------------------------------------------------
+# LLM — primary model for fact extraction, classification, summarization
+# -----------------------------------------------------------------------------
+# This is the "expensive" model used for the main extraction pipeline.
+# Compaction, goal refinement, and successful-use have their own (cheaper)
+# model configurations below.
+
+llm:
+  # MUST keep "openai/" prefix — Cognee requires it for routing through its
+  # OpenAI-compatible client and strips it internally before sending to LiteLLM
+  # (LiteLLM ultimately sees "gemini/gemini-2.5-pro"). Without the prefix,
+  # Cognee hangs at startup on the LLM connection test.
+  model: "openai/gemini/gemini-2.5-pro"          # env: EB_LLM_MODEL
+  endpoint: "http://localhost:8811/v1"            # env: EB_LLM_ENDPOINT — your LiteLLM proxy URL
+  api_key: ""                                     # env: EB_LLM_API_KEY (secret) — falls back to EB_EMBEDDING_API_KEY if empty
+  max_tokens: 8192                                # env: EB_LLM_MAX_TOKENS — max output tokens for general LLM calls
+  temperature: 0.1                                # env: EB_LLM_TEMPERATURE — low = deterministic extraction; >0.5 = nondeterministic/hallucinations
+  extraction_max_input_tokens: 4000               # env: EB_LLM_EXTRACTION_MAX_INPUT_TOKENS — truncates conversation context fed to extraction prompt
+  extraction_max_output_tokens: 16384             # env: EB_LLM_EXTRACTION_MAX_OUTPUT_TOKENS — max JSON payload returned by extraction call
+  extraction_max_facts_per_batch: 10              # env: EB_LLM_EXTRACTION_MAX_FACTS — how many facts to extract per LLM call; too high = noisy
+  summarization_max_output_tokens: 200            # env: EB_LLM_SUMMARIZATION_MAX_OUTPUT_TOKENS — max length of artifact summaries
+  summarization_min_artifact_chars: 500           # env: EB_LLM_SUMMARIZATION_MIN_CHARS — artifacts shorter than this are NOT LLM-summarized (kept verbatim)
+  ingest_batch_size: 6                            # env: EB_INGEST_BATCH_SIZE — messages buffered before triggering ingest pipeline
+  ingest_batch_timeout_seconds: 60.0              # env: EB_INGEST_BATCH_TIMEOUT — max wait before forcing ingest on a partial batch
+  ingest_buffer_ttl_seconds: 300                  # env: EB_INGEST_BUFFER_TTL — Redis TTL for ingest buffer keys (must be >= ingest_batch_timeout_seconds)
+  extraction_context_facts: 20                    # env: EB_EXTRACTION_CONTEXT_FACTS — recent existing facts injected into extraction prompt for dedup awareness
+  extraction_context_ttl_seconds: 3600            # env: EB_EXTRACTION_CONTEXT_TTL — how long the extraction context cache stays warm in Redis
+
+
+# -----------------------------------------------------------------------------
+# Compaction LLM — separate (cheaper) model for context compaction summaries
+# -----------------------------------------------------------------------------
+# Compaction runs frequently (every N turns) and produces short summaries —
+# using a smaller/cheaper model here saves significant cost vs the primary LLM.
+# Falls back to llm.endpoint and llm.api_key when these are empty.
+
+compaction_llm:
+  model: "gemini/gemini-2.5-flash"      # env: EB_COMPACTION_LLM_MODEL — cheaper, faster than the primary extraction model
+  endpoint: ""                          # env: EB_COMPACTION_LLM_ENDPOINT — F7: empty inherits llm.endpoint at load time; set explicitly only if compaction targets a different LiteLLM proxy
+  api_key: ""                           # env: EB_COMPACTION_LLM_API_KEY (secret) — falls back to llm.api_key if empty
+  max_tokens: 2000                      # compaction summaries are short
+  temperature: 0.2
+
+
+# -----------------------------------------------------------------------------
+# Reranker — Qwen3-Reranker-4B cross-encoder for retrieval refinement
+# -----------------------------------------------------------------------------
+# Re-orders the top-K retrieval candidates using a cross-encoder, dramatically
+# improving relevance vs vector similarity alone. Requires a separate inference
+# server (vLLM, TEI, etc.) hosting the model.
+
+reranker:
+  enabled: true                         # env: EB_RERANKER_ENABLED — set false if you don't have a Qwen3-Reranker server; retrieval falls back to scoring-only ranking
+  endpoint: "http://localhost:1235"     # env: EB_RERANKER_ENDPOINT
+  api_key: ""                           # env: EB_RERANKER_API_KEY (secret)
+  model: "Qwen/Qwen3-Reranker-4B"       # env: EB_RERANKER_MODEL
+  timeout_seconds: 10.0                 # too low = transient failures cascade; too high = blocks every retrieval
+  batch_size: 32                        # candidates batched per HTTP call; too low = many roundtrips
+  max_documents: 100                    # hard cap on candidates sent to reranker per query
+  fallback_on_error: true               # on reranker failure, return scoring-only ranking instead of raising
+  top_n: null                           # if set, return only top-N reranked results; null = return all reranked
+
+
+# -----------------------------------------------------------------------------
+# Embedding cache — Redis-backed deduplication of embedding API calls
+# -----------------------------------------------------------------------------
+# Caches embeddings by SHA256(text) so the same text never hits the embedding
+# API twice. Cache key prefix is intentionally NOT gateway-scoped (embeddings
+# are deterministic per text+model).
+
+embedding_cache:
+  enabled: true                         # env: EB_EMBEDDING_CACHE_ENABLED — huge cost savings on repeated text; only disable for benchmarks
+  ttl_seconds: 3600                     # env: EB_EMBEDDING_CACHE_TTL — 1h is a reasonable default; raise if your text corpus is highly repetitive
+  key_prefix: "eb:emb_cache"            # do not change without flushing existing cache
+
+
+# -----------------------------------------------------------------------------
+# Working set scoring — global tunables (per-profile weights live in ProfileRegistry)
+# -----------------------------------------------------------------------------
+# This block configures the SHARED scoring infrastructure. The 11-dimension
+# weight VECTORS that determine how much each dimension matters per profile
+# are hardcoded in elephantbroker/runtime/profiles/registry.py — they are not
+# YAML-configurable (they are profile-specific presets, not global defaults).
+
+scoring:
+  neutral_use_prior: 0.5                # default usefulness score before any successful-use tracking has run
+  cheap_prune_max_candidates: 80        # max candidates that survive the cheap-prune stage before scoring
+  semantic_blend_weight: 0.6            # weight of semantic similarity vs cross-encoder in the rerank blend
+  merge_similarity_threshold: 0.95      # cosine threshold above which two candidates are merged as duplicates
+  snapshot_ttl_seconds: 300             # env: EB_SCORING_SNAPSHOT_TTL — must be > expected single-turn duration or successful-use tracking misses
+  session_goals_ttl_seconds: 86400      # env: EB_SESSION_GOALS_TTL — Redis TTL for session goal lists
+  working_set_build_global_goals_filter_by_actors: true  # GLOBAL-scope goals visible only to authorized actors
+
+
+# -----------------------------------------------------------------------------
+# Verification multipliers — claim confidence adjustments based on evidence quality
+# -----------------------------------------------------------------------------
+# When a fact has an associated claim, its confidence is multiplied by these
+# values based on the claim's verification state. Tunes how skeptical the
+# system is about unverified claims.
+
+verification_multipliers:
+  supervisor_verified: 1.0              # human-confirmed → full confidence
+  tool_supported: 0.9                   # tool output supports the claim
+  self_supported: 0.7                   # agent's own reasoning supports the claim
+  unverified: 0.5                       # no evidence yet
+  no_claim: 0.8                         # fact has no associated claim (neutral baseline)
+
+
+# -----------------------------------------------------------------------------
+# Conflict detection — contradiction and redundancy thresholds
+# -----------------------------------------------------------------------------
+
+conflict_detection:
+  supersession_penalty: 1.0             # full demotion when fact is superseded by a newer version
+  contradiction_edge_penalty: 0.9       # demotion when CONTRADICTS edge exists
+  layer2_penalty: 0.7                   # demotion from cosine-similarity-based contradiction detection
+  similarity_threshold: 0.9             # cosine threshold for layer-2 contradiction detection (lower = more false positives)
+  confidence_gap_threshold: 0.3         # min confidence delta for contradiction signal to fire
+  redundancy_similarity_threshold: 0.85 # cosine threshold above which two facts are penalized as redundant
+
+
+# -----------------------------------------------------------------------------
+# Goal injection — how persistent/session goals get fed into extraction prompts
+# -----------------------------------------------------------------------------
+
+goal_injection:
+  enabled: true
+  max_session_goals: 5                  # session goals injected per extraction prompt (recent first)
+  max_persistent_goals: 3               # persistent (graph) goals injected per extraction prompt
+  include_persistent_goals: true        # disable to skip the Cognee graph lookup entirely
+
+
+# -----------------------------------------------------------------------------
+# Goal refinement — async LLM pipeline that refines goal text from conversation
+# -----------------------------------------------------------------------------
+# Tier 1 hints (completed, blocked, progressed) update Redis directly at zero
+# LLM cost. Tier 2 hints (refined, new_subgoal) trigger this LLM-backed task.
+
+goal_refinement:
+  hints_enabled: true                   # the Tier 1 zero-cost path
+  refinement_task_enabled: true         # the Tier 2 LLM path — disable to avoid all refinement LLM calls
+  model: "gemini/gemini-2.5-flash"      # cheap model is fine for refinement
+  max_subgoals_per_session: 10          # cap to prevent runaway sub-goal creation
+  feed_recent_messages: 6               # last N messages fed to the refinement prompt
+  run_refinement_async: true            # if false, refinement blocks the ingest pipeline (latency spike risk)
+  progress_confidence_delta: 0.1        # how much to increase goal confidence on each progress signal
+  subgoal_dedup_threshold: 0.6          # cosine threshold for sub-goal text dedup
+
+
+# -----------------------------------------------------------------------------
+# Procedure candidates — how procedures surface in the working set
+# -----------------------------------------------------------------------------
+
+procedure_candidates:
+  enabled: true
+  filter_by_relevance: true             # cosine-filter procedures against current goal/conversation
+  relevance_threshold: 0.3              # min cosine for inclusion when filter_by_relevance=true
+  top_k: 3                              # max procedures injected into context per turn
+  always_include_proof_required: true   # procedures with active proof requirements always make the cut
+
+
+# -----------------------------------------------------------------------------
+# Context assembly — 4-block context window construction (Phase 6)
+# -----------------------------------------------------------------------------
+# The context engine assembles 4 blocks per turn: system overlay (rules/goals),
+# memory recall, evidence, and the conversation tail. These tunables control
+# how the budget is split.
+
+context_assembly:
+  max_context_window_fraction: 0.15     # max fraction of model's context window EB will inject (0.15 = up to 15%)
+  fallback_context_window: 128000       # assumed window size if model metadata is unknown
+  enable_dynamic_budget: true           # if false, budget is fixed regardless of conversation state
+  system_overlay_budget_fraction: 0.25  # of total budget, fraction reserved for guard rules + system instructions
+  goal_block_budget_fraction: 0.10      # of total budget, fraction reserved for goal block
+  evidence_budget_max_tokens: 500       # hard cap on evidence block (claims + supporting facts)
+  compaction_trigger_multiplier: 2.0    # auto-compact when conversation exceeds (max_context * this) tokens
+  compaction_summary_max_tokens: 1000   # max length of compaction summary output
+
+
+# -----------------------------------------------------------------------------
+# Artifact capture — automatic capture of tool outputs into the artifact store
+# -----------------------------------------------------------------------------
+
+artifact_capture:
+  enabled: true
+  min_content_chars: 200                # outputs shorter than this are not captured (noise filter)
+  max_content_chars: 50000              # outputs longer than this are truncated before storage
+  skip_tools: []                        # list of tool names to NEVER capture (e.g. ["bash_quick", "ls"])
+
+
+# -----------------------------------------------------------------------------
+# Artifact assembly — how artifacts appear in the assembled context
+# -----------------------------------------------------------------------------
+# Tool outputs are replaced in context with a placeholder pointing to
+# artifact_search() so the agent can fetch the full content on demand.
+
+artifact_assembly:
+  placeholder_enabled: true
+  placeholder_min_tokens: 100           # only replace artifacts that would consume at least this many tokens
+  placeholder_template: '[Tool output: {tool_name} — {summary}\n → Call artifact_search("{artifact_id}") for full output]'
+
+
+# -----------------------------------------------------------------------------
+# Async injection analysis — background topic-continuation analysis (off by default)
+# -----------------------------------------------------------------------------
+
+async_analysis:
+  enabled: false                        # (off) when on, runs background embedding analysis to detect topic drift mid-turn for smarter retrieval re-fetches
+  topic_continuation_threshold: 0.6     # cosine threshold below which topic is considered to have shifted
+  batch_size: 20
+
+
+# -----------------------------------------------------------------------------
+# Guards — red-line guard pipeline (Phase 7)
+# -----------------------------------------------------------------------------
+# 6-layer cheap-first safety pipeline: autonomy classification → static rules
+# → BM25/semantic similarity → structural validators → forced reinjection →
+# LLM escalation. Guards are advisory (constraints injected into the system
+# overlay) — they do NOT physically block tool calls (TD-12).
+
+guards:
+  enabled: true                         # env: EB_GUARDS_ENABLED — master switch for the 6-layer guard pipeline
+  builtin_rules_enabled: true           # ships with 12 builtin red-line patterns; disable to use only your own rules
+  history_ttl_seconds: 86400            # how long guard event history stays in Redis per session
+  max_history_events: 50                # max guard events kept per session before LRU eviction
+  input_summary_max_chars: 500          # truncation length for guard input excerpts in trace events
+  llm_escalation_max_tokens: 500        # max tokens for the (optional) Layer-5 LLM escalation call
+  llm_escalation_timeout_seconds: 10.0  # timeout for the LLM escalation call
+  max_pattern_length: 500               # safety cap on user-supplied rule patterns (regex DoS prevention)
+  # strictness_presets: see GuardsConfig.strictness_presets in elephantbroker/schemas/config.py
+  # (search for `strictness_presets: dict[str, StrictnessPreset]`) — 3 builtin presets
+  # (loose / medium / strict) with 5 fields each. Override individual preset fields here
+  # only if you need to deviate from the builtin tuning.
+  # B8 (TODO-3-213): line-number reference replaced with a search anchor; the previous
+  # `:266` reference broke after every schema reorganization.
+
+
+# -----------------------------------------------------------------------------
+# HITL — human-in-the-loop approval middleware (Phase 7, off by default)
+# -----------------------------------------------------------------------------
+
+hitl:
+  enabled: false                        # (off) env: EB_HITL_ENABLED — when on, the runtime POSTs approval requests to the HITL middleware service for human review before high-risk actions proceed. Requires hitl-middleware running on default_url
+  default_url: "http://localhost:8421"  # HITL middleware base URL (the runtime calls THIS, not the TS plugin)
+  timeout_seconds: 10.0                 # HTTP timeout per call to HITL middleware
+  approval_default_timeout_seconds: 300 # how long the runtime waits for a human approval before timing out
+  callback_hmac_secret: ""              # env: EB_HITL_CALLBACK_SECRET (secret) — required when enabled; HMAC-SHA256 of approval callbacks
+  gateway_overrides: {}                 # per-gateway HITL URL overrides, e.g. {"gw-prod": "http://hitl-prod:8421"}
+  retry_count: 2                        # max retries on transient failures
+  retry_delay_seconds: 0.5              # base delay for exponential backoff
+
+
+# -----------------------------------------------------------------------------
+# Successful-use tracking — LLM-based feedback loop (Phase 9, off by default)
+# -----------------------------------------------------------------------------
+
+successful_use:
+  enabled: false                        # env: EB_SUCCESSFUL_USE_ENABLED — (off) when on, runs an LLM batch evaluation to determine which injected facts actually helped the agent. Used by the consolidation pipeline to strengthen useful facts and decay useless ones. Cost: ~1 LLM call per N turns. Worth enabling for long-running deployments where memory quality matters
+  endpoint: "http://localhost:8811/v1"  # env: EB_SUCCESSFUL_USE_ENDPOINT
+  api_key: ""                           # env: EB_SUCCESSFUL_USE_API_KEY (secret) — falls back to llm.api_key if empty
+  model: "gemini/gemini-2.5-flash"      # env: EB_SUCCESSFUL_USE_MODEL — cheap model is fine
+  batch_size: 5                         # env: EB_SUCCESSFUL_USE_BATCH_SIZE — facts evaluated per LLM call
+  batch_timeout_seconds: 120.0
+  feed_last_facts: 20                   # window of recent facts considered per evaluation
+  min_confidence: 0.7                   # only evaluate facts above this confidence
+  run_async: true                       # run evaluation in background — false = blocks turn completion
+
+
+# -----------------------------------------------------------------------------
+# Blocker extraction — automatic blocker detection (Phase 9, off by default)
+# -----------------------------------------------------------------------------
+
+blocker_extraction:
+  enabled: false                        # env: EB_BLOCKER_EXTRACTION_ENABLED — (off) when on, periodically runs an LLM call to detect blockers in recent conversation and auto-add them to active goals. Useful for long debugging/research sessions where the agent doesn't notice it's stuck
+  endpoint: "http://localhost:8811/v1"  # env: EB_BLOCKER_EXTRACTION_ENDPOINT
+  api_key: ""                           # env: EB_BLOCKER_EXTRACTION_API_KEY (secret) — falls back to llm.api_key if empty
+  model: "gemini/gemini-2.5-flash"      # env: EB_BLOCKER_EXTRACTION_MODEL
+  run_every_n_turns: 3                  # env: EB_BLOCKER_EXTRACTION_EVERY_N_TURNS — cadence: every N turns, fire one blocker-detection call
+  recent_messages_window: 10            # how many recent messages fed to the blocker prompt
+
+
+# -----------------------------------------------------------------------------
+# Audit — SQLite stores for procedure executions, goal lifecycle, scoring ledger
+# -----------------------------------------------------------------------------
+# Paths are relative to the runtime's working directory unless absolute.
+# Production deployments typically point these at /var/lib/elephantbroker/data/.
 
 audit:
-  org_overrides_db_path: "data/org_overrides.db"
-  authority_rules_db_path: "data/authority_rules.db"
+  procedure_audit_enabled: true
+  procedure_audit_db_path: "data/procedure_audit.db"
+  session_goal_audit_enabled: true
+  session_goal_audit_db_path: "data/session_goals_audit.db"
+  org_overrides_db_path: "data/org_overrides.db"           # Phase 8 profile org-overrides
+  authority_rules_db_path: "data/authority_rules.db"       # Phase 8 admin-API authority rules
+  consolidation_reports_db_path: "data/consolidation_reports.db"  # Phase 9 consolidation run reports
+  tuning_deltas_db_path: "data/tuning_deltas.db"           # Phase 9 ScoringTuner weight deltas
+  scoring_ledger_db_path: "data/scoring_ledger.db"         # Phase 9 per-fact scoring history
+  retention_days: 90                    # SQLite row retention for procedure_audit + session_goals_audit
+
+
+# -----------------------------------------------------------------------------
+# Profile cache — in-memory profile resolution cache (Phase 8)
+# -----------------------------------------------------------------------------
+
+profile_cache:
+  ttl_seconds: 300                      # 5 min — too low = SQLite hammered every request; too high = stale org overrides
+
+
+# -----------------------------------------------------------------------------
+# Consolidation pipeline (Phase 9 — "sleep")
+# -----------------------------------------------------------------------------
+# Two of the most operator-relevant ConsolidationConfig knobs are exposed
+# here as overridable env vars. The full ConsolidationConfig schema lives in
+# elephantbroker/schemas/consolidation.py and additional fields can be added
+# to this section by name (cluster_similarity_threshold, decay_*, etc.) when
+# they need per-deployment tuning. F4 (TODO-3-009): before this section
+# existed, these two vars were read directly from os.environ inside a
+# property, bypassing the registry and the inverse contract test.
+
+consolidation:
+  batch_size: 500                       # env: EB_CONSOLIDATION_BATCH_SIZE — facts loaded per batch from Neo4j during consolidation; ge=50, le=5000
+  dev_auto_trigger_interval: "0"        # env: EB_DEV_CONSOLIDATION_AUTO_TRIGGER — "0" = disabled; supports "1m"/"5m"/"1h"/"1d" for dev. ENABLE IN PRODUCTION ONLY IF YOU WANT THE PIPELINE TO RUN ON A TIMER
+
+
+# -----------------------------------------------------------------------------
+# Top-level toggles & global limits
+# -----------------------------------------------------------------------------
+
+default_profile: "coding"               # env: EB_DEFAULT_PROFILE — which profile governs scoring/retrieval/compaction when no per-session profile is set
+                                        # options: coding, research, managerial, worker, personal_assistant
+enable_trace_ledger: true               # env: EB_ENABLE_TRACE_LEDGER — disable only for benchmarks; losing trace events removes all forensic visibility
+# (the master guard switch lives at `guards.enabled` above — env: EB_GUARDS_ENABLED)
+max_concurrent_sessions: 100            # env: EB_MAX_CONCURRENT_SESSIONS — rejection threshold; raise carefully (Redis/Neo4j connection pressure scales with this)
+consolidation_min_retention_seconds: 172800   # env: EB_CONSOLIDATION_MIN_RETENTION_SECONDS — (48h) min age before consolidation pipeline can decay/archive a fact

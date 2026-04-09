@@ -15,7 +15,7 @@ class SessionArtifactStore:
 
     def __init__(self, redis, config: ElephantBrokerConfig,
                  redis_keys: RedisKeyBuilder, artifact_store=None,
-                 trace_ledger=None, gateway_id: str = "local") -> None:
+                 trace_ledger=None, gateway_id: str = "") -> None:
         self._redis = redis
         self._config = config
         self._keys = redis_keys

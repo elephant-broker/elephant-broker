@@ -27,7 +27,7 @@ class TurnIngestPipeline:
         self, memory_facade, actor_registry, embedding_service, llm_client,
         trace_ledger, config, profile_registry=None, profile_policy=None, buffer=None,
         graph=None, session_goal_store=None, hint_processor=None, goal_manager=None,
-        goal_injection_config=None, gateway_id: str = "local", metrics=None,
+        goal_injection_config=None, gateway_id: str = "", metrics=None,
         org_id: str = "", dataset_name: str = "elephantbroker",
     ):
         self._facade = memory_facade

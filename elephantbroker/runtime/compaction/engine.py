@@ -93,7 +93,7 @@ class CompactionEngine(ICompactionEngine):
         llm_client: Any | None = None,
         redis: Any | None = None,
         config: ContextAssemblyConfig | None = None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         redis_keys: RedisKeyBuilder | None = None,
         metrics: MetricsContext | None = None,
         ttl_seconds: int = 172800,

@@ -17,7 +17,7 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 class ActorRegistry(IActorRegistry):
 
     def __init__(self, graph: GraphAdapter, trace_ledger: ITraceLedger,
-                 dataset_name: str = "elephantbroker", gateway_id: str = "local") -> None:
+                 dataset_name: str = "elephantbroker", gateway_id: str = "") -> None:
         self._graph = graph
         self._trace = trace_ledger
         self._dataset_name = dataset_name

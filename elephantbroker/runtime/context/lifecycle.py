@@ -74,7 +74,7 @@ class ContextLifecycle:
         llm_client=None,
         redis=None,
         config=None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         redis_keys=None,
         metrics=None,
         session_context_store=None,

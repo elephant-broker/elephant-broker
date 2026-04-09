@@ -15,11 +15,17 @@ class GatewayIdentityMiddleware(BaseHTTPMiddleware):
         X-EB-Agent-ID    → request.state.agent_id
         X-EB-Session-Key → request.state.session_key
 
-    Falls back to ``default_gateway_id`` (typically ``"local"``) when the
-    header is absent — ensures standalone/dev mode always has a gateway_id.
+    Falls back to ``default_gateway_id`` when the header is absent. The
+    app factory (``elephantbroker/api/app.py``) wires this to
+    ``container.config.gateway.gateway_id`` so the middleware fallback is
+    always byte-identical to the gateway_id the runtime modules were
+    constructed with. The signature default is the empty string, matching
+    the post-Bucket-A ``GatewayConfig.gateway_id`` default — this is a
+    hygiene choice, not a behavior choice, since the app factory always
+    passes the kwarg explicitly in production wiring.
     """
 
-    def __init__(self, app, default_gateway_id: str = "local") -> None:  # type: ignore[override]
+    def __init__(self, app, default_gateway_id: str = "") -> None:  # type: ignore[override]
         super().__init__(app)
         self._default = default_gateway_id
 

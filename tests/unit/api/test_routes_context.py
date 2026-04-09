@@ -160,7 +160,9 @@ class TestContextGatewayIsolation:
 
     async def test_bootstrap_default_gateway(self, client, container):
         """Without X-EB-Gateway-ID header, _stamp_gateway uses the middleware
-        default ('local')."""
+        fallback, which the app factory wires to container.config.gateway.gateway_id.
+        Post-Bucket-A the default is "" (empty string) — write and read paths stay
+        byte-identical because both resolve through the same config value."""
         from elephantbroker.schemas.context import BootstrapParams, BootstrapResult
 
         captured_params: list[BootstrapParams] = []
@@ -179,4 +181,4 @@ class TestContextGatewayIsolation:
         r = await client.post("/context/bootstrap", json=body)
         assert r.status_code == 200
         assert len(captured_params) == 1
-        assert captured_params[0].gateway_id == "local"
+        assert captured_params[0].gateway_id == ""

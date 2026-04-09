@@ -77,6 +77,14 @@ export EB_REDIS_URL=redis://localhost:${TEST_REDIS_PORT}
 # API key for test infrastructure LiteLLM proxy — only accessible on dev network
 export EB_EMBEDDING_API_KEY="${EB_EMBEDDING_API_KEY:-sk-ofbTPUhKkRgDtKVRszsjvA}"
 
+# Pin embedding model + dimensions to known-working OpenAI values, INDEPENDENT
+# of whatever the schema default happens to be. Cognee tokenizes via tiktoken
+# which only knows OpenAI model names — passing a Gemini model name causes
+# tiktoken.encoding_for_model() to raise KeyError at engine init. Tests must
+# be deterministic, so they pin a tiktoken-mappable name.
+export EB_EMBEDDING_MODEL="${EB_EMBEDDING_MODEL:-openai/text-embedding-3-large}"
+export EB_EMBEDDING_DIMENSIONS="${EB_EMBEDDING_DIMENSIONS:-1024}"
+
 # LLM config — used by Cognee cognify() for entity/relationship extraction
 export EB_LLM_ENDPOINT="${EB_LLM_ENDPOINT:-http://localhost:8811/v1}"
 export EB_LLM_API_KEY="${EB_LLM_API_KEY:-$EB_EMBEDDING_API_KEY}"

@@ -48,7 +48,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         embeddings: EmbeddingService,
         trace_ledger: ITraceLedger,
         dataset_name: str = "elephantbroker",
-        gateway_id: str = "local",
+        gateway_id: str = "",
         metrics=None,
     ) -> None:
         self._graph = graph

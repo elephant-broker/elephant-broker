@@ -96,7 +96,7 @@ class ConsolidationEngine(IConsolidationEngine):
         scoring_ledger_store: ScoringLedgerStore | None = None,
         procedure_audit_store: ProcedureAuditStore | None = None,
         session_goal_audit_store: SessionGoalAuditStore | None = None,
-        gateway_id: str = "local",
+        gateway_id: str = "",
         **kwargs,
     ) -> None:
         self._trace = trace_ledger

@@ -81,8 +81,11 @@ async def store_fact(body: StoreRequest, request: Request):
         fact.session_key = body.session_key
     if body.session_id:
         fact.session_id = body.session_id
-    # Stamp gateway_id from request headers (middleware sets this)
-    fact.gateway_id = getattr(request.state, "gateway_id", "") or fact.gateway_id
+    # Middleware wins unconditionally over caller-supplied fact.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        fact.gateway_id = _state_gw
     try:
         result = await ms.store(fact, dedup_threshold=body.dedup_threshold)
     except DedupSkipped as e:
@@ -430,7 +433,11 @@ async def ingest_artifact(body: ArtifactInput, request: Request):
             status_code=503,
             content={"detail": "Artifact ingest pipeline not available"},
         )
-    body.gateway_id = getattr(request.state, "gateway_id", "") or body.gateway_id
+    # Middleware wins unconditionally over caller-supplied body.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        body.gateway_id = _state_gw
     result = await pipeline.run(body)
     return result.model_dump(mode="json")
 
@@ -443,6 +450,10 @@ async def ingest_procedure(body: ProcedureDefinition, request: Request):
             status_code=503,
             content={"detail": "Procedure ingest pipeline not available"},
         )
-    body.gateway_id = getattr(request.state, "gateway_id", "") or body.gateway_id
+    # Middleware wins unconditionally over caller-supplied body.gateway_id —
+    # tenant-isolation boundary. See TD-41 and actors.py create_actor().
+    _state_gw = getattr(request.state, "gateway_id", None)
+    if _state_gw is not None:
+        body.gateway_id = _state_gw
     result = await pipeline.run(body)
     return result.model_dump(mode="json")
