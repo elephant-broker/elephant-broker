@@ -126,6 +126,8 @@ Reproducible builds and dependency hygiene. The reasoning:
 
 ## Common operations
 
+> Note: the `uv sync --extra dev` commands below are for **dev-machine workflows**. Production installs always use `uv sync --frozen --no-dev --all-packages` via `deploy/install.sh` / `deploy/update.sh` — see § Production deployment below, and § Workspace structure for why `--all-packages` is mandatory.
+
 ### Bump a single dependency to a newer version
 
 You want to update `pydantic` from `2.12.5` to `2.13.0`:

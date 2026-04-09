@@ -85,6 +85,26 @@ class CogneeConfig(_StrictBase):
         breaks until an operator notices that search returns nothing. The
         check fires only for models present in `KNOWN_EMBEDDING_DIMS`;
         unknown models pass through (the operator is on their own).
+
+        Escape hatch — the ``openai/`` prefix. To bypass this check (e.g.,
+        because LiteLLM is routing to a backend that returns different
+        dimensions than the upstream model's canonical output, or because
+        you have probed the real output dimension and it disagrees with the
+        table), prefix the model name with ``openai/`` — Cognee strips the
+        prefix before dispatch, but the prefixed name is not a key in
+        ``KNOWN_EMBEDDING_DIMS`` so the validator short-circuits. Example::
+
+            embedding_model: "openai/text-embedding-3-large"
+            embedding_dimensions: 1024  # LiteLLM truncated output
+
+        is accepted; the un-prefixed ``text-embedding-3-large`` with
+        ``dimensions=1024`` is rejected because ``KNOWN_EMBEDDING_DIMS``
+        says 3072.
+
+        Use the prefix bypass only AFTER probing the real output dimension
+        (see ``docs/DEPLOYMENT.md § Probe-then-configure embedding
+        dimensions``) — the validator is defense-in-depth against
+        mis-pinned dims, and the prefix trick intentionally steps around it.
         """
         expected = KNOWN_EMBEDDING_DIMS.get(self.embedding_model)
         if expected is not None and expected != self.embedding_dimensions:

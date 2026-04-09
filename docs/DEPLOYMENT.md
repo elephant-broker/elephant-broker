@@ -17,6 +17,11 @@ DB VM                                    OpenClaw VM
 │  └─ (optional) OTEL/ClickHouse/Jaeger/Grafana
 ```
 
+*(Diagram shows a single-tenant layout. A single DB VM can host multiple
+gateways by running multiple `EB_GATEWAY_ID` values against the same
+infra stack; all persistent state is gateway-scoped. See § Multi-tenant
+safety for per-tenant cleanup.)*
+
 ## Prerequisites
 
 - Python 3.11 or 3.12 (pinned via `requires-python = ">=3.11,<3.13"` in pyproject.toml)
@@ -122,7 +127,7 @@ What the installer does, in order (8 steps + Step 0, matching `install.sh` exact
 
 **Step 2/8 — Create directories.** Creates `$PREFIX=/opt/elephantbroker` (`root:root 755` — **intentionally root-owned** per C3 defense-in-depth), `$CONFIG_DIR=/etc/elephantbroker` (`elephantbroker:elephantbroker 750`), `$DATA_DIR=/var/lib/elephantbroker` (`elephantbroker:elephantbroker 750`), and `$CACHE_DIR=/var/cache/elephantbroker` (`elephantbroker:elephantbroker 750`, added in D-R3 for the `PYTHONPYCACHEPREFIX` redirect target).
 
-**Step 3/8 — Install runtime + HITL middleware via `uv sync` (workspace mode).** Runs `uv sync --frozen --no-dev` from `$REPO_DIR`, which builds the venv at `/opt/elephantbroker/.venv` and installs BOTH the `elephantbroker` runtime AND the `hitl-middleware` workspace member in a single call. The root `pyproject.toml` declares `[tool.uv.workspace] members = ["hitl-middleware"]`, so the root `uv.lock` is the single source of truth for both packages — no separate `uv pip install hitl-middleware` step. All ~188 direct + transitive deps are installed at exact pinned versions with integrity hashes.
+**Step 3/8 — Install runtime + HITL middleware via `uv sync --frozen --no-dev --all-packages` (workspace mode).** Runs from `$REPO_DIR`, builds the venv at `/opt/elephantbroker/.venv`, and installs BOTH the `elephantbroker` runtime AND the `hitl-middleware` workspace member in a single call. The `--all-packages` flag is **mandatory** — without it, `uv sync` silently skips the workspace member and `/opt/elephantbroker/.venv/bin/hitl-middleware` is never created, which breaks `elephantbroker-hitl.service` with `status=203/EXEC` on the next restart. See [`deploy/UPDATING-DEPS.md § Workspace structure`](../deploy/UPDATING-DEPS.md) for the full rationale. The root `pyproject.toml` declares `[tool.uv.workspace] members = ["hitl-middleware"]`, so the root `uv.lock` is the single source of truth for both packages — no separate `uv pip install hitl-middleware` step. All ~188 direct + transitive deps are installed at exact pinned versions with integrity hashes.
 
 **Step 4/8 — Post-install fixes (Cognee writable dirs + mistralai safety net).**
   - Resolves the venv's `site-packages` dir authoritatively via `uv run python -c 'import site; print(site.getsitepackages()[0])'` (the `find ... | head -n 1` approach was replaced in C8/TODO-3-325 with this strict resolution to eliminate silent mis-detection).
@@ -200,6 +205,7 @@ Most operators only need to edit a handful of fields in
 - `reranker.enabled` — set to `false` if you do not have a Qwen3-Reranker server
 - `compaction_llm.model` and `goal_refinement.model` — override if your
   LiteLLM proxy does not serve `gemini-2.5-flash`
+- `EB_LLM_ENDPOINT` and `EB_EMBEDDING_ENDPOINT` (in `/etc/elephantbroker/env`) — **set these explicitly to your LiteLLM proxy URL** if the proxy is not on the DB VM. The default (`http://localhost:8811/v1`) will silently cause `httpx.ConnectError` at first LLM/embedding call if LiteLLM is remote. These are env-file settings, not `default.yaml` settings, but they are the most commonly missed override.
 
 **Critical: LLM model prefix.** Cognee requires the `openai/` prefix on the
 LLM model name (it strips the prefix internally before sending to LiteLLM):
@@ -210,6 +216,64 @@ llm:
 ```
 
 Without the prefix, Cognee hangs at startup on the LLM connection test.
+
+**Embedding model prefix — escape hatch for `KNOWN_EMBEDDING_DIMS`.**
+Symmetric to the LLM side, Cognee strips `openai/` before dispatching
+embedding calls to LiteLLM. The runtime exploits this for a second purpose
+on the embedding side: **the `openai/`-prefixed name is not a key in
+`elephantbroker/schemas/config.py` → `KNOWN_EMBEDDING_DIMS`**, so the
+startup cross-validator that refuses mismatched dimensions will skip the
+check. Use this when:
+
+- LiteLLM is truncating embedding output via the `dimensions` parameter
+  (e.g., `text-embedding-3-large` truncated from 3072 to 1024) and the
+  table's canonical dim is wrong for your deployment.
+- LiteLLM is routing a name alias to a backend whose real output
+  dimension differs from what the table expects.
+
+Example:
+
+```yaml
+embedding:
+  model: "openai/text-embedding-3-large"  # prefix bypasses the validator
+  dimensions: 1024                         # your LiteLLM-reported real dim
+```
+
+The bypass is **not** a license to guess — always run the
+probe-then-configure pattern (next subsection) to obtain the real
+dimension before pinning it.
+
+**Probe-then-configure embedding dimensions.**
+Before pinning `embedding_dimensions` in `default.yaml` or `env`, probe
+what your LiteLLM proxy actually returns. A mismatched pin creates
+orphaned Qdrant collections and all retrieval silently breaks at the
+first cognify step — the validator only catches mismatches for models in
+`KNOWN_EMBEDDING_DIMS`, and the `openai/` prefix bypass intentionally
+disables even that.
+
+Probe procedure (run from the DB VM or any host that can reach
+`EB_EMBEDDING_ENDPOINT`):
+
+```bash
+# Replace <litellm-host> and <model-name> with your values
+curl -s -X POST http://<litellm-host>:8811/v1/embeddings \
+  -H "Authorization: Bearer $EB_LLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "<model-name>", "input": "probe"}' \
+  | python -c 'import json, sys; d=json.load(sys.stdin); print("dim =", len(d["data"][0]["embedding"]))'
+```
+
+The printed `dim = N` is the value you MUST pin as
+`embedding_dimensions`. If N disagrees with `KNOWN_EMBEDDING_DIMS` for
+the un-prefixed model name, use the `openai/`-prefix escape hatch
+(previous subsection).
+
+**Why probing matters:** LiteLLM aliases can route the same model name
+to different backends across deployments (one LiteLLM might map
+`text-embedding-large` to OpenAI's 3072-dim model; another might map it
+to a voyage/cohere model with 1024 dim), and LiteLLM's `dimensions`
+parameter can truncate output server-side. The only safe source of
+truth is the actual response body on your actual proxy.
 
 ### 5. Bootstrap your org/team/admin
 
@@ -226,9 +290,58 @@ sudo -u elephantbroker /opt/elephantbroker/.venv/bin/ebrun \
 admin CLI and should run as the service user so any local state it creates
 inherits the right ownership.)
 
-Bootstrap is one-shot — only works on an empty graph. If it fails partway,
-`docker compose -f infrastructure/docker-compose.yml down -v` to wipe the
-infra and retry.
+Bootstrap is one-shot — only works on an empty graph *for the given
+gateway_id*. Recovery depends on whether your DB VM is single-tenant or
+multi-tenant:
+
+- **Single-tenant (only one `EB_GATEWAY_ID` on this host):** `docker compose -f infrastructure/docker-compose.yml down -v` wipes all infra volumes and is safe. Retry bootstrap.
+- **Multi-tenant (multiple gateways sharing this infra stack):** `down -v` destroys every tenant's state. Instead, use the narrow per-gateway cleanup (next subsection).
+
+### 5a. Multi-tenant safety: narrow per-gateway cleanup
+
+When multiple gateways share a single DB VM (multiple `EB_GATEWAY_ID`
+values pointed at the same Neo4j/Qdrant/Redis stack), the
+`docker compose down -v` remediation is **forbidden** — it wipes every
+tenant's state, not just the failing one. The runtime already scopes all
+persistent state by `gateway_id`:
+
+- **Neo4j:** every node carries a `gateway_id` property and every Cypher query MUST include `WHERE ... gateway_id = $gateway_id` (strict, no IS NULL fallback). See `CLAUDE.md § Gateway Identity`.
+- **Qdrant:** dataset names are `{gateway_id}__{base}` via `cognee.add(dataset_name=...)`. Collections are per-gateway.
+- **Redis:** all keys are prefixed `eb:{gateway_id}:` via `RedisKeyBuilder(gateway_id)`. Never hardcode `f"eb:..."`.
+
+To wipe ONE gateway's state without touching neighbors, use these three
+commands (substitute your failing `$GW`):
+
+```bash
+GW="gw-acme-staging"   # the gateway_id of the failing tenant
+
+# 1. Neo4j: delete all nodes + relationships for this gateway
+docker compose -f infrastructure/docker-compose.yml exec neo4j cypher-shell \
+  -u neo4j -p "$EB_NEO4J_PASSWORD" \
+  "MATCH (n {gateway_id: '$GW'}) DETACH DELETE n"
+
+# 2. Qdrant: drop all collections whose dataset prefix matches this gateway
+curl -s "http://localhost:6333/collections" | \
+  python -c "import json, sys; [print(c['name']) for c in json.load(sys.stdin)['result']['collections'] if c['name'].startswith('${GW}__')]" | \
+  xargs -I{} curl -s -X DELETE "http://localhost:6333/collections/{}"
+
+# 3. Redis: delete all keys for this gateway
+docker compose -f infrastructure/docker-compose.yml exec redis \
+  redis-cli --scan --pattern "eb:${GW}:*" | \
+  xargs -r docker compose -f infrastructure/docker-compose.yml exec -T redis redis-cli DEL
+```
+
+After these three commands, bootstrap for `$GW` can be retried safely
+without disturbing any other gateway on the same infra stack.
+
+**Verification:** run the same three commands with a `COUNT`/`GET`
+variant instead of `DELETE`/`DEL` before and after — both should show
+zero matches for `$GW` after cleanup, and non-zero matches for other
+gateways (proving you scoped correctly).
+
+**When in doubt, assume multi-tenant.** Using the narrow cleanup on a
+single-tenant host is harmless (just slightly slower than `down -v`).
+Using `down -v` on a multi-tenant host is a data-loss incident.
 
 ### 6. Start the services
 
@@ -370,9 +483,14 @@ prompt instructions, and the complete `openclaw.json` config example.
 ### DB VM (runtime + HITL)
 
 The repo ships an idempotent updater at `deploy/update.sh`. It pulls from
-the current branch, runs `uv sync --frozen --no-dev` to install exactly
-what `uv.lock` specifies (zero drift), re-chowns the install tree, and
-restarts both systemd services.
+the current branch, runs `uv sync --frozen --no-dev --all-packages` to
+install exactly what `uv.lock` specifies for BOTH the runtime and the
+`hitl-middleware` workspace member (zero drift), re-chowns the install
+tree, and restarts both systemd services. The `--all-packages` flag
+ensures the HITL workspace member is refreshed alongside the root package
+— never invoke `uv sync` manually on a prod host without that flag, or
+`/opt/elephantbroker/.venv/bin/hitl-middleware` will vanish on the next
+restart and the HITL service will crash with `status=203/EXEC`.
 
 ```bash
 sudo /opt/elephantbroker/deploy/update.sh
@@ -412,11 +530,11 @@ openclaw gateway restart
 1. **mistralai ghost package (legacy pip path only)** — `cognee==0.5.3` ships a broken `mistralai` namespace package as a transitive dep that conflicts with `instructor`. With `uv` (the supported install path), this is NOT an issue: uv's holistic resolver picks `mistralai==1.12.4` (a working modern version) automatically. The installer keeps a belt-and-suspenders cleanup step in case someone bypasses uv and runs `pip install` against the venv by habit.
 2. **Cognee writable dirs** — Cognee creates `.cognee_system/` and `.data_storage/` inside its own site-packages directory at runtime. The installer pre-creates these dirs in Step 4 and then Step 6 **targeted-chowns exactly those 3 paths** (`.cognee_system`, `.data_storage`, `.anon_id`) to the service user via the **C3 narrowed model** (TODO-3-010). `/opt/elephantbroker` itself stays `root:root` — the service user can traverse and read the venv without owning it. Earlier docs recommended `chmod -R 777 venv/.../cognee/` as a workaround — that was wrong (world-writable Cognee state). Earlier versions of the installer also ran a broad `chown -R elephantbroker:elephantbroker /opt/elephantbroker` which was also wrong (a compromised runtime could then rewrite its own source). The current narrowed model is the right fix.
 3. **LLM model prefix** — Cognee needs `openai/gemini/gemini-2.5-pro`. Without `openai/` prefix, Cognee hangs on LLM connection test.
-4. **Embedding model + tiktoken** — Cognee tokenizes via tiktoken which only knows OpenAI model names. If you set `EB_EMBEDDING_MODEL` to a non-OpenAI model name (e.g. `gemini/text-embedding-004`), the runtime will crash at first embedding call with `KeyError: Could not automatically map ... to a tokeniser`. Stick to `openai/text-embedding-3-large` (1024 dim) unless you have verified your specific model works with tiktoken.
+4. **Embedding model + tiktoken** — Cognee tokenizes via tiktoken which only knows OpenAI model names. If you set `EB_EMBEDDING_MODEL` to a non-OpenAI model name (e.g. `gemini/text-embedding-004`), the runtime will crash at first embedding call with `KeyError: Could not automatically map ... to a tokeniser`. Stick to `openai/text-embedding-3-large` unless you have (a) verified tiktoken tokenizer compatibility AND (b) run the probe-then-configure procedure (§ Probe-then-configure embedding dimensions above) to discover the real output dimension your LiteLLM is returning. Do NOT guess the dimension from the model card — LiteLLM can truncate or alias.
 5. **Health endpoint trailing slash** — `/health` returns 307 redirect, use `/health/`.
 6. **HITL log level** — Does not support `verbose`. Use `info` or `debug`.
 7. **venv portability** — Shebangs in `.venv/bin/` are absolute paths. If you move/copy the venv, run `uv sync --frozen` to rebuild in place. The installer always creates the venv at `/opt/elephantbroker/.venv` (uv's default location) so this only matters for unusual deployments.
-8. **Bootstrap is one-shot** — Only works on empty graph. If it fails halfway, `docker compose -f infrastructure/docker-compose.yml down -v` and retry.
+8. **Bootstrap is one-shot (per gateway)** — Only works on an empty graph *for the given `gateway_id`*. Recovery depends on tenancy: single-tenant hosts can use `docker compose -f infrastructure/docker-compose.yml down -v`; multi-tenant hosts MUST use the narrow per-gateway cleanup (see § Multi-tenant safety) to avoid wiping neighbor tenants.
 9. **`uv sync --frozen` errors on lockfile drift** — If `pyproject.toml` has been modified since the last `uv lock`, `update.sh` will refuse to install. Run `update.sh --upgrade` to regenerate the lockfile, OR commit a fresh `uv lock` from a dev machine first. See `deploy/UPDATING-DEPS.md` for the full upgrade workflow.
 10. **Qdrant version pairing** — Qdrant server is pinned to v1.17.0 in both `docker-compose.yml` and `docker-compose.test.yml` — must stay aligned with `qdrant-client` version in `pyproject.toml`. If upgrading the client, update both compose files to match.
 11. **Service user ownership (C3 narrowed model)** — `/opt/elephantbroker` stays `root:root 755` (service user can read + traverse but not write). Only the 3 Cognee runtime paths inside the venv are chowned to `elephantbroker:elephantbroker`. `/etc/elephantbroker` is `elephantbroker:elephantbroker 750` with `root:elephantbroker 640` for the env files specifically. `/var/lib/elephantbroker` and `/var/cache/elephantbroker` are `elephantbroker:elephantbroker 750`. If you copy files in manually under these paths, follow the C3 model: `/opt/elephantbroker` manual copies stay `root:root`, `/etc/elephantbroker`/`/var/lib/elephantbroker`/`/var/cache/elephantbroker` manual copies get `chown elephantbroker:elephantbroker`, and env files get `chown root:elephantbroker`. Re-running `deploy/install.sh` is the safest way to restore correct ownership.

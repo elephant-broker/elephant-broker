@@ -479,6 +479,8 @@ Path prefix: `cognee.*`
 | `cognee.embedding_api_key` | `str` | `""` | `EB_EMBEDDING_API_KEY` | -- | API key for embedding endpoint; also used as fallback for `llm.api_key` via `_apply_inheritance_fallbacks()` (post-F2/F3 unification) | Missing key = 401 from embedding endpoint (unless endpoint is unauthenticated) | `""` (local) / `sk-...` / `sk-...` |
 | `cognee.embedding_dimensions` | `int` | `768` | `EB_EMBEDDING_DIMENSIONS` | `ge=1` | Embedding vector dimensionality; MUST match the configured `embedding_model`'s actual output dimensions | Mismatch = Qdrant collection creation failure or corrupted similarity scores. Changing this on existing data orphans the Qdrant collections — requires re-cognify | `768` (gemini/text-embedding-004) / same / `1024` (openai/text-embedding-3-large) |
 
+> Note: prefixing the model name with `openai/` (e.g., `openai/text-embedding-3-large`) bypasses the `KNOWN_EMBEDDING_DIMS` startup cross-check in `elephantbroker/schemas/config.py`. This is an intentional escape hatch for deployments where LiteLLM truncates or re-routes — use only after probing the real dimension. See `docs/DEPLOYMENT.md § Embedding model prefix`.
+
 ---
 
 ### `LLMConfig` -- LLM for Extraction, Classification, Summarization
