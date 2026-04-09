@@ -265,7 +265,11 @@ class GoalRefinementConfig(_StrictBase):
     """Goal refinement pipeline configuration."""
     hints_enabled: bool = True
     refinement_task_enabled: bool = True
-    model: str = "gemini/gemini-2.5-flash"
+    # Staging LiteLLM proxy no longer routes "gemini/gemini-2.5-flash" — it
+    # resolves to "gemini-2.5-flash-preview-09-2025" which the upstream Gemini
+    # API has deleted (every call returned HTTP 404). "gemini-2.5-flash-lite"
+    # is the same flash-class model the main extraction LLM uses successfully.
+    model: str = "gemini/gemini-2.5-flash-lite"
     max_subgoals_per_session: int = Field(default=10, ge=1)
     feed_recent_messages: int = Field(default=6, ge=1)
     run_refinement_async: bool = True

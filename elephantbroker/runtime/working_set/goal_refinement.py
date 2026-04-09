@@ -14,6 +14,32 @@ from elephantbroker.schemas.goal import GoalState, GoalStatus
 logger = logging.getLogger("elephantbroker.runtime.working_set.goal_refinement")
 
 
+def _strip_markdown_fences(content: str) -> str:
+    """Strip leading/trailing markdown code fences from LLM JSON output.
+
+    Empirical curl testing against the staging LiteLLM proxy
+    (/tmp/observer-cheap-client-curl-verify.md) showed that all three working
+    Gemini models wrap `message.content` in ```json\\n...\\n``` fences even
+    when `response_format={"type": "json_object"}` is set. json.loads() fails
+    on fenced input, so we strip the fences before parsing.
+
+    Handles:
+    - ```json\\n{...}\\n``` (language tag + newlines)
+    - ```\\n{...}\\n```     (no language tag)
+    - {...}                  (no fences — backward compat)
+    - Leading/trailing whitespace.
+    """
+    content = content.strip()
+    if content.startswith("```"):
+        # Drop the opening fence line (with or without language tag)
+        if "\n" in content:
+            content = content.split("\n", 1)[1]
+        # Drop the closing fence if present
+        if content.endswith("```"):
+            content = content.rsplit("```", 1)[0]
+    return content.strip()
+
+
 class GoalRefinementTask:
     """Processes goal hints — Tier 1 (direct) and Tier 2 (LLM-powered)."""
 
@@ -61,6 +87,21 @@ class GoalRefinementTask:
         Returns the parsed JSON dict on success, None on any failure (network,
         HTTP, parse). Caller handles the None case by falling through to its
         own error path.
+
+        Three bugs fixed in the TD-39 hotfix:
+        - Wrong model name: the default is now gemini-2.5-flash-lite (see
+          GoalRefinementConfig.model comment); the stale flash alias returned
+          HTTP 404 with a "model not found" body that the original error
+          handling swallowed.
+        - Markdown fence wrapping: LiteLLM's Gemini backends wrap JSON output
+          in ```json ... ``` fences even with response_format=json_object. We
+          strip fences via _strip_markdown_fences before json.loads().
+        - Non-200 surfacing: previously response.raise_for_status() bubbled up
+          as an HTTPStatusError whose repr did not include the body, and on
+          some paths the code fell through to json.loads('') and raised a
+          cryptic JSONDecodeError. Now we check status_code first and raise a
+          RuntimeError whose message includes the real HTTP code, model name,
+          and a truncated response body so journalctl shows the root cause.
         """
         if self._cheap_client is None:
             return None
@@ -78,9 +119,15 @@ class GoalRefinementTask:
                     "response_format": {"type": "json_object"},
                 },
             )
-            response.raise_for_status()
+            if response.status_code != 200:
+                body = response.text[:500]
+                raise RuntimeError(
+                    f"cheap-model call failed: HTTP {response.status_code} "
+                    f"from /chat/completions model={self._config.model} body={body}"
+                )
             data = response.json()
             content = data["choices"][0]["message"]["content"]
+            content = _strip_markdown_fences(content)
             parsed = json.loads(content)
             return parsed if isinstance(parsed, dict) else None
         except Exception as exc:

@@ -815,3 +815,133 @@ class TestHintProcessorCorrelation:
         assert store.update_goal.await_count >= 1
         # Verify the goal's blockers list was updated with the obstacle
         assert "obstacle text" in goal.blockers
+
+
+# ===========================================================================
+# TD-39 hotfix: cheap-model client three-bug fix
+# - Fence stripping (LiteLLM wraps JSON in ```json ... ``` fences)
+# - Non-200 error surfacing (real error in logs, not JSONDecodeError)
+# - Backward compat with unfenced content
+# ===========================================================================
+
+
+class TestCheapModelFenceStrippingAndErrorSurfacing:
+    """Live verification (observer-cheap-client-curl-verify.md) showed three
+    bugs in the dedicated cheap-model client added in commit 62dc151:
+      1. Default model name resolved to a deleted Gemini preview (404).
+      2. Working Gemini models wrap content in ```json ... ``` markdown fences
+         even with response_format=json_object — json.loads() fails.
+      3. Non-200 responses fell through to parsing and surfaced as confusing
+         JSONDecodeError, masking the real "model not found" body.
+
+    These tests exercise the shared `_call_cheap_model` helper via both
+    `_create_subgoal` and `_refine_goal` entry points to prove symmetry.
+    """
+
+    def _make_task_with_mock_response(self, mock_response):
+        task = GoalRefinementTask(
+            config=GoalRefinementConfig(),
+            llm_config=LLMConfig(
+                model="openai/gemini/gemini-2.5-pro",
+                endpoint="http://localhost:8811/v1",
+                api_key="test",
+            ),
+        )
+        task._cheap_client.post = AsyncMock(return_value=mock_response)
+        return task
+
+    def _mock_response(self, *, status: int = 200, content: str = "", text: str = ""):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.text = text
+        resp.json = MagicMock(return_value={
+            "choices": [{"message": {"content": content}}]
+        })
+        return resp
+
+    # --- _create_subgoal path ---
+
+    @pytest.mark.asyncio
+    async def test_create_subgoal_strips_markdown_fences(self):
+        """Fenced ```json ... ``` content must parse correctly."""
+        fenced = '```json\n{"title":"Test subgoal","description":"d","success_criteria":[]}\n```'
+        task = self._make_task_with_mock_response(
+            self._mock_response(status=200, content=fenced)
+        )
+        parent = make_goal_state()
+        result = await task._create_subgoal(parent, "hint", [], [])
+        assert result is not None
+        assert result.title == "Test subgoal"
+
+    @pytest.mark.asyncio
+    async def test_create_subgoal_handles_unfenced_content(self):
+        """Backward compat: unfenced JSON must still parse."""
+        unfenced = '{"title":"Unfenced title","description":"d","success_criteria":[]}'
+        task = self._make_task_with_mock_response(
+            self._mock_response(status=200, content=unfenced)
+        )
+        parent = make_goal_state()
+        result = await task._create_subgoal(parent, "hint", [], [])
+        assert result is not None
+        assert result.title == "Unfenced title"
+
+    @pytest.mark.asyncio
+    async def test_create_subgoal_surfaces_non_200_error(self, caplog):
+        """HTTP 404 must surface the real status + body in the warning log,
+        not a JSONDecodeError. This is the operator-visible signal used for
+        diagnosing LiteLLM model-name drift.
+        """
+        task = self._make_task_with_mock_response(
+            self._mock_response(
+                status=404,
+                text='{"error": {"message": "model not found"}}',
+            )
+        )
+        parent = make_goal_state()
+        with caplog.at_level("WARNING"):
+            result = await task._create_subgoal(parent, "hint", [], [])
+        assert result is None
+        assert "HTTP 404" in caplog.text
+        assert "model not found" in caplog.text
+
+    # --- _refine_goal path (same three scenarios via the shared helper) ---
+
+    @pytest.mark.asyncio
+    async def test_refine_goal_strips_markdown_fences(self):
+        fenced = '```json\n{"title":"Refined","description":"d","success_criteria":["c"]}\n```'
+        task = self._make_task_with_mock_response(
+            self._mock_response(status=200, content=fenced)
+        )
+        goal = make_goal_state(title="Old")
+        result = await task._refine_goal(goal, "evidence", [])
+        assert result.title == "Refined"
+        assert result.success_criteria == ["c"]
+
+    @pytest.mark.asyncio
+    async def test_refine_goal_handles_unfenced_content(self):
+        unfenced = '{"title":"Refined unfenced","description":"d","success_criteria":[]}'
+        task = self._make_task_with_mock_response(
+            self._mock_response(status=200, content=unfenced)
+        )
+        goal = make_goal_state(title="Old")
+        result = await task._refine_goal(goal, "evidence", [])
+        assert result.title == "Refined unfenced"
+
+    @pytest.mark.asyncio
+    async def test_refine_goal_surfaces_non_200_error(self, caplog):
+        """HTTP 404 must surface via caplog; _refine_goal returns the goal
+        unchanged when every LLM attempt fails (cheap client + fallback).
+        """
+        task = self._make_task_with_mock_response(
+            self._mock_response(
+                status=404,
+                text='{"error": {"message": "model not found"}}',
+            )
+        )
+        goal = make_goal_state(title="Keep me")
+        with caplog.at_level("WARNING"):
+            result = await task._refine_goal(goal, "evidence", [])
+        assert result is not None
+        assert result.title == "Keep me"  # unchanged on failure
+        assert "HTTP 404" in caplog.text
+        assert "model not found" in caplog.text
