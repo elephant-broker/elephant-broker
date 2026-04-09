@@ -595,6 +595,11 @@ class RuntimeContainer:
             trace_ledger=c.trace_ledger,
             metrics=c.metrics_ctx,
             gateway_id=gw_id,
+            # TD-39 Issue F: pass main LLMConfig so GoalRefinementTask can
+            # instantiate a dedicated cheap-model httpx.AsyncClient bound to
+            # goal_refinement.model (default gemini/gemini-2.5-flash) against
+            # the main LLM endpoint + api_key.
+            llm_config=config.llm,
         )
 
         c.hint_processor = GoalHintProcessor(

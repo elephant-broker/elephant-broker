@@ -10,7 +10,7 @@ import pytest
 
 from elephantbroker.runtime.working_set.goal_refinement import GoalRefinementTask
 from elephantbroker.runtime.working_set.hint_processor import GoalHintProcessor
-from elephantbroker.schemas.config import GoalRefinementConfig
+from elephantbroker.schemas.config import GoalRefinementConfig, LLMConfig
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 from tests.fixtures.factories import make_goal_state
 
@@ -454,3 +454,293 @@ class TestGoalHintProcessorDisabled:
         )
         store.update_goal.assert_not_awaited()
         store.add_goal.assert_not_awaited()
+
+
+# ===========================================================================
+# TD-39 Issue F + Sketch D: cheap-model client + conversation slice + paired
+# obstacle_hint in _create_subgoal
+# ===========================================================================
+
+
+class TestCheapModelClient:
+    """TD-39 Issue F: GoalRefinementTask must build a dedicated cheap-model
+    httpx.AsyncClient when llm_config is supplied, so Tier 2 calls run on the
+    cheap model declared in GoalRefinementConfig.model instead of the
+    expensive main LLM pinned at init.
+    """
+
+    def test_cheap_client_built_when_llm_config_supplied(self):
+        task = GoalRefinementTask(
+            config=GoalRefinementConfig(),
+            llm_config=LLMConfig(
+                model="openai/gemini/gemini-2.5-pro",
+                endpoint="http://localhost:8811/v1",
+                api_key="test-key",
+            ),
+        )
+        assert task._cheap_client is not None
+
+    def test_cheap_client_not_built_when_llm_config_missing(self):
+        task = GoalRefinementTask(config=GoalRefinementConfig())
+        assert task._cheap_client is None
+
+    def test_cheap_client_not_built_when_refinement_disabled(self):
+        task = GoalRefinementTask(
+            config=GoalRefinementConfig(refinement_task_enabled=False),
+            llm_config=LLMConfig(
+                model="openai/gemini/gemini-2.5-pro",
+                endpoint="http://localhost:8811/v1",
+                api_key="",
+            ),
+        )
+        assert task._cheap_client is None
+
+    @pytest.mark.asyncio
+    async def test_close_releases_cheap_client(self):
+        task = GoalRefinementTask(
+            config=GoalRefinementConfig(),
+            llm_config=LLMConfig(
+                model="openai/gemini/gemini-2.5-pro",
+                endpoint="http://localhost:8811/v1",
+                api_key="",
+            ),
+        )
+        assert task._cheap_client is not None
+        await task.close()
+        assert task._cheap_client is None
+
+
+class TestRefineGoalConsumesMessages:
+    """TD-39 Sketch D part 2: _refine_goal must consume the `messages`
+    parameter (previously dead). Slices to config.feed_recent_messages and
+    includes a RECENT CONVERSATION section in the prompt.
+    """
+
+    @pytest.mark.asyncio
+    async def test_refine_prompt_includes_recent_conversation(self):
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={
+            "title": "Refined", "description": "", "success_criteria": [],
+        })
+        task = _make_task(llm=llm)
+        goal = make_goal_state(title="Old", description="Old desc")
+        messages = [
+            {"role": "user", "content": "I realized the goal was too narrow"},
+            {"role": "assistant", "content": "Shall I broaden the scope?"},
+        ]
+        await task._refine_goal(goal, "evidence of scope issue", messages)
+
+        # Extract the prompt (second positional arg of complete_json)
+        prompt = llm.complete_json.call_args[0][1]
+        assert "RECENT CONVERSATION" in prompt
+        assert "I realized the goal was too narrow" in prompt
+        assert "Shall I broaden the scope?" in prompt
+
+    @pytest.mark.asyncio
+    async def test_refine_prompt_slices_to_feed_recent_messages(self):
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={
+            "title": "Refined", "description": "", "success_criteria": [],
+        })
+        # feed_recent_messages=2 means only the last 2 messages survive the slice
+        config = GoalRefinementConfig(feed_recent_messages=2)
+        task = _make_task(llm=llm, config=config)
+        goal = make_goal_state()
+        messages = [
+            {"role": "user", "content": "MSG_ONE_SHOULD_BE_DROPPED"},
+            {"role": "user", "content": "MSG_TWO_SHOULD_BE_DROPPED"},
+            {"role": "user", "content": "MSG_THREE_KEPT"},
+            {"role": "user", "content": "MSG_FOUR_KEPT"},
+        ]
+        await task._refine_goal(goal, "evidence", messages)
+        prompt = llm.complete_json.call_args[0][1]
+        assert "MSG_THREE_KEPT" in prompt
+        assert "MSG_FOUR_KEPT" in prompt
+        assert "MSG_ONE_SHOULD_BE_DROPPED" not in prompt
+        assert "MSG_TWO_SHOULD_BE_DROPPED" not in prompt
+
+
+class TestCreateSubgoalRichPrompt:
+    """TD-39 Issue F + TD-48: _create_subgoal prompt must include parent
+    description + success_criteria + conversation slice + RT-2 quality rules +
+    obstacle_hint when supplied.
+    """
+
+    @pytest.mark.asyncio
+    async def test_subgoal_prompt_includes_parent_description_and_criteria(self):
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={"title": "Write rollback SQL"})
+        task = _make_task(llm=llm)
+        parent = make_goal_state(
+            title="Migrate to PostgreSQL 16",
+            description="Move the prod database from MySQL 5.7 to PostgreSQL 16",
+        )
+        parent.success_criteria = ["pg_dump succeeds", "cutover downtime < 5 min"]
+        await task._create_subgoal(parent, "Write rollback SQL", [], [])
+
+        prompt = llm.complete_json.call_args[0][1]
+        assert "Migrate to PostgreSQL 16" in prompt
+        assert "Move the prod database from MySQL 5.7 to PostgreSQL 16" in prompt
+        assert "pg_dump succeeds" in prompt
+        assert "cutover downtime < 5 min" in prompt
+
+    @pytest.mark.asyncio
+    async def test_subgoal_prompt_includes_conversation_slice(self):
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={"title": "Child"})
+        task = _make_task(llm=llm)
+        parent = make_goal_state(title="Fix login bug")
+        messages = [
+            {"role": "user", "content": "The auth middleware is 500'ing on fresh sessions"},
+            {"role": "assistant", "content": "I'll inspect the session store"},
+        ]
+        await task._create_subgoal(parent, "Investigate session store", messages, [])
+
+        prompt = llm.complete_json.call_args[0][1]
+        assert "RECENT CONVERSATION" in prompt
+        assert "auth middleware is 500" in prompt
+        assert "I'll inspect the session store" in prompt
+
+    @pytest.mark.asyncio
+    async def test_subgoal_prompt_includes_obstacle_hint_when_paired(self):
+        """When HintProcessor passes obstacle_hint (the paired blocked.evidence),
+        the subgoal prompt must surface it as an OBSTACLE section.
+        """
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={"title": "Write rollback SQL"})
+        task = _make_task(llm=llm)
+        parent = make_goal_state(title="Migrate to PostgreSQL 16")
+        obstacle = "The migration script is missing the rollback SQL"
+        await task._create_subgoal(
+            parent, "Write rollback SQL", [], [],
+            obstacle_hint=obstacle,
+        )
+
+        prompt = llm.complete_json.call_args[0][1]
+        assert "OBSTACLE" in prompt
+        assert obstacle in prompt
+        # Check for the "transform the obstacle" instruction
+        assert "unblock" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_subgoal_prompt_carries_rt2_quality_rules(self):
+        """TD-48: the RT-2 anti-false-positive quality rules must live in the
+        _create_subgoal prompt before RT-2 can be deleted.
+        """
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={"title": "Child"})
+        task = _make_task(llm=llm)
+        parent = make_goal_state(title="Fix login bug")
+        await task._create_subgoal(parent, "investigate", [], [])
+
+        prompt = llm.complete_json.call_args[0][1]
+        # CONCRETE rule
+        assert "CONCRETE" in prompt
+        # Do NOT restate the obstacle
+        assert "restate" in prompt.lower()
+        # Already resolved
+        assert "already resolved" in prompt.lower()
+        # Duplicate sibling sub-goals
+        assert "duplicate" in prompt.lower() or "sibling" in prompt.lower()
+        # Confident rule
+        assert "confident" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_subgoal_prompt_includes_existing_siblings(self):
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(return_value={"title": "Different"})
+        task = _make_task(llm=llm)
+        parent = make_goal_state(title="Parent")
+        sibling = make_goal_state(title="EXISTING_SIBLING_TITLE", parent_goal_id=parent.id)
+        await task._create_subgoal(parent, "new work", [], [parent, sibling])
+
+        prompt = llm.complete_json.call_args[0][1]
+        assert "EXISTING_SIBLING_TITLE" in prompt
+
+
+class TestHintProcessorCorrelation:
+    """TD-39 Issue F: HintProcessor must pre-pass hints by goal_index and,
+    when a new_subgoal hint shares a goal_index with a blocked hint in the
+    same batch, pass blocked.evidence as obstacle_hint to _create_subgoal.
+    """
+
+    @pytest.mark.asyncio
+    async def test_paired_blocked_and_new_subgoal_passes_obstacle_hint(self):
+        store = _make_mock_store()
+        # Use a spy task so we can inspect the obstacle_hint argument
+        task = _make_task()
+        task.process_hint = AsyncMock(side_effect=task.process_hint)
+        config = GoalRefinementConfig(run_refinement_async=False)
+        processor = _make_processor(store=store, task=task, config=config)
+
+        goal = make_goal_state()
+        hints = [
+            {"goal_index": 0, "hint": "blocked", "evidence": "Missing rollback SQL for migration 0042"},
+            {"goal_index": 0, "hint": "new_subgoal", "evidence": "Write rollback SQL for migration 0042"},
+        ]
+        await processor.process_hints(
+            hints, [goal],
+            session_key="agent:main:main",
+            session_id=uuid.uuid4(),
+        )
+
+        # Find the new_subgoal dispatch call and check obstacle_hint was passed
+        new_subgoal_calls = [
+            call for call in task.process_hint.await_args_list
+            if call.args[1] == "new_subgoal" or call.kwargs.get("hint") == "new_subgoal"
+        ]
+        assert len(new_subgoal_calls) == 1
+        assert new_subgoal_calls[0].kwargs.get("obstacle_hint") == "Missing rollback SQL for migration 0042"
+
+    @pytest.mark.asyncio
+    async def test_new_subgoal_without_paired_blocked_has_no_obstacle_hint(self):
+        store = _make_mock_store()
+        task = _make_task()
+        task.process_hint = AsyncMock(side_effect=task.process_hint)
+        config = GoalRefinementConfig(run_refinement_async=False)
+        processor = _make_processor(store=store, task=task, config=config)
+
+        goal = make_goal_state()
+        hints = [
+            {"goal_index": 0, "hint": "new_subgoal", "evidence": "Write more tests"},
+        ]
+        await processor.process_hints(
+            hints, [goal],
+            session_key="agent:main:main",
+            session_id=uuid.uuid4(),
+        )
+
+        new_subgoal_calls = [
+            call for call in task.process_hint.await_args_list
+            if call.args[1] == "new_subgoal" or call.kwargs.get("hint") == "new_subgoal"
+        ]
+        assert len(new_subgoal_calls) == 1
+        assert new_subgoal_calls[0].kwargs.get("obstacle_hint") is None
+
+    @pytest.mark.asyncio
+    async def test_blocked_hint_still_fires_tier1_even_when_paired(self):
+        """Pairing a blocked hint with a new_subgoal must not suppress the
+        Tier 1 blocked dispatch. The blocked hint still appends to
+        goal.blockers[] via the existing Tier 1 path.
+        """
+        store = _make_mock_store()
+        task = _make_task()
+        config = GoalRefinementConfig(run_refinement_async=False)
+        processor = _make_processor(store=store, task=task, config=config)
+
+        goal = make_goal_state()
+        hints = [
+            {"goal_index": 0, "hint": "blocked", "evidence": "obstacle text"},
+            {"goal_index": 0, "hint": "new_subgoal", "evidence": "work text"},
+        ]
+        await processor.process_hints(
+            hints, [goal],
+            session_key="agent:main:main",
+            session_id=uuid.uuid4(),
+        )
+
+        # blocked hint should have updated the goal via update_goal;
+        # new_subgoal should have added a new goal via add_goal.
+        assert store.update_goal.await_count >= 1
+        # Verify the goal's blockers list was updated with the obstacle
+        assert "obstacle text" in goal.blockers
