@@ -163,7 +163,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
 |----------|----------|---------|------|---------|----------------|---------|--------------|
-| `EB_COMPACTION_LLM_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
+| `EB_COMPACTION_LLM_MODEL` | No | `"gemini/gemini-2.5-flash-lite"` | string | Python runtime | `gemini/gemini-2.5-flash-lite` | No | Yes |
 | `EB_COMPACTION_LLM_ENDPOINT` | No | Falls back to `EB_LLM_ENDPOINT` | string | Python runtime | `http://litellm:8811/v1` | No | Yes |
 | `EB_COMPACTION_LLM_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
 
@@ -204,7 +204,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_SUCCESSFUL_USE_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
 | `EB_SUCCESSFUL_USE_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
 | `EB_SUCCESSFUL_USE_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
-| `EB_SUCCESSFUL_USE_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
+| `EB_SUCCESSFUL_USE_MODEL` | No | `"gemini/gemini-2.5-flash-lite"` | string | Python runtime | `gemini/gemini-2.5-flash-lite` | No | Yes |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | No | `5` | int | Python runtime | `5`, `10` | No | Yes |
 
 ### 11. Blocker Extraction (Phase 9, LLM-based, off by default)
@@ -214,7 +214,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_BLOCKER_EXTRACTION_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
 | `EB_BLOCKER_EXTRACTION_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
-| `EB_BLOCKER_EXTRACTION_MODEL` | No | `"gemini/gemini-2.5-flash"` | string | Python runtime | `gemini/gemini-2.5-flash` | No | Yes |
+| `EB_BLOCKER_EXTRACTION_MODEL` | No | `"gemini/gemini-2.5-flash-lite"` | string | Python runtime | `gemini/gemini-2.5-flash-lite` | No | Yes |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | No | `3` | int | Python runtime | `3`, `5` | No | Yes |
 
 ### 12. Ingest Pipeline Tuning
@@ -640,7 +640,7 @@ Path prefix: `successful_use.*`
 | `successful_use.enabled` | `bool` | `False` | `EB_SUCCESSFUL_USE_ENABLED` | -- | Enables LLM-based batch evaluation of which injected facts actually contributed to agent actions | Enabling is expensive (LLM calls per turn); disabling loses D10 scoring accuracy | `false` / `false` / `true` |
 | `successful_use.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_SUCCESSFUL_USE_ENDPOINT` | -- | LLM endpoint for use evaluation (typically a cheaper/faster model) | Wrong endpoint = evaluation fails silently (async) | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
 | `successful_use.api_key` | `str` | `""` | `EB_SUCCESSFUL_USE_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure on evaluation calls | `""` / `sk-...` / `sk-...` |
-| `successful_use.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_SUCCESSFUL_USE_MODEL` | -- | LLM model for use evaluation (flash model for cost efficiency) | Wrong model = evaluation errors | `gemini/gemini-2.5-flash` / same / same |
+| `successful_use.model` | `str` | `"gemini/gemini-2.5-flash-lite"` | `EB_SUCCESSFUL_USE_MODEL` | -- | LLM model for use evaluation (flash-class model for cost efficiency; the unsuffixed `gemini/gemini-2.5-flash` alias on the staging LiteLLM proxy resolves to a deleted preview and returns HTTP 404) | Wrong model = evaluation errors | `gemini/gemini-2.5-flash-lite` / same / same |
 | `successful_use.batch_size` | `int` | `5` | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `ge=1` | Number of facts evaluated per LLM call | Too low = many LLM calls (expensive); too high = context window overflow | `5` / `5` / `10` |
 | `successful_use.batch_timeout_seconds` | `float` | `120.0` | -- | `ge=10.0` | Timeout for each use evaluation LLM call | Too low = frequent timeouts; too high = blocks turn processing | `120.0` / `120.0` / `60.0` |
 | `successful_use.feed_last_facts` | `int` | `20` | -- | `ge=1` | Number of most recently injected facts to evaluate per turn | Too low = misses used facts; too high = expensive evaluation | `20` / `20` / `20` |
@@ -670,7 +670,7 @@ Path prefix: `goal_refinement.*`
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `goal_refinement.hints_enabled` | `bool` | `True` | -- | -- | Enables Tier 1 goal hints (zero-LLM-cost direct Redis updates from message patterns) | Disabling = no cheap goal signal processing | `true` / `true` / `true` |
 | `goal_refinement.refinement_task_enabled` | `bool` | `True` | -- | -- | Enables Tier 2 async LLM-based goal refinement (subgoal creation, progress updates) | Disabling = goals never refined or decomposed; only manual goal management | `true` / `true` / `true` |
-| `goal_refinement.model` | `str` | `"gemini/gemini-2.5-flash"` | -- | -- | LLM model for goal refinement tasks | Wrong model = refinement errors | `gemini/gemini-2.5-flash` / same / same |
+| `goal_refinement.model` | `str` | `"gemini/gemini-2.5-flash-lite"` | -- | -- | LLM model for goal refinement tasks (the unsuffixed `gemini/gemini-2.5-flash` alias on the staging LiteLLM proxy resolves to a deleted preview and returns HTTP 404; flash-lite is the working flash-class replacement) | Wrong model = refinement errors | `gemini/gemini-2.5-flash-lite` / same / same |
 | `goal_refinement.max_subgoals_per_session` | `int` | `10` | -- | `ge=1` | Maximum subgoals a session can create through refinement | Too low = incomplete goal decomposition; too high = goal sprawl | `10` / `10` / `15` |
 | `goal_refinement.feed_recent_messages` | `int` | `6` | -- | `ge=1` | Number of recent messages fed to refinement LLM for context | Too low = refinement lacks context; too high = expensive prompts | `6` / `6` / `10` |
 | `goal_refinement.run_refinement_async` | `bool` | `True` | -- | -- | If true, Tier 2 refinement runs as background async task | Setting false blocks turn on refinement completion | `true` / `true` / `true` |
@@ -771,7 +771,7 @@ Path prefix: `compaction_llm.*`
 
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
-| `compaction_llm.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_COMPACTION_LLM_MODEL` | -- | LLM model for compaction summarization (uses cheaper model than extraction) | Wrong model = compaction summarization errors | `gemini/gemini-2.5-flash` / same / same |
+| `compaction_llm.model` | `str` | `"gemini/gemini-2.5-flash-lite"` | `EB_COMPACTION_LLM_MODEL` | -- | LLM model for compaction summarization (uses cheaper model than extraction; the unsuffixed `gemini/gemini-2.5-flash` alias on the staging LiteLLM proxy resolves to a deleted preview and returns HTTP 404) | Wrong model = compaction summarization errors | `gemini/gemini-2.5-flash-lite` / same / same |
 | `compaction_llm.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_COMPACTION_LLM_ENDPOINT` | -- | LLM endpoint for compaction (falls back to `llm.endpoint` via `_apply_inheritance_fallbacks()` Tier 3 / F7) | Wrong endpoint = compaction summaries fail | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
 | `compaction_llm.api_key` | `str` | `""` | `EB_COMPACTION_LLM_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure on compaction LLM calls | `""` / `sk-...` / `sk-...` |
 | `compaction_llm.max_tokens` | `int` | `2000` | -- | `ge=100` | Max output tokens for compaction summaries | Too low = truncated summaries; too high = verbose summaries wasting context | `2000` / `2000` / `2000` |
@@ -842,7 +842,7 @@ Path prefix: `blocker_extraction.*`
 | `blocker_extraction.enabled` | `bool` | `False` | `EB_BLOCKER_EXTRACTION_ENABLED` | -- | Enables LLM-based extraction of task blockers from conversation | Enabling is expensive (LLM calls every N turns); disabling = no automatic blocker detection | `false` / `false` / `true` |
 | `blocker_extraction.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_BLOCKER_EXTRACTION_ENDPOINT` | -- | LLM endpoint for blocker extraction | Wrong endpoint = extraction fails silently | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
 | `blocker_extraction.api_key` | `str` | `""` | `EB_BLOCKER_EXTRACTION_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure | `""` / `sk-...` / `sk-...` |
-| `blocker_extraction.model` | `str` | `"gemini/gemini-2.5-flash"` | `EB_BLOCKER_EXTRACTION_MODEL` | -- | LLM model for blocker extraction | Wrong model = extraction errors | `gemini/gemini-2.5-flash` / same / same |
+| `blocker_extraction.model` | `str` | `"gemini/gemini-2.5-flash-lite"` | `EB_BLOCKER_EXTRACTION_MODEL` | -- | LLM model for blocker extraction (the unsuffixed `gemini/gemini-2.5-flash` alias on the staging LiteLLM proxy resolves to a deleted preview and returns HTTP 404) | Wrong model = extraction errors | `gemini/gemini-2.5-flash-lite` / same / same |
 | `blocker_extraction.run_every_n_turns` | `int` | `3` | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `ge=1` | Run blocker extraction every N turns | Too low = excessive LLM calls; too high = delayed blocker detection | `3` / `3` / `5` |
 | `blocker_extraction.recent_messages_window` | `int` | `10` | -- | `ge=1` | Number of recent messages fed to blocker extraction LLM | Too low = misses blockers in earlier messages; too high = expensive prompts | `10` / `10` / `10` |
 
@@ -964,14 +964,14 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `bool` | `false` |
 | `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `int` | `3` |
-| `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `str` | `gemini/gemini-2.5-flash` |
+| `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `str` | `gemini/gemini-2.5-flash-lite` |
 | `EB_CLICKHOUSE_DATABASE` | `infra.clickhouse.database` | `str` | `otel` |
 | `EB_CLICKHOUSE_ENABLED` | `infra.clickhouse.enabled` | `bool` | `false` |
 | `EB_CLICKHOUSE_HOST` | `infra.clickhouse.host` | `str` | `localhost` |
 | `EB_CLICKHOUSE_PORT` | `infra.clickhouse.port` | `int` | `8123` |
 | `EB_COMPACTION_LLM_API_KEY` | `compaction_llm.api_key` | `str` | `""` (fallback: `EB_LLM_API_KEY`) |
 | `EB_COMPACTION_LLM_ENDPOINT` | `compaction_llm.endpoint` | `str` | (fallback: `llm.endpoint`) |
-| `EB_COMPACTION_LLM_MODEL` | `compaction_llm.model` | `str` | `gemini/gemini-2.5-flash` |
+| `EB_COMPACTION_LLM_MODEL` | `compaction_llm.model` | `str` | `gemini/gemini-2.5-flash-lite` |
 | `EB_CONSOLIDATION_BATCH_SIZE` | `consolidation.batch_size` | `int` | `500` |
 | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `consolidation_min_retention_seconds` | `int` | `172800` |
 | `EB_DEFAULT_DATASET` | `cognee.default_dataset` | `str` | `elephantbroker` |
@@ -1024,7 +1024,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `int` | `5` |
 | `EB_SUCCESSFUL_USE_ENABLED` | `successful_use.enabled` | `bool` | `false` |
 | `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `str` | `http://localhost:8811/v1` |
-| `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `str` | `gemini/gemini-2.5-flash` |
+| `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `str` | `gemini/gemini-2.5-flash-lite` |
 | `EB_TEAM_ID` | `gateway.team_id` | `str` | `None` |
 | `EB_TRACE_MEMORY_MAX_EVENTS` | `infra.trace.memory_max_events` | `int` | `10000` |
 | `EB_TRACE_OTEL_LOGS_ENABLED` | `infra.trace.otel_logs_enabled` | `bool` | `false` |
@@ -1935,7 +1935,7 @@ The `ElephantBrokerConfig` Pydantic model contains 25+ config sections. Top-leve
 | `audit` | SQLite audit trail paths | 7 DB paths under `data/`, `retention_days: 90` |
 | `successful_use` | LLM-based use reasoning | `enabled: false`, `batch_size: 5` |
 | `blocker_extraction` | LLM-based blocker detection | `enabled: false`, `run_every_n_turns: 3` |
-| `compaction_llm` | Separate LLM for compaction | `model: "gemini/gemini-2.5-flash"`, `temperature: 0.2` |
+| `compaction_llm` | Separate LLM for compaction | `model: "gemini/gemini-2.5-flash-lite"`, `temperature: 0.2` |
 | `goal_refinement` | Goal hint/refinement pipeline | `hints_enabled: true`, `max_subgoals_per_session: 10` |
 
 #### Config Resolution Order
@@ -4102,7 +4102,7 @@ successful_use:
   enabled: false                             # EB_SUCCESSFUL_USE_ENABLED
   endpoint: "http://localhost:8811/v1"  # EB_SUCCESSFUL_USE_ENDPOINT
   api_key: ""                                # EB_SUCCESSFUL_USE_API_KEY (falls back to EB_LLM_API_KEY)
-  model: "gemini/gemini-2.5-flash"           # EB_SUCCESSFUL_USE_MODEL
+  model: "gemini/gemini-2.5-flash-lite"      # EB_SUCCESSFUL_USE_MODEL
   batch_size: 5                              # EB_SUCCESSFUL_USE_BATCH_SIZE
   batch_timeout_seconds: 120.0
   feed_last_facts: 20
@@ -4120,7 +4120,7 @@ goal_injection:
 goal_refinement:
   hints_enabled: true
   refinement_task_enabled: true
-  model: "gemini/gemini-2.5-flash"
+  model: "gemini/gemini-2.5-flash-lite"
   max_subgoals_per_session: 10
   feed_recent_messages: 6
   run_refinement_async: true
@@ -4221,7 +4221,7 @@ async_analysis:
 
 ## --- Compaction LLM ---
 compaction_llm:
-  model: "gemini/gemini-2.5-flash"       # EB_COMPACTION_LLM_MODEL
+  model: "gemini/gemini-2.5-flash-lite"  # EB_COMPACTION_LLM_MODEL
   endpoint: "http://localhost:8811/v1"    # EB_COMPACTION_LLM_ENDPOINT
   api_key: ""                            # EB_COMPACTION_LLM_API_KEY (falls back to EB_LLM_API_KEY)
   max_tokens: 2000
@@ -4232,7 +4232,7 @@ blocker_extraction:
   enabled: false                          # EB_BLOCKER_EXTRACTION_ENABLED
   endpoint: "http://localhost:8811/v1"  # EB_BLOCKER_EXTRACTION_ENDPOINT
   api_key: ""                             # EB_BLOCKER_EXTRACTION_API_KEY (falls back to EB_LLM_API_KEY)
-  model: "gemini/gemini-2.5-flash"        # EB_BLOCKER_EXTRACTION_MODEL
+  model: "gemini/gemini-2.5-flash-lite"   # EB_BLOCKER_EXTRACTION_MODEL
   run_every_n_turns: 3                    # EB_BLOCKER_EXTRACTION_EVERY_N_TURNS
   recent_messages_window: 10
 ```
@@ -4307,7 +4307,7 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_
 | `EB_EMBEDDING_CACHE_TTL` | `embedding_cache.ttl_seconds` | `3600` |
 | `EB_SCORING_SNAPSHOT_TTL` | `scoring.snapshot_ttl_seconds` | `300` |
 | `EB_SESSION_GOALS_TTL` | `scoring.session_goals_ttl_seconds` | `86400` |
-| `EB_COMPACTION_LLM_MODEL` | `compaction_llm.model` | `"gemini/gemini-2.5-flash"` |
+| `EB_COMPACTION_LLM_MODEL` | `compaction_llm.model` | `"gemini/gemini-2.5-flash-lite"` |
 | `EB_COMPACTION_LLM_ENDPOINT` | `compaction_llm.endpoint` | (same as `llm.endpoint`) |
 | `EB_COMPACTION_LLM_API_KEY` | `compaction_llm.api_key` | (falls back to `EB_LLM_API_KEY`) |
 | `EB_HITL_CALLBACK_SECRET` | `hitl.callback_hmac_secret` | `""` |
@@ -4315,12 +4315,12 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_
 | `EB_SUCCESSFUL_USE_ENABLED` | `successful_use.enabled` | `"false"` |
 | `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_SUCCESSFUL_USE_API_KEY` | `successful_use.api_key` | (falls back to `EB_LLM_API_KEY`) |
-| `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `"gemini/gemini-2.5-flash"` |
+| `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `"gemini/gemini-2.5-flash-lite"` |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `5` |
 | `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `"false"` |
 | `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `"http://localhost:8811/v1"` |
 | `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | (falls back to `EB_LLM_API_KEY`) |
-| `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `"gemini/gemini-2.5-flash"` |
+| `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `"gemini/gemini-2.5-flash-lite"` |
 | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `3` |
 | `EB_DEV_CONSOLIDATION_AUTO_TRIGGER` | `consolidation.dev_auto_trigger_interval` | `"0"` |
 | `EB_CONSOLIDATION_BATCH_SIZE` | `consolidation.batch_size` | `500` |
@@ -6862,7 +6862,7 @@ llm:
   ingest_batch_timeout_seconds: 30
 
 compaction_llm:
-  model: "gemini/gemini-2.5-flash"
+  model: "gemini/gemini-2.5-flash-lite"
   # Uses cheaper model for compaction summarization
 
 reranker:
@@ -7647,7 +7647,7 @@ Summarize this conversation segment ({N} messages, ~{T} tokens) into a compact d
 
 **Max tokens:** `config.compaction_summary_max_tokens` (from `ContextAssemblyConfig`, default: `1000`)
 
-**Model:** `CompactionLLMConfig.model` (default: `gemini/gemini-2.5-flash`, env: `EB_COMPACTION_LLM_MODEL`)
+**Model:** `CompactionLLMConfig.model` (default: `gemini/gemini-2.5-flash-lite`, env: `EB_COMPACTION_LLM_MODEL`)
 
 **When called:** During `compact_with_context()` when the compress bucket is non-empty. Triggered when current token count exceeds `target_tokens * cadence_multiplier` (balanced=2.0, aggressive=1.5, minimal=3.0) or forced.
 
@@ -7865,7 +7865,7 @@ Do NOT mark a fact as used if the agent would have done the same without it.
 
 **Max tokens:** `500` (hardcoded in request payload)
 
-**Model:** `SuccessfulUseConfig.model` (default: `gemini/gemini-2.5-flash`, env: `EB_SUCCESSFUL_USE_MODEL`)
+**Model:** `SuccessfulUseConfig.model` (default: `gemini/gemini-2.5-flash-lite`, env: `EB_SUCCESSFUL_USE_MODEL`)
 
 **When called:** Fires as background `asyncio.create_task` from `ContextLifecycle.after_turn()` every `batch_size` turns (default: 5) or `batch_timeout_seconds` (default: 120s). Off by default (`SuccessfulUseConfig.enabled=False`, env: `EB_SUCCESSFUL_USE_ENABLED`).
 
@@ -7926,7 +7926,7 @@ Return JSON: [{"goal_index": int, "blocker_text": "description of the blocker"}]
 
 **Max tokens:** `500` (hardcoded in request payload)
 
-**Model:** `BlockerExtractionConfig.model` (default: `gemini/gemini-2.5-flash`, env: `EB_BLOCKER_EXTRACTION_MODEL`)
+**Model:** `BlockerExtractionConfig.model` (default: `gemini/gemini-2.5-flash-lite`, env: `EB_BLOCKER_EXTRACTION_MODEL`)
 
 **When called:** Fires as background `asyncio.create_task` from `ContextLifecycle.after_turn()` every `run_every_n_turns` turns (default: 3). Off by default (`BlockerExtractionConfig.enabled=False`, env: `EB_BLOCKER_EXTRACTION_ENABLED`).
 
@@ -8098,12 +8098,12 @@ test
 | 2 | Fact Extraction (Tool Output) | `extract_facts.py` | `complete_json` | 0.0 | 16384 | gemini-2.5-pro | Yes |
 | 3 | Memory Classification | `classify_memory.py` | `complete_json` | 0.0 | 50 | gemini-2.5-pro | Yes (fallback) |
 | 4 | Artifact Summarization | `summarize_artifact.py` | `complete` | 0.0 | 200 | gemini-2.5-pro | Yes |
-| 5 | Compaction Summarization | `compaction/engine.py` | `complete` | 0.2 | 1000 | gemini-2.5-flash | Yes |
+| 5 | Compaction Summarization | `compaction/engine.py` | `complete` | 0.2 | 1000 | gemini-2.5-flash-lite | Yes |
 | 6 | Guard LLM Escalation | `guards/engine.py` | `complete_json` | 0.0 | 500 | gemini-2.5-pro | Profile-dependent |
 | 7 | Fact Canonicalization | `canonicalize.py` | `complete` | 0.1 (default) | 500 | gemini-2.5-pro | During consolidation |
 | 8 | Procedure Refinement | `refine_procedures.py` | `complete` | 0.1 (default) | 500 | gemini-2.5-pro | During consolidation |
-| 9 | Successful Use (RT-1) | `successful_use_task.py` | raw httpx | 0.1 | 500 | gemini-2.5-flash | No (opt-in) |
-| 10 | Blocker Extraction (RT-2) | `blocker_extraction_task.py` | raw httpx | 0.1 | 500 | gemini-2.5-flash | No (opt-in) |
+| 9 | Successful Use (RT-1) | `successful_use_task.py` | raw httpx | 0.1 | 500 | gemini-2.5-flash-lite | No (opt-in) |
+| 10 | Blocker Extraction (RT-2) | `blocker_extraction_task.py` | raw httpx | 0.1 | 500 | gemini-2.5-flash-lite | No (opt-in) |
 | 11 | Goal Refinement | `goal_refinement.py` | `complete_json` | 0.0 | 500 | gemini-2.5-pro | Yes |
 | 12 | Sub-Goal Creation | `goal_refinement.py` | `complete_json` | 0.0 | 500 | gemini-2.5-pro | Yes |
 | 13 | Subagent Context Summary | `assembler.py` | duck-typed `complete` | varies | varies | varies | When LLM available |

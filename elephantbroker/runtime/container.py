@@ -597,8 +597,8 @@ class RuntimeContainer:
             gateway_id=gw_id,
             # TD-39 Issue F: pass main LLMConfig so GoalRefinementTask can
             # instantiate a dedicated cheap-model httpx.AsyncClient bound to
-            # goal_refinement.model (default gemini/gemini-2.5-flash) against
-            # the main LLM endpoint + api_key.
+            # goal_refinement.model (default gemini/gemini-2.5-flash-lite)
+            # against the main LLM endpoint + api_key.
             llm_config=config.llm,
         )
 

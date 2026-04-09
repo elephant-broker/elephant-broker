@@ -7,37 +7,12 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+from elephantbroker.runtime.adapters.llm.util import strip_markdown_fences
 from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.schemas.config import GoalRefinementConfig, LLMConfig
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 
 logger = logging.getLogger("elephantbroker.runtime.working_set.goal_refinement")
-
-
-def _strip_markdown_fences(content: str) -> str:
-    """Strip leading/trailing markdown code fences from LLM JSON output.
-
-    Empirical curl testing against the staging LiteLLM proxy
-    (/tmp/observer-cheap-client-curl-verify.md) showed that all three working
-    Gemini models wrap `message.content` in ```json\\n...\\n``` fences even
-    when `response_format={"type": "json_object"}` is set. json.loads() fails
-    on fenced input, so we strip the fences before parsing.
-
-    Handles:
-    - ```json\\n{...}\\n``` (language tag + newlines)
-    - ```\\n{...}\\n```     (no language tag)
-    - {...}                  (no fences — backward compat)
-    - Leading/trailing whitespace.
-    """
-    content = content.strip()
-    if content.startswith("```"):
-        # Drop the opening fence line (with or without language tag)
-        if "\n" in content:
-            content = content.split("\n", 1)[1]
-        # Drop the closing fence if present
-        if content.endswith("```"):
-            content = content.rsplit("```", 1)[0]
-    return content.strip()
 
 
 class GoalRefinementTask:
@@ -53,8 +28,8 @@ class GoalRefinementTask:
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
 
         # TD-39 Issue F: Tier 2 LLM calls should use the cheap model declared
-        # in GoalRefinementConfig.model (default gemini/gemini-2.5-flash), not
-        # the main self._llm which is pinned to the expensive EB_LLM_MODEL at
+        # in GoalRefinementConfig.model (default gemini/gemini-2.5-flash-lite),
+        # not the main self._llm which is pinned to the expensive EB_LLM_MODEL at
         # init. Instantiate a dedicated httpx.AsyncClient bound to
         # goal_refinement.model + main LLM endpoint + main LLM api_key.
         # TODO(TD-39 long-term): replace this dedicated client with a per-call
@@ -95,7 +70,7 @@ class GoalRefinementTask:
           handling swallowed.
         - Markdown fence wrapping: LiteLLM's Gemini backends wrap JSON output
           in ```json ... ``` fences even with response_format=json_object. We
-          strip fences via _strip_markdown_fences before json.loads().
+          strip fences via strip_markdown_fences before json.loads().
         - Non-200 surfacing: previously response.raise_for_status() bubbled up
           as an HTTPStatusError whose repr did not include the body, and on
           some paths the code fell through to json.loads('') and raised a
@@ -127,7 +102,7 @@ class GoalRefinementTask:
                 )
             data = response.json()
             content = data["choices"][0]["message"]["content"]
-            content = _strip_markdown_fences(content)
+            content = strip_markdown_fences(content)
             parsed = json.loads(content)
             return parsed if isinstance(parsed, dict) else None
         except Exception as exc:
@@ -315,7 +290,7 @@ class GoalRefinementTask:
 
         TD-39 Issue F + Sketch D part 2 + TD-48 quality-rule migration:
         - Uses the dedicated cheap-model httpx client (self._cheap_client),
-          bound to GoalRefinementConfig.model (default gemini/gemini-2.5-flash),
+          bound to GoalRefinementConfig.model (default gemini/gemini-2.5-flash-lite),
           instead of the expensive self._llm which is pinned to EB_LLM_MODEL.
         - Consumes the `messages` parameter (previously dead — declared but
           never read). Slices to config.feed_recent_messages and includes as

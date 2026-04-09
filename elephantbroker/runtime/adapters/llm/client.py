@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from elephantbroker.runtime.adapters.llm.util import strip_markdown_fences
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.config import LLMConfig
 
@@ -151,10 +152,20 @@ class LLMClient:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
 
+        # Staging LiteLLM proxy wraps Gemini responses in ```json...``` fences
+        # even when response_format is set — observer found 26 "LLM returned
+        # invalid JSON" warnings in a 2-hour window, including 10/10 empty
+        # facts arrays on the hot extract_facts path. Shared helper lives in
+        # adapters/llm/util.py so goal_refinement's cheap-model path and this
+        # high-level LLMClient path use identical fence handling. No-op on
+        # fence-free content (backward compat).
+        stripped = strip_markdown_fences(content)
         try:
-            return json.loads(content)
+            return json.loads(stripped)
         except json.JSONDecodeError as exc:
-            logger.warning("LLM returned invalid JSON: %s", exc)
+            logger.warning(
+                "LLM returned invalid JSON: %s | content[:200]=%r", exc, content[:200]
+            )
             raise
 
     async def close(self) -> None:

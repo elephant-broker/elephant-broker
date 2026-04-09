@@ -245,7 +245,10 @@ class SuccessfulUseConfig(_StrictBase):
     # config in this file.
     endpoint: str = "http://localhost:8811/v1"
     api_key: str = ""  # Falls back to EB_LLM_API_KEY if empty
-    model: str = "gemini/gemini-2.5-flash"
+    # See GoalRefinementConfig.model for the rationale on flash-lite: the
+    # staging LiteLLM proxy no longer routes "gemini/gemini-2.5-flash" — it
+    # resolves to a deleted Gemini preview alias and returns HTTP 404.
+    model: str = "gemini/gemini-2.5-flash-lite"
     batch_size: int = Field(default=5, ge=1)
     batch_timeout_seconds: float = Field(default=120.0, ge=10.0)
     feed_last_facts: int = Field(default=20, ge=1)
@@ -426,7 +429,10 @@ class HitlConfig(_StrictBase):
 
 class CompactionLLMConfig(_StrictBase):
     """LLM configuration for compaction summarization."""
-    model: str = "gemini/gemini-2.5-flash"
+    # See GoalRefinementConfig.model — "gemini/gemini-2.5-flash" resolves to
+    # a deleted Gemini preview on the staging LiteLLM proxy. flash-lite is
+    # the working flash-class model.
+    model: str = "gemini/gemini-2.5-flash-lite"
     # F7 (TODO-3-609): empty string is the inheritance sentinel — when left
     # empty (default or explicit ""), `_apply_inheritance_fallbacks()` copies
     # `llm.endpoint` into this field at load time. This matches the existing
@@ -444,7 +450,9 @@ class BlockerExtractionConfig(_StrictBase):
     # F8 (TODO-3-612): see SuccessfulUseConfig.endpoint comment — same fix.
     endpoint: str = "http://localhost:8811/v1"
     api_key: str = ""  # Falls back to EB_LLM_API_KEY if empty
-    model: str = "gemini/gemini-2.5-flash"
+    # See GoalRefinementConfig.model — flash-lite is the working flash-class
+    # model after the upstream "gemini-2.5-flash" alias was deleted.
+    model: str = "gemini/gemini-2.5-flash-lite"
     run_every_n_turns: int = Field(default=3, ge=1)
     recent_messages_window: int = Field(default=10, ge=1)
 
