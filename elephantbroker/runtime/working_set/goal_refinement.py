@@ -127,6 +127,15 @@ class GoalRefinementTask:
             goal.updated_at = datetime.now(UTC)
             if evidence and evidence not in goal.success_criteria:
                 goal.success_criteria.append(evidence)
+            # TD-39 Sketch D part 1 (decision Q6 = both): also append to
+            # goal.evidence as an audit-log entry so the per-goal event log
+            # is symmetric across all 4 Tier 1 hints. success_criteria keeps
+            # the "checkable claim" semantics; goal.evidence carries the
+            # "completion happened" audit trail.
+            if evidence:
+                entry = f"completed: {evidence}"
+                if entry not in goal.evidence:
+                    goal.evidence.append(entry)
             # Update parent confidence from sub-goal completion ratio
             if goal.parent_goal_id and session_goals:
                 parent = next((g for g in session_goals if g.id == goal.parent_goal_id), None)
@@ -143,6 +152,12 @@ class GoalRefinementTask:
         elif hint == "abandoned":
             goal.status = GoalStatus.ABANDONED
             goal.updated_at = datetime.now(UTC)
+            # TD-39 Sketch D part 1: capture the abandonment reason (previously
+            # silently discarded). goal.evidence becomes the per-goal audit log.
+            if evidence:
+                entry = f"abandoned: {evidence}"
+                if entry not in goal.evidence:
+                    goal.evidence.append(entry)
             return goal
 
         elif hint == "blocked":
@@ -155,6 +170,12 @@ class GoalRefinementTask:
             delta = self._config.progress_confidence_delta
             goal.confidence = min(1.0, goal.confidence + delta)
             goal.updated_at = datetime.now(UTC)
+            # TD-39 Sketch D part 1: capture the progress description
+            # (previously silently discarded).
+            if evidence:
+                entry = f"progressed: {evidence}"
+                if entry not in goal.evidence:
+                    goal.evidence.append(entry)
             return goal
 
         # Tier 2: LLM-powered (fire-and-forget if async)

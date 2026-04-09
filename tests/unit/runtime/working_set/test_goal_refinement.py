@@ -78,6 +78,25 @@ class TestTier1Completed:
         result = await task.process_hint(goal, "completed", "done")
         assert result.updated_at > old_time
 
+    @pytest.mark.asyncio
+    async def test_completed_also_appends_to_evidence_audit_log(self):
+        """TD-39 Sketch D part 1 (decision Q6=both): completed evidence lands
+        in BOTH goal.success_criteria (checkable claim) AND goal.evidence
+        (audit log entry, prefixed "completed: ").
+        """
+        task = _make_task()
+        goal = make_goal_state(success_criteria=[], evidence=[])
+        result = await task.process_hint(goal, "completed", "all tests pass")
+        assert "all tests pass" in result.success_criteria
+        assert "completed: all tests pass" in result.evidence
+
+    @pytest.mark.asyncio
+    async def test_completed_evidence_audit_log_dedups(self):
+        task = _make_task()
+        goal = make_goal_state(evidence=["completed: all tests pass"])
+        await task.process_hint(goal, "completed", "all tests pass")
+        assert goal.evidence.count("completed: all tests pass") == 1
+
 
 # ===========================================================================
 # Tier 1: abandoned
@@ -98,6 +117,32 @@ class TestTier1Abandoned:
         goal = make_goal_state(updated_at=old_time)
         result = await task.process_hint(goal, "abandoned", "")
         assert result.updated_at > old_time
+
+    @pytest.mark.asyncio
+    async def test_abandoned_appends_reason_to_evidence_audit_log(self):
+        """TD-39 Sketch D part 1: the abandonment reason was previously silently
+        discarded. Now captured in goal.evidence with "abandoned: " prefix.
+        """
+        task = _make_task()
+        goal = make_goal_state(status=GoalStatus.ACTIVE, evidence=[])
+        result = await task.process_hint(goal, "abandoned", "pivoted to mobile-first")
+        assert result.status == GoalStatus.ABANDONED
+        assert "abandoned: pivoted to mobile-first" in result.evidence
+
+    @pytest.mark.asyncio
+    async def test_abandoned_empty_evidence_skipped(self):
+        """No entry when evidence is empty — avoids bare 'abandoned: ' noise."""
+        task = _make_task()
+        goal = make_goal_state(evidence=[])
+        await task.process_hint(goal, "abandoned", "")
+        assert goal.evidence == []
+
+    @pytest.mark.asyncio
+    async def test_abandoned_evidence_audit_log_dedups(self):
+        task = _make_task()
+        goal = make_goal_state(evidence=["abandoned: user pivoted"])
+        await task.process_hint(goal, "abandoned", "user pivoted")
+        assert goal.evidence.count("abandoned: user pivoted") == 1
 
 
 # ===========================================================================
@@ -138,6 +183,32 @@ class TestTier1Progressed:
         goal = make_goal_state(confidence=0.95)
         result = await task.process_hint(goal, "progressed", "almost done")
         assert result.confidence == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_progressed_appends_description_to_evidence_audit_log(self):
+        """TD-39 Sketch D part 1: the progress description was previously
+        silently discarded. Now captured in goal.evidence with "progressed: "
+        prefix.
+        """
+        task = _make_task()
+        goal = make_goal_state(confidence=0.5, evidence=[])
+        result = await task.process_hint(goal, "progressed", "migration script written")
+        assert result.confidence == pytest.approx(0.6)
+        assert "progressed: migration script written" in result.evidence
+
+    @pytest.mark.asyncio
+    async def test_progressed_empty_evidence_skipped(self):
+        task = _make_task()
+        goal = make_goal_state(evidence=[])
+        await task.process_hint(goal, "progressed", "")
+        assert goal.evidence == []
+
+    @pytest.mark.asyncio
+    async def test_progressed_evidence_audit_log_dedups(self):
+        task = _make_task()
+        goal = make_goal_state(evidence=["progressed: step one done"])
+        await task.process_hint(goal, "progressed", "step one done")
+        assert goal.evidence.count("progressed: step one done") == 1
 
 
 # ===========================================================================
