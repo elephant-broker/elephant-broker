@@ -158,21 +158,30 @@ fi
 # =============================================================================
 log "Step 2/7: uv sync"
 # =============================================================================
+# --all-packages is REQUIRED because hitl-middleware is a workspace member but
+# not a dependency of the root elephantbroker project; without this flag
+# `uv sync` skips it and /opt/elephantbroker/.venv/bin/hitl-middleware is
+# never created, breaking the elephantbroker-hitl systemd unit with
+# status=203/EXEC on every fresh install. Discovered during the first
+# staging install of PR #3 (post-merge) on 2026-04-09.
 if [[ "$UPGRADE_LOCK" -eq 1 ]]; then
     log "  --upgrade flag: regenerating uv.lock from pyproject.toml"
     uv lock --upgrade
-    log "  uv sync --no-dev"
-    uv sync --no-dev
+    log "  uv sync --no-dev --all-packages"
+    uv sync --no-dev --all-packages
 else
-    log "  uv sync --frozen --no-dev (installs exactly what uv.lock specifies)"
-    uv sync --frozen --no-dev
+    log "  uv sync --frozen --no-dev --all-packages (installs exactly what uv.lock specifies)"
+    uv sync --frozen --no-dev --all-packages
 fi
 
 # Workspace mode: hitl-middleware is a [tool.uv.workspace] member of the
-# root pyproject.toml, so the `uv sync` above already covers it. Before
-# the workspace conversion this script ran a separate `uv pip install` —
-# that bypassed the lockfile entirely and let the HITL service drift
-# from the runtime on every update.
+# root pyproject.toml, so the `uv sync --all-packages` above covers it in
+# one invocation. Before the workspace conversion this script ran a
+# separate `uv pip install` — that bypassed the lockfile entirely and let
+# the HITL service drift from the runtime on every update. Without
+# `--all-packages` the workspace member is silently skipped and the HITL
+# binary is never installed; see the inline comment on the `uv sync`
+# invocations above for the full regression history.
 
 # Cognee writable directories: re-create in case a fresh sync wiped them.
 #
