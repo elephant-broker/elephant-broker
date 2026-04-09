@@ -19,6 +19,10 @@ Your task is to extract discrete, atomic facts from the NEW MESSAGES below.
 {focus_section}
 {goal_section}
 
+TOP-LEVEL RESPONSE FIELDS (siblings at the root of the JSON object):
+- "facts": array of fact objects (see per-fact schema below)
+- "goal_status_hints": array of hint objects reporting session-goal status changes detected in the new messages (see GOAL STATUS HINTS section below). This is a TOP-LEVEL field, NOT nested inside each fact.
+
 Each fact MUST have:
 - "text": a clean, atomic fact statement (one sentence)
 - "category": one of the valid categories listed below
@@ -26,7 +30,6 @@ Each fact MUST have:
 - "supersedes_index": index into PREVIOUSLY EXTRACTED FACTS if this fact replaces an older one, or -1
 - "contradicts_index": index into PREVIOUSLY EXTRACTED FACTS if this fact contradicts (but does not replace) an older one, or -1
 - "goal_relevance": array tagging which goals each fact is relevant to (session goals only)
-- "goal_status_hints": array reporting any session goal status changes detected in the new messages
 
 VALID CATEGORIES: {valid_categories}
 
@@ -43,7 +46,8 @@ INSTRUCTIONS:
 - If a new fact contradicts a PREVIOUSLY EXTRACTED FACT (without replacing it), set contradicts_index to that fact's index
 - Set contradicts_index to -1 if the fact does not contradict any previous fact
 - For each fact, populate goal_relevance with the indices of relevant ACTIVE SESSION GOALS and strength (direct/indirect/none)
-- Do NOT produce goal_relevance or goal_status_hints for PERSISTENT GOALS
+- Do NOT produce goal_relevance for PERSISTENT GOALS
+- Emit goal_status_hints at the TOP LEVEL (sibling of facts), NOT inside any fact. Hints for PERSISTENT GOALS are invalid and will be dropped — only ACTIVE SESSION GOALS are eligible
 - source_turns = indices of new messages that contribute to this fact
 - Return at most {max_facts} facts. Return {{"facts": [], "goal_status_hints": []}} if nothing worth extracting.
 
@@ -57,6 +61,10 @@ Your task is to extract key findings, results, and errors from structured tool o
 {focus_section}
 {goal_section}
 
+TOP-LEVEL RESPONSE FIELDS (siblings at the root of the JSON object):
+- "facts": array of fact objects (see per-fact schema below)
+- "goal_status_hints": array of hint objects reporting session-goal status changes detected in the new messages (see GOAL STATUS HINTS section below). This is a TOP-LEVEL field, NOT nested inside each fact.
+
 Each fact MUST have:
 - "text": a clean, atomic fact statement (one sentence)
 - "category": one of the valid categories listed below
@@ -64,7 +72,6 @@ Each fact MUST have:
 - "supersedes_index": index into PREVIOUSLY EXTRACTED FACTS if this fact replaces an older one, or -1
 - "contradicts_index": index into PREVIOUSLY EXTRACTED FACTS if this fact contradicts (but does not replace) an older one, or -1
 - "goal_relevance": array tagging which goals each fact is relevant to (session goals only)
-- "goal_status_hints": array reporting any session goal status changes detected in the new messages
 
 VALID CATEGORIES: {valid_categories}
 
@@ -73,6 +80,7 @@ financial, data_access, communication, code_change, scope_change, resource, info
 When a fact has category "decision", also set decision_domain to classify the decision area.
 
 Focus on extracting: key results, error messages, configuration values, tool outputs that represent decisions or state.
+Emit goal_status_hints at the TOP LEVEL (sibling of facts), NOT inside any fact.
 Return at most {max_facts} facts. Return {{"facts": [], "goal_status_hints": []}} if nothing worth extracting.
 
 Return ONLY valid JSON matching the schema. Do not add commentary.\
@@ -176,7 +184,32 @@ def _build_goal_section(
         lines.append("")
 
     if active_session_goals:
-        lines.append("GOAL STATUS HINTS: If any session goal's status changed in these messages (completed, blocked, progress made), report it in goal_status_hints.")
+        lines.append("GOAL STATUS HINTS — emit at the TOP LEVEL of your response (sibling of facts, NOT inside any fact).")
+        lines.append("For each ACTIVE SESSION GOAL whose status changed in these messages, emit one hint object:")
+        lines.append('  {"goal_index": <int>, "hint": "<type>", "evidence": "<text>"}')
+        lines.append("")
+        lines.append("Valid hint types and their semantics (emit only when you are CONFIDENT the change occurred in these messages):")
+        lines.append('- "completed": the goal has been accomplished. evidence = the success criterion that was met (short phrase, not a full quote).')
+        lines.append('- "abandoned": the user or agent has dropped the goal or pivoted away from it. evidence = a brief reason or the pivot trigger.')
+        lines.append('- "blocked": a CONCRETE obstacle preventing progress on this goal was detected. evidence = the obstacle text itself.')
+        lines.append('    * A blocker is a CONCRETE obstacle, NOT a vague concern, a future risk, or a general difficulty.')
+        lines.append('    * Do NOT report something that was already resolved earlier in the conversation.')
+        lines.append('    * Only report blockers you are confident about.')
+        lines.append('    * A "blocked" hint MUST be paired with a "new_subgoal" hint for the same goal_index in the same response, describing the minimum next action that would unblock the parent.')
+        lines.append('- "progressed": meaningful partial progress was made toward the goal. evidence = what concretely changed.')
+        lines.append('- "refined": the understanding of the goal deepened and it needs rewording. evidence = the new framing.')
+        lines.append('- "new_subgoal": a sub-task or unblocking action emerged. evidence = the sub-task description (the WORK to do, not a restatement of the obstacle).')
+        lines.append('    * A sub-goal is a CONCRETE next action that would unblock or advance the parent.')
+        lines.append('    * Do NOT restate the obstacle as a sub-goal; propose the work that resolves it.')
+        lines.append('    * Do NOT propose a sub-goal if the obstacle was already resolved earlier in the conversation.')
+        lines.append('    * Do NOT duplicate existing sibling sub-goals visible under the parent.')
+        lines.append('    * goal_index MUST be the parent goal\'s index (one of the ACTIVE SESSION GOALS listed above).')
+        lines.append('    * Emit alongside a "blocked" hint for the same goal_index when proposing how to address an obstacle.')
+        lines.append("")
+        lines.append("Semantic distinction for paired emissions:")
+        lines.append("- blocked.evidence = the PROBLEM (e.g. \"Database migration script is missing the rollback SQL\")")
+        lines.append("- new_subgoal.evidence = the proposed WORK (e.g. \"Write rollback SQL for migration 0042\")")
+        lines.append("Do NOT emit hints for PERSISTENT GOALS — only ACTIVE SESSION GOALS are eligible.")
         lines.append("")
 
     return "\n".join(lines)

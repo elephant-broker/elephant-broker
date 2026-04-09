@@ -243,6 +243,111 @@ class TestExtractFacts:
         assert "Prioritize user privacy" in system_prompt
         assert "GOAL STATUS HINTS" in system_prompt
 
+    async def test_hint_types_enumerated_in_prompt(self):
+        """TD-39 Issue A: prompt must name all 6 hint types with per-type guidance,
+        not just the 3-type summary (completed/blocked/progressed) that starved the
+        Tier 2 new_subgoal pipeline.
+        """
+        llm = _make_llm()
+        config = _make_config()
+        messages = [{"role": "user", "content": "Working on the login bug"}]
+        await extract_facts(
+            messages, [], llm, config,
+            active_session_goals=[{"title": "Fix login bug"}],
+        )
+        system_prompt = llm.complete_json.call_args[0][0]
+        # All 6 hint types must be named as quoted strings in the prompt
+        for hint_type in ("completed", "abandoned", "blocked", "progressed", "refined", "new_subgoal"):
+            assert f'"{hint_type}"' in system_prompt, f"hint type {hint_type!r} not named in prompt"
+
+    async def test_blocked_paired_with_new_subgoal_rule_in_prompt(self):
+        """TD-39 Issue A: the prompt must explicitly instruct that `blocked` hints
+        be paired with `new_subgoal` hints for the same goal_index. Without this
+        pairing rule the Tier 2 sub-goal pipeline is starved (TD-39 root cause).
+        """
+        llm = _make_llm()
+        config = _make_config()
+        await extract_facts(
+            [{"role": "user", "content": "stuck on the migration"}], [], llm, config,
+            active_session_goals=[{"title": "Migrate to PostgreSQL 16"}],
+        )
+        system_prompt = llm.complete_json.call_args[0][0]
+        assert "paired" in system_prompt.lower()
+        # Check both hint types appear near the pairing language
+        assert "new_subgoal" in system_prompt
+        assert "blocked" in system_prompt
+
+    async def test_rt2_quality_rules_migrated_into_prompt(self):
+        """TD-48: RT-2 BlockerExtractionTask's anti-false-positive quality rules
+        must migrate into the extract_facts `blocked` hint section before RT-2 is
+        deleted. Assert the key phrases from _BLOCKER_PROMPT (blocker_extraction_task.py)
+        are present in the goal-hint section.
+        """
+        llm = _make_llm()
+        config = _make_config()
+        await extract_facts(
+            [{"role": "user", "content": "stuck on the migration"}], [], llm, config,
+            active_session_goals=[{"title": "Migrate to PostgreSQL 16"}],
+        )
+        system_prompt = llm.complete_json.call_args[0][0]
+        # CONCRETE obstacle, not vague concerns
+        assert "CONCRETE" in system_prompt
+        # "already resolved" anti-pattern
+        assert "already resolved" in system_prompt.lower()
+        # "confident" emission gate
+        assert "confident" in system_prompt.lower()
+
+    async def test_new_subgoal_is_work_not_obstacle_rule_in_prompt(self):
+        """TD-39 Issue A + TD-48: the prompt must instruct the LLM that
+        `new_subgoal.evidence` is the WORK to do (the minimum next action that
+        unblocks the parent), NOT a restatement of the obstacle. This is the
+        sub-goal quality rule that RT-2's prompt carried and that now lives in
+        the extract_facts prompt.
+        """
+        llm = _make_llm()
+        config = _make_config()
+        await extract_facts(
+            [{"role": "user", "content": "stuck on the migration"}], [], llm, config,
+            active_session_goals=[{"title": "Migrate to PostgreSQL 16"}],
+        )
+        system_prompt = llm.complete_json.call_args[0][0]
+        # Do NOT restate the obstacle
+        assert "restate" in system_prompt.lower() or "restating" in system_prompt.lower()
+        # Sibling dedup rule
+        assert "duplicate" in system_prompt.lower() or "dedup" in system_prompt.lower()
+        # Semantic distinction block (blocked.evidence = PROBLEM, new_subgoal.evidence = WORK)
+        assert "PROBLEM" in system_prompt
+        assert "WORK" in system_prompt
+
+    async def test_goal_status_hints_documented_as_top_level(self):
+        """TD-39 Issue B: the prompt must describe `goal_status_hints` as a
+        TOP-LEVEL sibling of `facts`, not as a per-fact field. The schema already
+        places it at the top level and the validator reads it from the top level,
+        so the prompt's natural-language contract must agree.
+        """
+        llm = _make_llm()
+        config = _make_config()
+        await extract_facts(
+            [{"role": "user", "content": "stuck on the migration"}], [], llm, config,
+            active_session_goals=[{"title": "Migrate to PostgreSQL 16"}],
+        )
+        system_prompt = llm.complete_json.call_args[0][0]
+        # The "TOP LEVEL" / "TOP-LEVEL" phrasing is required (case-insensitive)
+        assert "top-level" in system_prompt.lower() or "top level" in system_prompt.lower()
+        # And the per-fact list MUST NOT mention goal_status_hints anymore
+        # (find the "Each fact MUST have" block and assert goal_status_hints is absent from it)
+        per_fact_start = system_prompt.find("Each fact MUST have:")
+        assert per_fact_start != -1, "Each fact MUST have block missing"
+        # Scan the next ~12 lines (per-fact field list) for the forbidden field
+        per_fact_block = system_prompt[per_fact_start:per_fact_start + 1000]
+        per_fact_header_end = per_fact_block.find("VALID CATEGORIES")
+        assert per_fact_header_end != -1
+        per_fact_list = per_fact_block[:per_fact_header_end]
+        assert '"goal_status_hints"' not in per_fact_list, (
+            "goal_status_hints should no longer be listed as a per-fact field; "
+            "it is a top-level sibling of `facts`"
+        )
+
     async def test_short_fact_id(self):
         """Short fact ID should be 8 hex chars from UUID."""
         assert _short_fact_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890") == "a1b2c3d4"
