@@ -129,6 +129,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                     "hint": {"type": "string", "enum": ["completed", "abandoned", "blocked", "progressed", "refined", "new_subgoal"]},
                     "evidence": {"type": "string"},
                 },
+                "required": ["goal_index", "hint", "evidence"],
             },
         },
     },
@@ -370,9 +371,14 @@ async def extract_facts(
             continue
         gi = h.get("goal_index")
         hint_type = h.get("hint", "")
-        evidence = h.get("evidence", "")
+        evidence = str(h.get("evidence", ""))
+        if len(evidence) < 10:
+            logger.warning(
+                "Thin evidence on %s hint (goal_index=%s, %d chars): %r — hint kept but downstream may skip",
+                hint_type, gi, len(evidence), evidence,
+            )
         if isinstance(gi, int) and 0 <= gi < num_session_goals and hint_type in _valid_hint_types:
-            valid_hints.append({"goal_index": gi, "hint": hint_type, "evidence": str(evidence)})
+            valid_hints.append({"goal_index": gi, "hint": hint_type, "evidence": evidence})
 
     # Cap at max facts per batch
     if len(validated) > max_facts:

@@ -367,6 +367,54 @@ class TestExtractFacts:
         assert "a1b2c3d4-e5f6-7890-abcd-ef1234567890" not in user_prompt
 
 
+class TestGoalStatusHintsSchema:
+    """Tests for goal_status_hints schema and validation (evidence required)."""
+
+    def test_evidence_required_in_hint_schema(self):
+        """The goal_status_hints item schema must mark evidence as required,
+        otherwise the LLM treats it as optional and downstream code guards
+        on `if evidence` silently no-op."""
+        hint_schema = _RESPONSE_SCHEMA["properties"]["goal_status_hints"]["items"]
+        assert "required" in hint_schema
+        assert hint_schema["required"] == ["goal_index", "hint", "evidence"]
+
+    async def test_thin_evidence_warning_fires(self, caplog):
+        """Empty or near-empty evidence should trigger a Thin evidence warning."""
+        llm = _make_llm(facts_response={
+            "facts": [
+                {"text": "fact", "category": "general", "source_turns": [0], "supersedes_index": -1},
+            ],
+            "goal_status_hints": [
+                {"goal_index": 0, "hint": "blocked", "evidence": ""},
+            ],
+        })
+        config = _make_config()
+        messages = [{"role": "user", "content": "I am stuck on the migration and cannot proceed"}]
+        goals = [{"title": "Fix login bug"}]
+        import logging
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.tasks.extract_facts"):
+            await extract_facts(messages, [], llm, config, active_session_goals=goals)
+        assert "Thin evidence on blocked hint" in caplog.text
+
+    async def test_normal_evidence_no_warning(self, caplog):
+        """Evidence over 10 chars should NOT trigger the thin-evidence warning."""
+        llm = _make_llm(facts_response={
+            "facts": [
+                {"text": "fact", "category": "general", "source_turns": [0], "supersedes_index": -1},
+            ],
+            "goal_status_hints": [
+                {"goal_index": 0, "hint": "blocked", "evidence": "migration script missing rollback path"},
+            ],
+        })
+        config = _make_config()
+        messages = [{"role": "user", "content": "The migration script is missing a rollback path"}]
+        goals = [{"title": "Fix login bug"}]
+        import logging
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.tasks.extract_facts"):
+            await extract_facts(messages, [], llm, config, active_session_goals=goals)
+        assert "Thin evidence" not in caplog.text
+
+
 class TestDecisionDomainExtraction:
     """Tests for decision_domain extraction (Amendment 7.1, Deviation 5)."""
 
