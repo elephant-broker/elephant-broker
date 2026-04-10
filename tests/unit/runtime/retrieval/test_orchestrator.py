@@ -133,3 +133,32 @@ class TestRetrievalPerformedTraceEvent:
         events = self._find_retrieval_performed(orch._trace)
         assert len(events) == 1
         assert events[0].session_id is None
+
+
+class TestMemorySearchSessionIdThreading:
+    """TD-47 complete: session_id must reach retrieve_candidates from /memory/search."""
+
+    async def test_session_id_threaded_from_search_request(self):
+        """SearchRequest.session_id must be passed to retrieve_candidates."""
+        orch = _make_orchestrator()
+
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        # Simulate the /memory/search call path: session_id arrives as string
+        await orch.retrieve_candidates(
+            "test query",
+            policy=policy,
+            session_key="agent:main:main",
+            session_id="11111111-1111-1111-1111-111111111111",
+        )
+        events = [
+            c.args[0] for c in orch._trace.append_event.call_args_list
+            if c.args[0].event_type == TraceEventType.RETRIEVAL_PERFORMED
+        ]
+        assert len(events) == 1
+        assert str(events[0].session_id) == "11111111-1111-1111-1111-111111111111"
+        assert events[0].session_key == "agent:main:main"

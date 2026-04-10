@@ -44,6 +44,7 @@ export interface SearchRequest {
   actor_id?: string;
   memory_class?: string;
   session_key?: string;
+  session_id?: string;
   profile_name?: string;
   auto_recall?: boolean;
 }

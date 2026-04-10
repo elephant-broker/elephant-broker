@@ -122,6 +122,7 @@ export function register(api: PluginAPI) {
       const results = await client.search({
         query,
         session_key: currentSessionKey,
+        session_id: currentSessionId,
         profile_name: profileName,
         auto_recall: true,
         max_results: 10,
