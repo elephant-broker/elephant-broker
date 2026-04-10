@@ -384,19 +384,6 @@ successful_use:
 
 
 # -----------------------------------------------------------------------------
-# Blocker extraction — automatic blocker detection (Phase 9, off by default)
-# -----------------------------------------------------------------------------
-
-blocker_extraction:
-  enabled: false                        # env: EB_BLOCKER_EXTRACTION_ENABLED — (off) when on, periodically runs an LLM call to detect blockers in recent conversation and auto-add them to active goals. Useful for long debugging/research sessions where the agent doesn't notice it's stuck
-  endpoint: "http://localhost:8811/v1"  # env: EB_BLOCKER_EXTRACTION_ENDPOINT
-  api_key: ""                           # env: EB_BLOCKER_EXTRACTION_API_KEY (secret) — falls back to llm.api_key if empty
-  model: "gemini/gemini-2.5-flash-lite" # env: EB_BLOCKER_EXTRACTION_MODEL — staging LiteLLM alias "gemini/gemini-2.5-flash" resolves to a deleted preview; flash-lite is the working flash-class model
-  run_every_n_turns: 3                  # env: EB_BLOCKER_EXTRACTION_EVERY_N_TURNS — cadence: every N turns, fire one blocker-detection call
-  recent_messages_window: 10            # how many recent messages fed to the blocker prompt
-
-
-# -----------------------------------------------------------------------------
 # Audit — SQLite stores for procedure executions, goal lifecycle, scoring ledger
 # -----------------------------------------------------------------------------
 # Paths are relative to the runtime's working directory unless absolute.

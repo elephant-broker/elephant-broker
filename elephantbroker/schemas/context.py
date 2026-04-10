@@ -241,10 +241,9 @@ class SessionContext(BaseModel):
     fact_last_injection_turn: dict[str, int] = Field(default_factory=dict)
     goal_inject_history: dict[str, dict] = Field(default_factory=dict)
     parent_session_key: str | None = None
-    # Phase 9 RT-1/RT-2 turn counters
+    # Phase 9 RT-1 turn counter
     rt1_turn_counter: int = 0
     rt1_last_batch_at: datetime | None = None
-    rt2_turn_counter: int = 0
 
 
 class SessionCompactState(BaseModel):

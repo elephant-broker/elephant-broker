@@ -279,9 +279,9 @@ class TestExtractFacts:
 
     async def test_rt2_quality_rules_migrated_into_prompt(self):
         """TD-48: RT-2 BlockerExtractionTask's anti-false-positive quality rules
-        must migrate into the extract_facts `blocked` hint section before RT-2 is
-        deleted. Assert the key phrases from _BLOCKER_PROMPT (blocker_extraction_task.py)
-        are present in the goal-hint section.
+        were migrated into the extract_facts `blocked` hint section. RT-2 is now
+        deleted. Assert the key phrases from the original _BLOCKER_PROMPT are
+        present in the goal-hint section.
         """
         llm = _make_llm()
         config = _make_config()

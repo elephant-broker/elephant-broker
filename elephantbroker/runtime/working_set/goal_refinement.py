@@ -34,9 +34,8 @@ class GoalRefinementTask:
         # goal_refinement.model + main LLM endpoint + main LLM api_key.
         # TODO(TD-39 long-term): replace this dedicated client with a per-call
         # model override on LLMClient (step 4 Option (a)) once LLMClient grows
-        # that API. Until then, this is Option (b) — mirrors the
-        # BlockerExtractionTask pattern but points at the runtime's main LLM
-        # endpoint rather than a separate RT-2 endpoint.
+        # that API. Until then, this is Option (b) — dedicated cheap httpx
+        # client pointing at the runtime's main LLM endpoint.
         self._cheap_client = None
         if llm_config is not None and self._config.refinement_task_enabled:
             import httpx
@@ -114,8 +113,7 @@ class GoalRefinementTask:
         """Slice the last N messages and format as role: content lines.
 
         Returns an empty string if messages is empty. Content is truncated to
-        500 chars per message (mirrors the BlockerExtractionTask pattern so
-        prompt budgets stay comparable).
+        500 chars per message to keep prompt budgets bounded.
         """
         if not messages:
             return ""
@@ -299,9 +297,8 @@ class GoalRefinementTask:
           a `new_subgoal` that was paired with a `blocked` hint on the same
           goal, the blocked.evidence is passed here as the obstacle text so
           the LLM sees both the problem and is asked for the proposed work.
-        - Carries the RT-2 anti-false-positive quality rules verbatim from
-          BlockerExtractionTask._BLOCKER_PROMPT (TD-48 prerequisite — these
-          rules must live here before RT-2 can be deleted).
+        - Carries the anti-false-positive quality rules originally from the
+          now-deleted RT-2 BlockerExtractionTask (TD-48).
         """
         # Count ALL subgoals in the session, not just per-parent
         subgoal_count = sum(1 for g in session_goals if g.parent_goal_id is not None)

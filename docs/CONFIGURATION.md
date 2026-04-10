@@ -207,16 +207,6 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_SUCCESSFUL_USE_MODEL` | No | `"gemini/gemini-2.5-flash-lite"` | string | Python runtime | `gemini/gemini-2.5-flash-lite` | No | Yes |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | No | `5` | int | Python runtime | `5`, `10` | No | Yes |
 
-### 11. Blocker Extraction (Phase 9, LLM-based, off by default)
-
-| Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
-|----------|----------|---------|------|---------|----------------|---------|--------------|
-| `EB_BLOCKER_EXTRACTION_ENABLED` | No | `false` | bool | Python runtime | `true`, `false` | No | Yes |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | No | `"http://localhost:8811/v1"` | string | Python runtime | LiteLLM URL | No | Yes |
-| `EB_BLOCKER_EXTRACTION_API_KEY` | No | Falls back to `EB_LLM_API_KEY` | string | Python runtime | API key | **Yes** | Yes |
-| `EB_BLOCKER_EXTRACTION_MODEL` | No | `"gemini/gemini-2.5-flash-lite"` | string | Python runtime | `gemini/gemini-2.5-flash-lite` | No | Yes |
-| `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | No | `3` | int | Python runtime | `3`, `5` | No | Yes |
-
 ### 12. Ingest Pipeline Tuning
 
 | Variable | Required | Default | Type | Read by | Example values | Secret? | Env override |
@@ -274,12 +264,11 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_RERANKER_API_KEY` | Reranker endpoint API key |
 | `EB_COMPACTION_LLM_API_KEY` | Compaction LLM API key (falls back to `EB_LLM_API_KEY`) |
 | `EB_SUCCESSFUL_USE_API_KEY` | Successful-use LLM API key (falls back to `EB_LLM_API_KEY`) |
-| `EB_BLOCKER_EXTRACTION_API_KEY` | Blocker extraction LLM API key (falls back to `EB_LLM_API_KEY`) |
 | `EB_HITL_CALLBACK_SECRET` | HMAC-SHA256 secret for HITL approval callbacks |
 
 ### Summary: env var override registry
 
-After the F2/F3 unification there is **no curated subset** — every entry in `ENV_OVERRIDE_BINDINGS` (`elephantbroker/schemas/config.py`) is honored on every load. The registry currently contains **72 bindings** spanning identity, Cognee, LLM, compaction LLM, reranker, infra, trace, ClickHouse, embedding cache, scoring, HITL, successful-use, blocker-extraction, consolidation, and the top-level toggles.
+After the F2/F3 unification there is **no curated subset** — every entry in `ENV_OVERRIDE_BINDINGS` (`elephantbroker/schemas/config.py`) is honored on every load. The registry currently contains **67 bindings** spanning identity, Cognee, LLM, compaction LLM, reranker, infra, trace, ClickHouse, embedding cache, scoring, HITL, successful-use, consolidation, and the top-level toggles.
 
 Read `ENV_OVERRIDE_BINDINGS` directly when you need the authoritative list — the inverse contract test `tests/test_env_var_registry_completeness.py::TestEnvVarRegistryCompleteness` enforces that the registry, the schema fields, and `default.yaml` stay in sync, so the registry is the canonical source of truth and cannot drift from the docs without breaking CI.
 
@@ -833,21 +822,6 @@ Path prefix: `async_analysis.*`
 
 ---
 
-### `BlockerExtractionConfig` -- LLM Blocker Extraction (Phase 9)
-
-Path prefix: `blocker_extraction.*`
-
-| Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
-|------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
-| `blocker_extraction.enabled` | `bool` | `False` | `EB_BLOCKER_EXTRACTION_ENABLED` | -- | Enables LLM-based extraction of task blockers from conversation | Enabling is expensive (LLM calls every N turns); disabling = no automatic blocker detection | `false` / `false` / `true` |
-| `blocker_extraction.endpoint` | `str` | `"http://localhost:8811/v1"` | `EB_BLOCKER_EXTRACTION_ENDPOINT` | -- | LLM endpoint for blocker extraction | Wrong endpoint = extraction fails silently | `http://localhost:8811/v1` / `http://litellm:8811/v1` / `http://litellm-prod:8811/v1` |
-| `blocker_extraction.api_key` | `str` | `""` | `EB_BLOCKER_EXTRACTION_API_KEY` | -- | API key (falls back to `llm.api_key` via `_apply_inheritance_fallbacks()` if empty) | Missing = auth failure | `""` / `sk-...` / `sk-...` |
-| `blocker_extraction.model` | `str` | `"gemini/gemini-2.5-flash-lite"` | `EB_BLOCKER_EXTRACTION_MODEL` | -- | LLM model for blocker extraction (the unsuffixed `gemini/gemini-2.5-flash` alias on the staging LiteLLM proxy resolves to a deleted preview and returns HTTP 404) | Wrong model = extraction errors | `gemini/gemini-2.5-flash-lite` / same / same |
-| `blocker_extraction.run_every_n_turns` | `int` | `3` | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `ge=1` | Run blocker extraction every N turns | Too low = excessive LLM calls; too high = delayed blocker detection | `3` / `3` / `5` |
-| `blocker_extraction.recent_messages_window` | `int` | `10` | -- | `ge=1` | Number of recent messages fed to blocker extraction LLM | Too low = misses blockers in earlier messages; too high = expensive prompts | `10` / `10` / `10` |
-
----
-
 ### `ProfileCacheConfig` -- Profile Resolution Cache (Phase 8)
 
 Path prefix: `profile_cache.*`
@@ -960,11 +934,6 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 |---------|------------|------|---------|
 | `EB_ACTOR_ID` | CLI only | `str` | -- |
 | `EB_AGENT_AUTHORITY_LEVEL` | `gateway.agent_authority_level` | `int` | `0` |
-| `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | `str` | `""` (fallback: `EB_LLM_API_KEY`) |
-| `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `bool` | `false` |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `str` | `http://localhost:8811/v1` |
-| `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `int` | `3` |
-| `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `str` | `gemini/gemini-2.5-flash-lite` |
 | `EB_CLICKHOUSE_DATABASE` | `infra.clickhouse.database` | `str` | `otel` |
 | `EB_CLICKHOUSE_ENABLED` | `infra.clickhouse.enabled` | `bool` | `false` |
 | `EB_CLICKHOUSE_HOST` | `infra.clickhouse.host` | `str` | `localhost` |
@@ -1036,7 +1005,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 After F2/F3, `_apply_inheritance_fallbacks()` (renamed from `_apply_api_key_fallbacks` in F7 once endpoint inheritance was added) runs after env overrides on every `load()`. The chain runs in tiers and only fires when the target field is empty after env override application — explicit YAML or env values are always respected.
 
 **Tier 1:** `llm.api_key` ← `cognee.embedding_api_key` (if `llm.api_key` is empty)
-**Tier 2:** `compaction_llm.api_key`, `successful_use.api_key`, `blocker_extraction.api_key` ← `llm.api_key` (each only if its own value is empty)
+**Tier 2:** `compaction_llm.api_key`, `successful_use.api_key` ← `llm.api_key` (each only if its own value is empty)
 **Tier 3 (F7):** `compaction_llm.endpoint` ← `llm.endpoint` (if `compaction_llm.endpoint` is empty)
 
 In practice, setting `EB_EMBEDDING_API_KEY` alone covers all LLM/embedding calls when using a single LiteLLM proxy. Because there is now exactly one load path (the F2/F3 unification removed the asymmetry between env-only and YAML+env modes), the chain works identically whether you use `--config` or rely on the packaged default.
@@ -1066,7 +1035,6 @@ These parameters have no `EB_*` env var mapping in `ENV_OVERRIDE_BINDINGS` and c
 - All `artifact_capture.*`
 - All `artifact_assembly.*`
 - All `async_analysis.*`
-- `blocker_extraction.recent_messages_window`
 - `profile_cache.ttl_seconds`
 - `gateway.register_agent_identity`, `gateway.register_agent_actor`
 - All `consolidation.*` except `batch_size` and `dev_auto_trigger_interval`
@@ -1934,7 +1902,6 @@ The `ElephantBrokerConfig` Pydantic model contains 25+ config sections. Top-leve
 | `hitl` | Human-in-the-loop | `enabled: false`, `default_url: "http://localhost:8421"`, `timeout: 10s` |
 | `audit` | SQLite audit trail paths | 7 DB paths under `data/`, `retention_days: 90` |
 | `successful_use` | LLM-based use reasoning | `enabled: false`, `batch_size: 5` |
-| `blocker_extraction` | LLM-based blocker detection | `enabled: false`, `run_every_n_turns: 3` |
 | `compaction_llm` | Separate LLM for compaction | `model: "gemini/gemini-2.5-flash-lite"`, `temperature: 0.2` |
 | `goal_refinement` | Goal hint/refinement pipeline | `hints_enabled: true`, `max_subgoals_per_session: 10` |
 
@@ -1944,7 +1911,7 @@ The `ElephantBrokerConfig` Pydantic model contains 25+ config sections. Top-leve
 Environment variable (if set) > YAML value > Pydantic model default
 ```
 
-After F2/F3, `ElephantBrokerConfig.load()` (or its internal `from_yaml()` reader, used either directly or via `load(None)` for the packaged default YAML) parses the YAML and then applies every binding in `ENV_OVERRIDE_BINDINGS` on top — currently 72 entries spanning identity, Cognee, LLM, compaction LLM, reranker, infra, trace, ClickHouse, embedding cache, scoring, HITL, successful-use, blocker-extraction, consolidation, and the top-level toggles.
+After F2/F3, `ElephantBrokerConfig.load()` (or its internal `from_yaml()` reader, used either directly or via `load(None)` for the packaged default YAML) parses the YAML and then applies every binding in `ENV_OVERRIDE_BINDINGS` on top — currently 67 entries spanning identity, Cognee, LLM, compaction LLM, reranker, infra, trace, ClickHouse, embedding cache, scoring, HITL, successful-use, consolidation, and the top-level toggles.
 
 There is no curated subset and no separate "env-only" path: the env-only callers go through `load(None)` and use the packaged `default.yaml` as their starting point. Read `ENV_OVERRIDE_BINDINGS` in `elephantbroker/schemas/config.py` for the canonical, contract-test-enforced list — every entry has a matching `env: EB_*` tag in `default.yaml` (verified by `tests/test_env_var_registry_completeness.py`).
 
@@ -4227,14 +4194,6 @@ compaction_llm:
   max_tokens: 2000
   temperature: 0.2
 
-## --- Blocker extraction (Phase 9, opt-in) ---
-blocker_extraction:
-  enabled: false                          # EB_BLOCKER_EXTRACTION_ENABLED
-  endpoint: "http://localhost:8811/v1"  # EB_BLOCKER_EXTRACTION_ENDPOINT
-  api_key: ""                             # EB_BLOCKER_EXTRACTION_API_KEY (falls back to EB_LLM_API_KEY)
-  model: "gemini/gemini-2.5-flash-lite"   # EB_BLOCKER_EXTRACTION_MODEL
-  run_every_n_turns: 3                    # EB_BLOCKER_EXTRACTION_EVERY_N_TURNS
-  recent_messages_window: 10
 ```
 
 #### Consolidation Config (accessed via `config.consolidation` property)
@@ -4317,11 +4276,6 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_
 | `EB_SUCCESSFUL_USE_API_KEY` | `successful_use.api_key` | (falls back to `EB_LLM_API_KEY`) |
 | `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `"gemini/gemini-2.5-flash-lite"` |
 | `EB_SUCCESSFUL_USE_BATCH_SIZE` | `successful_use.batch_size` | `5` |
-| `EB_BLOCKER_EXTRACTION_ENABLED` | `blocker_extraction.enabled` | `"false"` |
-| `EB_BLOCKER_EXTRACTION_ENDPOINT` | `blocker_extraction.endpoint` | `"http://localhost:8811/v1"` |
-| `EB_BLOCKER_EXTRACTION_API_KEY` | `blocker_extraction.api_key` | (falls back to `EB_LLM_API_KEY`) |
-| `EB_BLOCKER_EXTRACTION_MODEL` | `blocker_extraction.model` | `"gemini/gemini-2.5-flash-lite"` |
-| `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` | `blocker_extraction.run_every_n_turns` | `3` |
 | `EB_DEV_CONSOLIDATION_AUTO_TRIGGER` | `consolidation.dev_auto_trigger_interval` | `"0"` |
 | `EB_CONSOLIDATION_BATCH_SIZE` | `consolidation.batch_size` | `500` |
 | `EB_ACTOR_ID` | (CLI only, not runtime config) | `""` |
@@ -4336,7 +4290,7 @@ After the F2/F3 unification there is exactly one path. When `elephantbroker serv
 1. `ElephantBrokerConfig.load(path)` is called. If `--config` is omitted, `load(None)` falls back to the packaged `elephantbroker/config/default.yaml`.
 2. The YAML file is parsed and validated through Pydantic.
 3. Every binding in `ENV_OVERRIDE_BINDINGS` (currently 72 entries) is applied on top — any env var that is set in `os.environ` overrides the corresponding YAML field.
-4. `_apply_inheritance_fallbacks()` populates empty derived secrets (`compaction_llm.api_key`, `successful_use.api_key`, `blocker_extraction.api_key` ← `llm.api_key`; `llm.api_key` ← `cognee.embedding_api_key`) and the F7 endpoint inheritance (`compaction_llm.endpoint` ← `llm.endpoint`).
+4. `_apply_inheritance_fallbacks()` populates empty derived secrets (`compaction_llm.api_key`, `successful_use.api_key` ← `llm.api_key`; `llm.api_key` ← `cognee.embedding_api_key`) and the F7 endpoint inheritance (`compaction_llm.endpoint` ← `llm.endpoint`).
 5. The merged dict is re-validated through `cls.model_validate()` and passed to `RuntimeContainer.from_config()`.
 
 There is no curated subset of "override-eligible" env vars — all 72 `ENV_OVERRIDE_BINDINGS` entries apply on every load. Read the registry in `elephantbroker/schemas/config.py` for the authoritative list, which the inverse contract test in `tests/test_env_var_registry_completeness.py` keeps in sync with the schema and packaged YAML.
@@ -4963,8 +4917,6 @@ These are the canonical defaults set in the Pydantic model fields of `ElephantBr
 | config.py:294 | `300` | Approval default timeout (seconds) | Configurable via `HitlConfig` | Too short = auto-reject; too long = blocked agent |
 | config.py:304 | `2000` | Compaction LLM max tokens | Configurable via `CompactionLLMConfig` | Too low = poor summaries |
 | config.py:305 | `0.2` | Compaction LLM temperature | Configurable via `CompactionLLMConfig` | Too high = inconsistent summaries |
-| config.py:314 | `3` | Blocker extraction: run every N turns | `EB_BLOCKER_EXTRACTION_EVERY_N_TURNS` overrides | Too frequent = expensive; too rare = stale |
-| config.py:315 | `10` | Blocker extraction: recent messages window | Configurable via `BlockerExtractionConfig` | Too small = missed blockers |
 | config.py:328 | `100` | Max concurrent sessions | `EB_MAX_CONCURRENT_SESSIONS` overrides | Too low = rejected sessions |
 | config.py:348 | `172800` | Consolidation min retention (seconds, 48h) | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` overrides | Too short = active session facts mutated |
 
@@ -5281,7 +5233,6 @@ These are the 5 named profile presets from arch spec §10.2. Each profile's cons
 | `runtime/adapters/cognee/embeddings.py:29` | httpx timeout | `30.0` seconds | Embedding API HTTP timeout for all embed_text/embed_batch calls | No (hardcoded in `__init__`) | Yes -- embedding latency varies by provider/model size | Too low = timeout on large batches; too high = hangs on unresponsive endpoint |
 | `runtime/adapters/llm/client.py:31` | httpx timeout | `120.0` seconds | LLM chat completion HTTP timeout for all complete/complete_json calls | No (hardcoded in `__init__`) | Yes -- large extraction prompts take time | Too low = truncated completions; too high = blocked pipeline on dead endpoint |
 | `runtime/consolidation/successful_use_task.py:63` | httpx timeout | `30.0` seconds | RT-1 successful-use LLM evaluation HTTP timeout | No (hardcoded in `__init__`) | Yes -- should use `successful_use.batch_timeout_seconds` | Too low = RT-1 always fails; too high = blocks after_turn |
-| `runtime/consolidation/blocker_extraction_task.py:61` | httpx timeout | `30.0` seconds | RT-2 blocker extraction LLM HTTP timeout | No (hardcoded in `__init__`) | Yes -- should match blocker config | Too low = RT-2 always fails; too high = blocks after_turn |
 
 ##### LLM Parameters in Consolidation Stages (hardcoded per-call, not configurable)
 
@@ -5291,8 +5242,6 @@ These are the 5 named profile presets from arch spec §10.2. Each profile's cons
 | `runtime/consolidation/stages/refine_procedures.py:97` | max_tokens | `500` | LLM output limit for procedure draft in Stage 7 | No (hardcoded in LLM call) | Maybe -- complex procedures need more tokens | Too low = incomplete procedure definitions; too high = wasted tokens |
 | `runtime/consolidation/successful_use_task.py:110` | max_tokens | `500` | LLM output limit for successful-use evaluation response | No (hardcoded in LLM call) | Maybe | Too low = truncated evaluation |
 | `runtime/consolidation/successful_use_task.py:111` | temperature | `0.1` | LLM temperature for successful-use evaluation | No (hardcoded in LLM call) | No -- deterministic evaluation is correct | N/A |
-| `runtime/consolidation/blocker_extraction_task.py:112` | max_tokens | `500` | LLM output limit for blocker extraction response | No (hardcoded in LLM call) | Maybe | Too low = truncated blocker list |
-| `runtime/consolidation/blocker_extraction_task.py:113` | temperature | `0.1` | LLM temperature for blocker extraction | No (hardcoded in LLM call) | No -- deterministic extraction is correct | N/A |
 | `runtime/adapters/llm/client.py:95` | temperature | `0.0` | Temperature for `complete_json()` calls (guards LLM escalation, goal refinement) | No (hardcoded in method) | Probably not -- JSON extraction should be deterministic | N/A |
 | `runtime/compaction/engine.py:590` | temperature | `0.2` | Temperature for compaction LLM summarization | No (hardcoded inline, ignores `compaction_llm.temperature` config) | BUG: should use `self._config.compaction_llm.temperature` | Config says 0.2, code says 0.2, but code ignores config |
 
@@ -5302,8 +5251,6 @@ These are the 5 named profile presets from arch spec §10.2. Each profile's cons
 |----------|-----------|-------|-----------------|---------------|------------|-----------------|
 | `runtime/consolidation/successful_use_task.py:90` | content truncation | `[:500]` | Per-message content truncation in RT-1 evaluation prompt | No (hardcoded) | Maybe -- longer context helps LLM evaluate | Too short = insufficient context for evaluation |
 | `runtime/consolidation/successful_use_task.py:97` | conversation truncation | `[:4000]` chars | Total conversation truncation in RT-1 evaluation prompt | No (hardcoded) | Yes -- should derive from RT-1 max_input | Too short = missed conversation context |
-| `runtime/consolidation/blocker_extraction_task.py:94` | content truncation | `[:500]` | Per-message content truncation in RT-2 blocker prompt | No (hardcoded) | Maybe | Too short = missed blocker evidence |
-| `runtime/consolidation/blocker_extraction_task.py:99` | messages truncation | `[:4000]` chars | Total message text truncation in RT-2 blocker prompt | No (hardcoded) | Yes -- should derive from config | Too short = missed blockers |
 | `runtime/guards/engine.py:741` | metadata truncation | `[:200]` | Action metadata JSON truncation in LLM escalation prompt | No (hardcoded) | No -- metadata is auxiliary | N/A |
 | `runtime/artifacts/store.py:50` | text_for_cognee | `[:500]` | Artifact text sent to `cognee.add()` for indexing | No (hardcoded) | Maybe -- long summaries lose context | Too short = poor artifact search recall |
 
@@ -5371,15 +5318,15 @@ These are the 5 named profile presets from arch spec §10.2. Each profile's cons
 
 1. **Embedding service HTTP timeout** (`embeddings.py:29`, 30s) -- varies dramatically by embedding provider and batch size. Should be in `CogneeConfig`.
 2. **LLM client HTTP timeout** (`client.py:31`, 120s) -- varies by model speed and prompt size. Should be in `LLMConfig`.
-3. **RT-1/RT-2 HTTP timeouts** (`successful_use_task.py:63`, `blocker_extraction_task.py:61`, both 30s) -- should use their respective config `batch_timeout_seconds` instead of hardcoded 30s.
+3. **RT-1 HTTP timeout** (`successful_use_task.py:63`, 30s) -- should use its config `batch_timeout_seconds` instead of hardcoded 30s.
 4. **ClickHouse query lookback window** (`otel_trace_query_client.py:46`, 7 days) -- deployment-specific, should be in `ConsolidationConfig`.
 5. **Compaction LLM temperature bypass** (`compaction/engine.py:590`) -- hardcodes `temperature=0.2` in the LLM call instead of reading from `compaction_llm.temperature`. This is a **config bypass bug**, not a documentation gap.
 6. **Guard action_summary truncation** (`guards/engine.py:459,479,740,897`) -- hardcodes `[:500]` in 4 places instead of reading `self._config.input_summary_max_chars`. This is another **config bypass bug**.
 
 **Medium-priority (document only, not urgent to make configurable):**
 
-7. Consolidation stage LLM `max_tokens=500` (4 locations in canonicalize, refine_procedures, successful_use, blocker_extraction)
-8. Prompt content truncation limits (`[:500]` per message, `[:4000]` total) in RT-1 and RT-2
+7. Consolidation stage LLM `max_tokens=500` (3 locations in canonicalize, refine_procedures, successful_use)
+8. Prompt content truncation limits (`[:500]` per message, `[:4000]` total) in RT-1
 9. Artifact `cognee.add()` text truncation (`[:500]`) in `artifacts/store.py:50`
 10. Subagent parent chain `max_depth=5` in `retrieval/isolation.py:12`
 11. Async analysis Redis TTL `86400` in `context/async_analyzer.py:109`
@@ -6163,22 +6110,6 @@ All `SuccessfulUseConfig` schema fields (enabled, endpoint, api_key, model, batc
 
 ---
 
-#### 12. RT-2 (BlockerExtractionTask) -- Internal Constants
-
-| Parameter | File:Line | Hardcoded Value | In ConsolidationConfig? | In CONFIGURATION.md? | Gap? |
-|-----------|-----------|-----------------|------------------------|---------------------|------|
-| `_BLOCKER_PROMPT` template | blocker_extraction_task.py:22-38 | Full prompt string | No | **No** | **GAP** |
-| LLM system_prompt | blocker_extraction_task.py:109 | `"You are a project blocker analyzer."` | No | **No** | **GAP** |
-| LLM max_tokens | blocker_extraction_task.py:112 | `500` | No | **No** | **GAP** |
-| LLM temperature | blocker_extraction_task.py:113 | `0.1` | No | **No** | **GAP** |
-| httpx client timeout | blocker_extraction_task.py:61 | `30.0` seconds | No | **No** | **GAP** |
-| Message content truncation | blocker_extraction_task.py:94 | `[:500]` per message | No | **No** | **GAP** |
-| Prompt total truncation | blocker_extraction_task.py:99 | `[:4000]` chars | No | **No** | **GAP** |
-
-All `BlockerExtractionConfig` schema fields (enabled, endpoint, api_key, model, run_every_n_turns, recent_messages_window) ARE documented in CONFIGURATION.md lines 843-848.
-
----
-
 #### 13. ScoringTuner -- Implicit Constants
 
 | Parameter | File:Line | Hardcoded Value | In ConsolidationConfig? | In CONFIGURATION.md? | Gap? |
@@ -6202,7 +6133,6 @@ All LLM prompts used by consolidation stages are **hardcoded strings, not config
 | Stage 2 (Canonicalize) | `_MERGE_PROMPT` | "You are a knowledge synthesizer." | 500 | (not set, uses LLMClient default) | **No** |
 | Stage 7 (Refine Procedures) | `_PROCEDURE_PROMPT` | "You are a procedure definition generator." | 500 | (not set, uses LLMClient default) | **No** |
 | RT-1 (Successful Use) | `_EVAL_PROMPT` | "You are a knowledge evaluation assistant." | 500 | 0.1 | **No** |
-| RT-2 (Blocker Extraction) | `_BLOCKER_PROMPT` | "You are a project blocker analyzer." | 500 | 0.1 | **No** |
 
 ---
 
@@ -6213,10 +6143,10 @@ All LLM prompts used by consolidation stages are **hardcoded strings, not config
 1. **Scoring ledger query window** (`cutoff_hours=48`) -- determines how much scoring history Stage 9 correlates against. Not in ConsolidationConfig, not documented.
 2. **ClickHouse lookback days** (`days=7`) -- how far back Stage 7 looks for tool sequences. Not configurable.
 3. **ClickHouse min tools threshold** (`HAVING length(tools) >= 3`) -- minimum tool calls per session to consider. Not configurable.
-4. **All 4 LLM prompt templates** -- hardcoded; no way to customize merge/procedure/evaluation/blocker prompts.
+4. **All 3 LLM prompt templates** -- hardcoded; no way to customize merge/procedure/evaluation prompts.
 5. **LLM max_tokens across all stages** (all `500`) -- not configurable per stage, not documented.
-6. **RT-1/RT-2 httpx timeout** (`30.0s`) -- not in SuccessfulUseConfig/BlockerExtractionConfig.
-7. **RT-1/RT-2 LLM temperature** (`0.1`) -- not in config schemas, not documented.
+6. **RT-1 httpx timeout** (`30.0s`) -- not in SuccessfulUseConfig.
+7. **RT-1 LLM temperature** (`0.1`) -- not in config schemas, not documented.
 
 ##### Moderate Gaps (documented in hardcoded constants inventory but not in ConsolidationConfig)
 
@@ -6227,7 +6157,7 @@ All LLM prompts used by consolidation stages are **hardcoded strings, not config
 
 ##### Low Gaps (content truncation, display limits)
 
-12. **RT-1/RT-2 message content truncation** (`[:500]` per message, `[:4000]` total conversation).
+12. **RT-1 message content truncation** (`[:500]` per message, `[:4000]` total conversation).
 13. **Decay half_life minimum clamp** (`0.01`) -- numerical safety, not tunable.
 14. **Domain discovery Redis SCAN batch size** (`100`).
 
@@ -6269,14 +6199,13 @@ cognee.embedding_api_key (Tier 1) ──> llm.api_key (if empty)
        │
        └── llm.api_key (Tier 2) ──> compaction_llm.api_key      (if empty)
                                  ──> successful_use.api_key     (if empty)
-                                 ──> blocker_extraction.api_key (if empty)
 
 llm.endpoint (Tier 3 / F7) ──> compaction_llm.endpoint (if empty)
 ```
 
 **Source:** `_apply_inheritance_fallbacks()` in `elephantbroker/schemas/config.py` (search for the function definition — it documents the tier rules inline).
 
-**Implication:** Setting only `EB_EMBEDDING_API_KEY` (and not `EB_LLM_API_KEY`) means all LLM subsystems -- primary extraction, compaction, successful-use, blocker extraction -- share the embedding key. This works when both services use the same LiteLLM proxy and auth, but breaks silently when they use different providers.
+**Implication:** Setting only `EB_EMBEDDING_API_KEY` (and not `EB_LLM_API_KEY`) means all LLM subsystems -- primary extraction, compaction, successful-use -- share the embedding key. This works when both services use the same LiteLLM proxy and auth, but breaks silently when they use different providers.
 
 **One unified path:** Because `load()` always reads YAML first and then applies env overrides through `ENV_OVERRIDE_BINDINGS`, the inheritance chain runs identically whether you use `--config` or rely on the packaged default. There is no longer an asymmetry between env-only and YAML+env modes — the legacy `from_env()` method has been removed and the only public entry point is `load(path: str | None)`.
 
@@ -6296,7 +6225,6 @@ llm.endpoint (Tier 3 / F7) ──> compaction_llm.endpoint (if empty)
 | `hitl.enabled: true` | HITL middleware service running at `hitl.default_url` | `HitlClient` HTTP calls fail; approval requests are dropped. Guard engine falls through to the next guard layer rather than blocking. |
 | `async_analysis.enabled: true` | Redis available (`infra.redis_url` valid) AND `CachedEmbeddingService` initialized | Container skips `AsyncInjectionAnalyzer` creation if either is missing (line 450 of `container.py`). Feature is silently disabled. |
 | `successful_use.enabled: true` | `memory_store` available (requires FULL or MEMORY_ONLY tier) | `SuccessfulUseReasoningTask` is skipped (line 581-583 of `container.py`). Feature silently disabled. |
-| `blocker_extraction.enabled: true` | `session_goal_store` available (always true in FULL tier) | `BlockerExtractionTask` is skipped. Feature silently disabled. |
 | `reranker.enabled: true` | Reranker service at `reranker.endpoint` | Reranking step throws exception; if `reranker.fallback_on_error: true` (default), falls back to scoring-only. If `false`, working set build fails. |
 | `gateway.org_id` | Organization registered via `ebrun org create` (writes `OrganizationDataPoint` to Neo4j) | Profile inheritance org overrides fail to load; bootstrap resolves org_label to empty string; scope-aware goal visibility silently misses org-scoped goals. |
 | `gateway.team_id` | Team registered via `ebrun team create` with `MEMBER_OF` edge | Scope-aware goal Cypher fails to match team-scoped goals; team_label in session context is empty. |
@@ -6584,7 +6512,7 @@ The `BusinessTier` determines which modules are instantiated. This creates impli
 
 ### Configuration parameters that are silently ignored per tier
 
-- **MEMORY_ONLY tier:** All `context_assembly.*`, `compaction_llm.*`, `guards.*`, `hitl.*`, `async_analysis.*`, `scoring.*` (as working set scoring weights), and `blocker_extraction.*` parameters are **ignored** because the modules that consume them are not instantiated.
+- **MEMORY_ONLY tier:** All `context_assembly.*`, `compaction_llm.*`, `guards.*`, `hitl.*`, `async_analysis.*`, and `scoring.*` (as working set scoring weights) parameters are **ignored** because the modules that consume them are not instantiated.
 - **CONTEXT_ONLY tier:** All `retrieval.*` (no `RetrievalOrchestrator`), `reranker.*` (no `RerankOrchestrator`), `consolidation.*` (no `ConsolidationEngine`), and `successful_use.*` (requires `memory_store`) parameters are **ignored**.
 
 ### Container wiring dependency chain
@@ -6770,9 +6698,6 @@ reranker:
 successful_use:
   enabled: false
 
-blocker_extraction:
-  enabled: false
-
 hitl:
   enabled: false
 
@@ -6948,9 +6873,6 @@ default_profile: "managerial"
 successful_use:
   enabled: false
 
-blocker_extraction:
-  enabled: false
-
 async_analysis:
   enabled: false
 ```
@@ -6986,10 +6908,6 @@ successful_use:
   batch_size: 10
   min_confidence: 0.5
 
-blocker_extraction:
-  enabled: true
-  run_every_n_turns: 5
-
 # ClickHouse for pattern analysis
 infra:
   clickhouse:
@@ -7008,7 +6926,7 @@ infra:
 
 3. **Budget resolution picks the minimum:** The effective context budget is the smallest of profile budget, OpenClaw budget, and window-fraction budget. A misconfigured `max_context_window_fraction` can starve context injection.
 
-4. **API key fallbacks always run via `_apply_inheritance_fallbacks()`:** Tier 1 (`llm.api_key` ← `cognee.embedding_api_key`), Tier 2 (`compaction_llm`/`successful_use`/`blocker_extraction.api_key` ← `llm.api_key`), Tier 3 (`compaction_llm.endpoint` ← `llm.endpoint`). After F2/F3 the chain runs in YAML+env, env-only, and `--config` modes uniformly — there is no longer an asymmetry where YAML mode skipped fallbacks.
+4. **API key fallbacks always run via `_apply_inheritance_fallbacks()`:** Tier 1 (`llm.api_key` ← `cognee.embedding_api_key`), Tier 2 (`compaction_llm`/`successful_use.api_key` ← `llm.api_key`), Tier 3 (`compaction_llm.endpoint` ← `llm.endpoint`). After F2/F3 the chain runs in YAML+env, env-only, and `--config` modes uniformly — there is no longer an asymmetry where YAML mode skipped fallbacks.
 
 5. **Tier gating silently disables features:** Parameters for modules not in the active tier are accepted without error but have no effect.
 
@@ -7225,7 +7143,7 @@ as a set value and goes through the coercer like any other input.
 
 | Scenario | Result |
 |---|---|
-| Only `EB_EMBEDDING_API_KEY` set | `cognee.embedding_api_key` gets the value from the env override. After overrides, `_apply_inheritance_fallbacks()` Tier 1 copies it to `llm.api_key` (which is empty), then Tier 2 copies that into `compaction_llm.api_key`, `successful_use.api_key`, and `blocker_extraction.api_key`. Every subsystem ends up with the embedding key. |
+| Only `EB_EMBEDDING_API_KEY` set | `cognee.embedding_api_key` gets the value from the env override. After overrides, `_apply_inheritance_fallbacks()` Tier 1 copies it to `llm.api_key` (which is empty), then Tier 2 copies that into `compaction_llm.api_key` and `successful_use.api_key`. Every subsystem ends up with the embedding key. |
 | `EB_SUCCESSFUL_USE_API_KEY` not set | After overrides, the field is still empty, so Tier 2 copies `llm.api_key` into it. |
 | `EB_LLM_API_KEY` set to a non-empty value, `EB_COMPACTION_LLM_API_KEY` not set | Tier 2 copies `llm.api_key` into `compaction_llm.api_key`. |
 | `EB_LLM_API_KEY` set to a non-empty value, `EB_COMPACTION_LLM_API_KEY` also set | Both env overrides apply. The Tier-2 fallback only fires if the target is empty after overrides — explicit values are always respected. |
@@ -7334,7 +7252,6 @@ The error middleware (`elephantbroker/api/middleware/errors.py`) maps Python exc
 | **ConsolidationReportStore** | Exception caught (line 357) | Startup continues | Consolidation reports not stored |
 | **OtelTraceQueryClient** | Exception caught (line 363) | Startup continues | Consolidation Stage 7 (procedure refinement) falls back to pattern-based detection |
 | **SuccessfulUseReasoningTask** | Exception caught (line 587) | Startup continues | No LLM-based successful-use reasoning |
-| **BlockerExtractionTask** | Exception caught (line 593) | Startup continues | No automatic blocker extraction |
 | **ProcedureAuditStore** | `await init_db()` called; failure **propagates** | Fatal | N/A |
 | **SessionGoalAuditStore** | `await init_db()` called; failure **propagates** | Fatal | N/A |
 | **OrgOverrideStore** | `await init_db()` called; failure **propagates** | Fatal | N/A |
@@ -7367,7 +7284,6 @@ The error middleware (`elephantbroker/api/middleware/errors.py`) maps Python exc
 7. [Fact Canonicalization (Consolidation Stage 2)](#7-fact-canonicalization-consolidation-stage-2)
 8. [Procedure Refinement (Consolidation Stage 7)](#8-procedure-refinement-consolidation-stage-7)
 9. [Successful Use Reasoning (RT-1)](#9-successful-use-reasoning-rt-1)
-10. [Blocker Extraction (RT-2)](#10-blocker-extraction-rt-2)
 11. [Goal Refinement](#11-goal-refinement)
 12. [Sub-Goal Creation](#12-sub-goal-creation)
 13. [Subagent Context Summarization](#13-subagent-context-summarization)
@@ -7881,65 +7797,6 @@ Do NOT mark a fact as used if the agent would have done the same without it.
 
 ---
 
-## 10. Blocker Extraction (RT-2)
-
-**File:** `elephantbroker/runtime/consolidation/blocker_extraction_task.py`
-
-**Purpose:** Automatic LLM-based detection of concrete blockers preventing progress on session goals. Goals with detected blockers get `must_inject=True` in the scoring pipeline.
-
-**System prompt:**
-```
-You are a project blocker analyzer.
-```
-
-**User prompt:**
-```
-Analyze this conversation for blockers on the listed goals.
-
-GOALS:
-[0] Goal Title - description
-    Existing blockers: blocker1; blocker2
-[1] Goal Title 2
-
-RECENT CONVERSATION:
-user: message content
-assistant: response content
-...
-
-Rules:
-- A blocker is a CONCRETE obstacle preventing progress on a specific goal.
-- Do NOT report vague concerns, future risks, or general difficulties.
-- Do NOT report something that has already been resolved in the conversation.
-- Do NOT repeat existing blockers already listed above.
-- Only report blockers you are confident about.
-- If no blockers are found, return an empty array.
-
-Return JSON: [{"goal_index": int, "blocker_text": "description of the blocker"}]
-```
-
-**Response format:**
-```json
-[{"goal_index": 0, "blocker_text": "description of the blocker"}]
-```
-
-**Temperature:** `0.1` (hardcoded in request payload)
-
-**Max tokens:** `500` (hardcoded in request payload)
-
-**Model:** `BlockerExtractionConfig.model` (default: `gemini/gemini-2.5-flash-lite`, env: `EB_BLOCKER_EXTRACTION_MODEL`)
-
-**When called:** Fires as background `asyncio.create_task` from `ContextLifecycle.after_turn()` every `run_every_n_turns` turns (default: 3). Off by default (`BlockerExtractionConfig.enabled=False`, env: `EB_BLOCKER_EXTRACTION_ENABLED`).
-
-**Failure behavior:** Returns empty list `[]`. Logs warning with exc_info. No retry. Does not affect normal turn processing.
-
-**Parameters injected:**
-- `goal_list` -- indexed goals with titles, descriptions, and existing blockers
-- `messages` -- last `recent_messages_window` messages (default: 10), each content truncated to 500 chars, total truncated to 4000 chars
-- Uses own dedicated httpx client with `BlockerExtractionConfig.endpoint` (default: `http://localhost:8811/v1`)
-- Uses raw OpenAI-compatible API (`/chat/completions`), not `LLMClient`
-
----
-
 ## 11. Goal Refinement
 
 **File:** `elephantbroker/runtime/working_set/goal_refinement.py`
@@ -8103,7 +7960,6 @@ test
 | 7 | Fact Canonicalization | `canonicalize.py` | `complete` | 0.1 (default) | 500 | gemini-2.5-pro | During consolidation |
 | 8 | Procedure Refinement | `refine_procedures.py` | `complete` | 0.1 (default) | 500 | gemini-2.5-pro | During consolidation |
 | 9 | Successful Use (RT-1) | `successful_use_task.py` | raw httpx | 0.1 | 500 | gemini-2.5-flash-lite | No (opt-in) |
-| 10 | Blocker Extraction (RT-2) | `blocker_extraction_task.py` | raw httpx | 0.1 | 500 | gemini-2.5-flash-lite | No (opt-in) |
 | 11 | Goal Refinement | `goal_refinement.py` | `complete_json` | 0.0 | 500 | gemini-2.5-pro | Yes |
 | 12 | Sub-Goal Creation | `goal_refinement.py` | `complete_json` | 0.0 | 500 | gemini-2.5-pro | Yes |
 | 13 | Subagent Context Summary | `assembler.py` | duck-typed `complete` | varies | varies | varies | When LLM available |
@@ -8504,13 +8360,12 @@ Previous passes documented WHAT parameters exist. This pass documents the VALUE 
 | Secret | Source | Default Value | Where Used | Risk if Exposed |
 |--------|--------|---------------|------------|-----------------|
 | `EB_NEO4J_PASSWORD` / `cognee.neo4j_password` | env / YAML / `config.py` default | `elephant_dev` | GraphAdapter, Cognee config | Full graph database access; read/modify/delete all knowledge data |
-| `EB_LLM_API_KEY` / `llm.api_key` | env / YAML | `""` (empty) | LLMClient, Cognee LLM config, compaction LLM, successful-use LLM, blocker extraction LLM | Cost exposure on LLM provider; prompt/completion data visible to key holder |
+| `EB_LLM_API_KEY` / `llm.api_key` | env / YAML | `""` (empty) | LLMClient, Cognee LLM config, compaction LLM, successful-use LLM | Cost exposure on LLM provider; prompt/completion data visible to key holder |
 | `EB_EMBEDDING_API_KEY` / `cognee.embedding_api_key` | env / YAML | `""` (empty) | EmbeddingService, Cognee embedding config | Cost exposure on embedding provider |
 | `EB_RERANKER_API_KEY` / `reranker.api_key` | env / YAML | `""` (empty) | RerankOrchestrator | Cost exposure on reranker endpoint |
 | `EB_HITL_CALLBACK_SECRET` / `hitl.callback_hmac_secret` | env / YAML | `""` (empty) | HITL middleware HMAC validation, runtime HitlClient | Allows forging approve/reject callbacks; attacker can auto-approve any guard check |
 | `EB_COMPACTION_LLM_API_KEY` | env | Falls back to `EB_LLM_API_KEY` | CompactionLLMConfig | Cost exposure |
 | `EB_SUCCESSFUL_USE_API_KEY` | env | Falls back to `EB_LLM_API_KEY` | SuccessfulUseConfig | Cost exposure |
-| `EB_BLOCKER_EXTRACTION_API_KEY` | env | Falls back to `EB_LLM_API_KEY` | BlockerExtractionConfig | Cost exposure |
 | `NEO4J_AUTH` | `docker-compose.yml` env | `neo4j/elephant_dev` | Neo4j container authentication | Full database access |
 | `CLICKHOUSE_PASSWORD` | `docker-compose.yml` env | `""` (empty) | ClickHouse container, OTEL collector config | Access to all OTEL trace/log analytics data |
 | Redis password | Not configured | None (no auth) | Redis container | Access to all session state, working sets, embedding cache, guard history, HITL queue |

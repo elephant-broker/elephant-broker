@@ -444,19 +444,6 @@ class CompactionLLMConfig(_StrictBase):
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
 
-class BlockerExtractionConfig(_StrictBase):
-    """Configuration for automatic LLM-based blocker extraction (Phase 9 RT-2)."""
-    enabled: bool = False
-    # F8 (TODO-3-612): see SuccessfulUseConfig.endpoint comment — same fix.
-    endpoint: str = "http://localhost:8811/v1"
-    api_key: str = ""  # Falls back to EB_LLM_API_KEY if empty
-    # See GoalRefinementConfig.model — flash-lite is the working flash-class
-    # model after the upstream "gemini-2.5-flash" alias was deleted.
-    model: str = "gemini/gemini-2.5-flash-lite"
-    run_every_n_turns: int = Field(default=3, ge=1)
-    recent_messages_window: int = Field(default=10, ge=1)
-
-
 # =============================================================================
 # Environment variable override registry
 # =============================================================================
@@ -582,13 +569,6 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_SUCCESSFUL_USE_MODEL", "successful_use.model", "str"),
     ("EB_SUCCESSFUL_USE_BATCH_SIZE", "successful_use.batch_size", "int"),
 
-    # --- Blocker extraction (Phase 9, off by default) ---
-    ("EB_BLOCKER_EXTRACTION_ENABLED", "blocker_extraction.enabled", "bool"),
-    ("EB_BLOCKER_EXTRACTION_ENDPOINT", "blocker_extraction.endpoint", "str"),
-    ("EB_BLOCKER_EXTRACTION_API_KEY", "blocker_extraction.api_key", "str"),
-    ("EB_BLOCKER_EXTRACTION_MODEL", "blocker_extraction.model", "str"),
-    ("EB_BLOCKER_EXTRACTION_EVERY_N_TURNS", "blocker_extraction.run_every_n_turns", "int"),
-
     # --- Consolidation pipeline (Phase 9) ---
     # F4 (TODO-3-009): the two vars below were previously read directly from
     # os.environ inside an `ElephantBrokerConfig.consolidation` @property —
@@ -659,8 +639,8 @@ def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
 
     Inheritance tiers:
       1. ``llm.api_key`` ← ``cognee.embedding_api_key`` (if llm.api_key empty)
-      2. ``compaction_llm.api_key`` / ``successful_use.api_key`` /
-         ``blocker_extraction.api_key`` ← ``llm.api_key`` (each only if its own value is empty)
+      2. ``compaction_llm.api_key`` / ``successful_use.api_key``
+         ← ``llm.api_key`` (each only if its own value is empty)
       3. ``compaction_llm.endpoint`` ← ``llm.endpoint`` (if compaction_llm.endpoint empty)
 
     The fallbacks fire only when the target field is empty after env override
@@ -673,26 +653,18 @@ def _apply_inheritance_fallbacks(yaml_data: dict) -> None:
     if not llm.get("api_key") and cognee.get("embedding_api_key"):
         llm["api_key"] = cognee["embedding_api_key"]
 
-    # Tier 2: derived LLMs (compaction / successful_use / blocker_extraction) ← llm.api_key
+    # Tier 2: derived LLMs (compaction / successful_use) ← llm.api_key
     llm_key = llm.get("api_key", "")
     if llm_key:
-        for section in ("compaction_llm", "successful_use", "blocker_extraction"):
+        for section in ("compaction_llm", "successful_use"):
             sec = yaml_data.setdefault(section, {})
             if not sec.get("api_key"):
                 sec["api_key"] = llm_key
 
     # Tier 3 (F7): compaction_llm.endpoint ← llm.endpoint
-    # TODO-3-231 (Bucket A-R3, BSR LOW): stale F7 comment rewritten to match
-    # post-F8 reality. The earlier comment claimed successful_use and
-    # blocker_extraction "still default to host.docker.internal" — that has
-    # not been true since the F8 endpoint-default migration moved both
-    # defaults to http://localhost:8811/v1 (see SuccessfulUseConfig.endpoint
-    # around line 226 and BlockerExtractionConfig.endpoint around line 421).
-    # Both sections already land on the canonical localhost LiteLLM proxy,
-    # so widening endpoint inheritance to them has no current behavioral
-    # payoff — the asymmetry is kept explicit here so a future operator who
-    # needs per-section endpoint routing can see at a glance that only
-    # compaction_llm is wired.
+    # successful_use defaults to http://localhost:8811/v1
+    # (see SuccessfulUseConfig.endpoint) so only compaction_llm needs
+    # endpoint inheritance.
     llm_endpoint = llm.get("endpoint", "")
     if llm_endpoint:
         compaction = yaml_data.setdefault("compaction_llm", {})
@@ -732,8 +704,6 @@ class ElephantBrokerConfig(_StrictBase):
     consolidation_min_retention_seconds: int = Field(default=172800, ge=3600)
     # Phase 8 config sections
     profile_cache: ProfileCacheConfig = Field(default_factory=ProfileCacheConfig)
-    # Phase 9 config sections
-    blocker_extraction: BlockerExtractionConfig = Field(default_factory=BlockerExtractionConfig)
     # F4 (TODO-3-009): consolidation was previously a `@property` that read
     # EB_DEV_CONSOLIDATION_AUTO_TRIGGER + EB_CONSOLIDATION_BATCH_SIZE directly
     # from os.environ on first access and cached the result. That created two
@@ -757,8 +727,8 @@ class ElephantBrokerConfig(_StrictBase):
         contract test target (see ``test_every_binding_applies``).
 
         After env overrides are applied, ``_apply_inheritance_fallbacks()`` runs
-        to populate empty derived secrets (compaction_llm, successful_use,
-        blocker_extraction) from ``llm.api_key``, populate ``llm.api_key`` from
+        to populate empty derived secrets (compaction_llm, successful_use)
+        from ``llm.api_key``, populate ``llm.api_key`` from
         ``cognee.embedding_api_key`` if both are empty, and copy ``llm.endpoint``
         into ``compaction_llm.endpoint`` when the latter is empty (F7).
 
