@@ -7,6 +7,7 @@ import pytest
 
 from elephantbroker.runtime.retrieval.orchestrator import RetrievalOrchestrator
 from elephantbroker.schemas.profile import RetrievalPolicy
+from elephantbroker.schemas.trace import TraceEventType
 
 
 def _make_orchestrator(dataset_name: str = "gw__elephantbroker") -> RetrievalOrchestrator:
@@ -97,6 +98,14 @@ class TestDatasetNameFix:
 class TestRetrievalPerformedTraceEvent:
     """TD-47: retrieval_performed trace events must include session_id and session_key."""
 
+    @staticmethod
+    def _find_retrieval_performed(mock_ledger):
+        """Filter append_event calls for the RETRIEVAL_PERFORMED event."""
+        return [
+            c.args[0] for c in mock_ledger.append_event.call_args_list
+            if c.args[0].event_type == TraceEventType.RETRIEVAL_PERFORMED
+        ]
+
     async def test_trace_event_includes_session_id(self):
         orch = _make_orchestrator()
         policy = RetrievalPolicy(
@@ -108,11 +117,10 @@ class TestRetrievalPerformedTraceEvent:
             "test query", policy=policy,
             session_key="agent:main:main", session_id="00000000-0000-0000-0000-000000000042",
         )
-        trace_mock = orch._trace.append_event
-        trace_mock.assert_called_once()
-        event = trace_mock.call_args[0][0]
-        assert str(event.session_id) == "00000000-0000-0000-0000-000000000042"
-        assert event.session_key == "agent:main:main"
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert str(events[0].session_id) == "00000000-0000-0000-0000-000000000042"
+        assert events[0].session_key == "agent:main:main"
 
     async def test_trace_event_session_id_none_when_not_provided(self):
         orch = _make_orchestrator()
@@ -122,5 +130,6 @@ class TestRetrievalPerformedTraceEvent:
             artifact_enabled=False,
         )
         await orch.retrieve_candidates("test query", policy=policy)
-        event = orch._trace.append_event.call_args[0][0]
-        assert event.session_id is None
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert events[0].session_id is None
