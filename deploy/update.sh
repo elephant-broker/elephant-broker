@@ -155,24 +155,61 @@ else
     log "  $BEFORE_SHA -> $AFTER_SHA"
 fi
 
+# --- Self-update guard ---
+# When update.sh runs, bash loads the OLD script into memory at startup.
+# git pull (above) replaces the file on disk, but bash keeps executing the
+# stale in-memory copy. Any fix that lands IN update.sh itself (e.g. the
+# --all-packages fix in ec7ee67) only takes effect on a SECOND run — the
+# first run still executes the pre-pull version. We hit this during the
+# 2026-04-09 staging deploy: ec7ee67 was on disk but the in-memory old
+# script ran without --all-packages, dropping hitl-middleware and crashing
+# elephantbroker-hitl with 203/EXEC.
+#
+# Fix: after git pull, check if deploy/update.sh itself was modified in the
+# pulled commits. If yes AND the EB_UPDATE_REEXECED env guard is unset,
+# re-execute the script from the new on-disk version via exec "$0" "$@".
+# The guard env var prevents infinite recursion — the re-exec'd instance
+# sees EB_UPDATE_REEXECED=1 and skips the check.
+#
+# HEAD@{1} may not exist on a fresh clone (no reflog entry yet). In that
+# case, skip the self-exec check — fresh clones don't have a stale script
+# in memory since the user just cloned the latest version.
+if [[ -z "${EB_UPDATE_REEXECED:-}" ]]; then
+    PREV_HEAD="$(git rev-parse --verify HEAD@{1} 2>/dev/null || true)"
+    if [[ -n "$PREV_HEAD" ]] && git diff --name-only "$PREV_HEAD"..HEAD -- deploy/update.sh | grep -q .; then
+        log "update.sh changed in this pull — re-executing from new version"
+        export EB_UPDATE_REEXECED=1
+        exec "$0" "$@"
+    fi
+fi
+
 # =============================================================================
 log "Step 2/7: uv sync"
 # =============================================================================
+# --all-packages is REQUIRED because hitl-middleware is a workspace member but
+# not a dependency of the root elephantbroker project; without this flag
+# `uv sync` skips it and /opt/elephantbroker/.venv/bin/hitl-middleware is
+# never created, breaking the elephantbroker-hitl systemd unit with
+# status=203/EXEC on every fresh install. Discovered during the first
+# staging install of PR #3 (post-merge) on 2026-04-09.
 if [[ "$UPGRADE_LOCK" -eq 1 ]]; then
     log "  --upgrade flag: regenerating uv.lock from pyproject.toml"
     uv lock --upgrade
-    log "  uv sync --no-dev"
-    uv sync --no-dev
+    log "  uv sync --no-dev --all-packages"
+    uv sync --no-dev --all-packages
 else
-    log "  uv sync --frozen --no-dev (installs exactly what uv.lock specifies)"
-    uv sync --frozen --no-dev
+    log "  uv sync --frozen --no-dev --all-packages (installs exactly what uv.lock specifies)"
+    uv sync --frozen --no-dev --all-packages
 fi
 
 # Workspace mode: hitl-middleware is a [tool.uv.workspace] member of the
-# root pyproject.toml, so the `uv sync` above already covers it. Before
-# the workspace conversion this script ran a separate `uv pip install` —
-# that bypassed the lockfile entirely and let the HITL service drift
-# from the runtime on every update.
+# root pyproject.toml, so the `uv sync --all-packages` above covers it in
+# one invocation. Before the workspace conversion this script ran a
+# separate `uv pip install` — that bypassed the lockfile entirely and let
+# the HITL service drift from the runtime on every update. Without
+# `--all-packages` the workspace member is silently skipped and the HITL
+# binary is never installed; see the inline comment on the `uv sync`
+# invocations above for the full regression history.
 
 # Cognee writable directories: re-create in case a fresh sync wiped them.
 #

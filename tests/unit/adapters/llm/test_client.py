@@ -111,6 +111,46 @@ class TestCompleteJson:
             with pytest.raises(json.JSONDecodeError):
                 await client.complete_json("sys", "usr")
 
+    async def test_parses_markdown_fenced_response(self, client):
+        """LiteLLM Gemini backends wrap JSON in ```json...``` fences; the
+        client must strip the fences before json.loads (Task #36, follow-up
+        to 1e0cb47). Prior to this fix, extract_facts on staging was silently
+        losing every fact because complete_json raised JSONDecodeError on
+        fenced content."""
+        fenced = '```json\n{"facts": [{"text": "hello"}]}\n```'
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response(fenced)
+            result = await client.complete_json("sys", "usr")
+            assert result == {"facts": [{"text": "hello"}]}
+
+    async def test_parses_fence_without_language_tag(self, client):
+        fenced = '```\n{"count": 3}\n```'
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response(fenced)
+            result = await client.complete_json("sys", "usr")
+            assert result == {"count": 3}
+
+    async def test_unfenced_json_still_parses(self, client):
+        """Backward compat: stripper is a no-op on fence-free content."""
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response('{"count": 42}')
+            result = await client.complete_json("sys", "usr")
+            assert result == {"count": 42}
+
+    async def test_invalid_json_log_includes_content_snippet(self, client, caplog):
+        """On parse failure, the warning log must include a truncated
+        content snippet so operators grepping journalctl can see what the
+        proxy actually returned. Historically the log only showed the
+        JSONDecodeError message which was uniformly 'Expecting value: line
+        1 column 1 (char 0)' for every fenced-content failure, giving no
+        hint that fences were the problem."""
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response("garbage-not-json")
+            with caplog.at_level("WARNING", logger="elephantbroker.adapters.llm"):
+                with pytest.raises(json.JSONDecodeError):
+                    await client.complete_json("sys", "usr")
+            assert "garbage-not-json" in caplog.text
+
     async def test_temperature_is_zero(self, client):
         with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = _make_response('{}')

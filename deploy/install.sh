@@ -259,8 +259,9 @@ log "Step 3/8: install runtime + HITL middleware via uv sync (workspace mode)"
 #     pyproject.toml requires-python)
 #   - Reads pyproject.toml + uv.lock and installs the EXACT pinned versions
 #   - Removes any packages not in the lockfile (full sync = zero drift)
-#   - Installs the elephantbroker project AND the hitl-middleware workspace
-#     member in editable mode (both share the same venv)
+#   - With `--all-packages`, installs the elephantbroker project AND the
+#     hitl-middleware workspace member in editable mode (both share the
+#     same venv)
 #
 # Workspace mode: hitl-middleware is declared as a [tool.uv.workspace] member
 # in the root pyproject.toml. The root uv.lock is the single source of truth
@@ -268,13 +269,20 @@ log "Step 3/8: install runtime + HITL middleware via uv sync (workspace mode)"
 # longer needed (and would in fact reintroduce the dependency-drift bug it
 # was being used to "fix").
 #
+# --all-packages is REQUIRED because hitl-middleware is a workspace member but
+# not a dependency of the root elephantbroker project; without this flag
+# `uv sync` skips it and /opt/elephantbroker/.venv/bin/hitl-middleware is
+# never created, breaking the elephantbroker-hitl systemd unit with
+# status=203/EXEC on every fresh install. Discovered during the first
+# staging install of PR #3 (post-merge) on 2026-04-09.
+#
 # We pass `--frozen` to refuse to modify uv.lock at install time. If the
 # lockfile is missing or out of sync with pyproject.toml, the operator must
 # regenerate it via `uv lock` BEFORE running install.sh. This prevents
 # accidental dep drift on production hosts.
 cd "$REPO_DIR"
-log "  uv sync --frozen --no-dev (production install, no test deps)"
-uv sync --frozen --no-dev
+log "  uv sync --frozen --no-dev --all-packages (production install, no test deps)"
+uv sync --frozen --no-dev --all-packages
 
 # =============================================================================
 log "Step 4/8: post-install fixes (Cognee writable dirs + mistralai safety net)"

@@ -128,7 +128,6 @@ class TestAfterTurnIngestDelegation:
         lc._config = None
         lc._async_analyzer = None
         lc._successful_use_task = None
-        lc._blocker_extraction_task = None
         lc._log = MagicMock()
         lc._ingest_degraded_warned = False
         lc._fallback_session_ids = {}
@@ -151,7 +150,6 @@ class TestAfterTurnIngestDelegation:
         ctx.last_turn_at = None
         ctx.last_snapshot_id = None
         ctx.rt1_turn_counter = 0
-        ctx.rt2_turn_counter = 0
 
         lc._load_session_context = AsyncMock(return_value=ctx)
         lc._ensure_session_id = MagicMock(side_effect=lambda sid, sk: sid or "fallback-sid")
@@ -183,7 +181,6 @@ class TestAfterTurnIngestDelegation:
         ctx.last_turn_at = None
         ctx.last_snapshot_id = None
         ctx.rt1_turn_counter = 0
-        ctx.rt2_turn_counter = 0
 
         lc._load_session_context = AsyncMock(return_value=ctx)
         lc._ensure_session_id = MagicMock(side_effect=lambda sid, sk: sid or "fallback-sid")

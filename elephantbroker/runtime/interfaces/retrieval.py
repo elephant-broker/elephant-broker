@@ -28,6 +28,7 @@ class IRetrievalOrchestrator(ABC):
         actor_id: str | None = None,
         memory_class: MemoryClass | None = None,
         session_key: str | None = None,
+        session_id: str | None = None,
         auto_recall: bool = False,
         caller_gateway_id: str = "",
     ) -> list[RetrievalCandidate]:

@@ -38,6 +38,7 @@ class SearchRequest(BaseModel):
     actor_id: str | None = None
     memory_class: str | None = None
     session_key: str | None = None
+    session_id: str | None = None
     profile_name: str | None = None
     auto_recall: bool = False
 
@@ -136,6 +137,7 @@ async def search_memory(body: SearchRequest, request: Request):
             actor_id=body.actor_id,
             memory_class=mc,
             session_key=body.session_key,
+            session_id=body.session_id,
             auto_recall=body.auto_recall,
             caller_gateway_id=caller_gw,
         )
@@ -164,6 +166,7 @@ async def search_memory(body: SearchRequest, request: Request):
         actor_id=body.actor_id,
         memory_class=mc,
         session_key=body.session_key,
+        session_id=body.session_id,
         profile_name=body.profile_name or "default",
         auto_recall=body.auto_recall,
         caller_gateway_id=caller_gw,

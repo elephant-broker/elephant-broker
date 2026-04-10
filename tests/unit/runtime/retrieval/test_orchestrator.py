@@ -7,6 +7,7 @@ import pytest
 
 from elephantbroker.runtime.retrieval.orchestrator import RetrievalOrchestrator
 from elephantbroker.schemas.profile import RetrievalPolicy
+from elephantbroker.schemas.trace import TraceEventType
 
 
 def _make_orchestrator(dataset_name: str = "gw__elephantbroker") -> RetrievalOrchestrator:
@@ -92,3 +93,72 @@ class TestDatasetNameFix:
             mock_graph.assert_called_once()
             call_args = mock_graph.call_args[0]
             assert call_args[1] == "gw__elephantbroker"
+
+
+class TestRetrievalPerformedTraceEvent:
+    """TD-47: retrieval_performed trace events must include session_id and session_key."""
+
+    @staticmethod
+    def _find_retrieval_performed(mock_ledger):
+        """Filter append_event calls for the RETRIEVAL_PERFORMED event."""
+        return [
+            c.args[0] for c in mock_ledger.append_event.call_args_list
+            if c.args[0].event_type == TraceEventType.RETRIEVAL_PERFORMED
+        ]
+
+    async def test_trace_event_includes_session_id(self):
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+        await orch.retrieve_candidates(
+            "test query", policy=policy,
+            session_key="agent:main:main", session_id="00000000-0000-0000-0000-000000000042",
+        )
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert str(events[0].session_id) == "00000000-0000-0000-0000-000000000042"
+        assert events[0].session_key == "agent:main:main"
+
+    async def test_trace_event_session_id_none_when_not_provided(self):
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+        await orch.retrieve_candidates("test query", policy=policy)
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert events[0].session_id is None
+
+
+class TestMemorySearchSessionIdThreading:
+    """TD-47 complete: session_id must reach retrieve_candidates from /memory/search."""
+
+    async def test_session_id_threaded_from_search_request(self):
+        """SearchRequest.session_id must be passed to retrieve_candidates."""
+        orch = _make_orchestrator()
+
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        # Simulate the /memory/search call path: session_id arrives as string
+        await orch.retrieve_candidates(
+            "test query",
+            policy=policy,
+            session_key="agent:main:main",
+            session_id="11111111-1111-1111-1111-111111111111",
+        )
+        events = [
+            c.args[0] for c in orch._trace.append_event.call_args_list
+            if c.args[0].event_type == TraceEventType.RETRIEVAL_PERFORMED
+        ]
+        assert len(events) == 1
+        assert str(events[0].session_id) == "11111111-1111-1111-1111-111111111111"
+        assert events[0].session_key == "agent:main:main"

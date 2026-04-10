@@ -595,6 +595,11 @@ class RuntimeContainer:
             trace_ledger=c.trace_ledger,
             metrics=c.metrics_ctx,
             gateway_id=gw_id,
+            # TD-39 Issue F: pass main LLMConfig so GoalRefinementTask can
+            # instantiate a dedicated cheap-model httpx.AsyncClient bound to
+            # goal_refinement.model (default gemini/gemini-2.5-flash-lite)
+            # against the main LLM endpoint + api_key.
+            llm_config=config.llm,
         )
 
         c.hint_processor = GoalHintProcessor(
@@ -709,24 +714,15 @@ class RuntimeContainer:
             procedure_engine=c.procedure_engine,
             async_analyzer=c.async_analyzer,
             successful_use_task=getattr(c, "successful_use_task", None),
-            blocker_extraction_task=getattr(c, "blocker_extraction_task", None),
         )
 
-        # Phase 9: RT-1/RT-2 task instances (conditional on config)
+        # Phase 9: RT-1 task instance (conditional on config)
         c.successful_use_task = None
-        c.blocker_extraction_task = None
         if config.successful_use.enabled and c.memory_store:
             try:
                 from elephantbroker.runtime.consolidation.successful_use_task import SuccessfulUseReasoningTask
                 c.successful_use_task = SuccessfulUseReasoningTask(config.successful_use, c.memory_store)
                 c.context_lifecycle._successful_use_task = c.successful_use_task
-            except Exception:
-                pass
-        if config.blocker_extraction.enabled and c.session_goal_store:
-            try:
-                from elephantbroker.runtime.consolidation.blocker_extraction_task import BlockerExtractionTask
-                c.blocker_extraction_task = BlockerExtractionTask(config.blocker_extraction, c.session_goal_store)
-                c.context_lifecycle._blocker_extraction_task = c.blocker_extraction_task
             except Exception:
                 pass
 

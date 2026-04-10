@@ -5,7 +5,6 @@ import pytest
 from pydantic import ValidationError
 
 from elephantbroker.schemas.config import (
-    BlockerExtractionConfig,
     CogneeConfig,
     ElephantBrokerConfig,
     InfraConfig,
@@ -521,15 +520,9 @@ enable_trace_ledger: true
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
         assert cfg.successful_use.api_key == "sk-llm"
 
-    def test_api_key_fallback_blocker_extraction_to_llm(self, yaml_path):
-        from elephantbroker.schemas.config import ElephantBrokerConfig
-        os.environ["EB_LLM_API_KEY"] = "sk-llm"
-        cfg = ElephantBrokerConfig.from_yaml(yaml_path)
-        assert cfg.blocker_extraction.api_key == "sk-llm"
-
     def test_api_key_full_chain_via_embedding_only(self, yaml_path):
-        """Setting only EB_EMBEDDING_API_KEY must propagate through ALL 5 sections
-        (cognee → llm → compaction_llm + successful_use + blocker_extraction)."""
+        """Setting only EB_EMBEDDING_API_KEY must propagate through ALL 4 sections
+        (cognee → llm → compaction_llm + successful_use)."""
         from elephantbroker.schemas.config import ElephantBrokerConfig
         os.environ["EB_EMBEDDING_API_KEY"] = "sk-master"
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
@@ -537,7 +530,6 @@ enable_trace_ledger: true
         assert cfg.llm.api_key == "sk-master"
         assert cfg.compaction_llm.api_key == "sk-master"
         assert cfg.successful_use.api_key == "sk-master"
-        assert cfg.blocker_extraction.api_key == "sk-master"
 
     def test_api_key_explicit_compaction_not_overridden_by_fallback(self, tmp_path):
         """An explicit compaction_llm.api_key in YAML must NOT be overwritten
@@ -563,7 +555,6 @@ compaction_llm:
         assert cfg.llm.api_key == ""
         assert cfg.compaction_llm.api_key == ""
         assert cfg.successful_use.api_key == ""
-        assert cfg.blocker_extraction.api_key == ""
 
     # ----- Validation propagation -----
 
@@ -662,7 +653,6 @@ compaction_llm:
         #                                              cross-validator — see note
         #                                              below)
         #     - `successful_use.batch_size`            ge=1
-        #     - `blocker_extraction.run_every_n_turns` ge=1
         #     - `max_concurrent_sessions`              ge=1
         #
         # float probes (probe value = 1.5):
@@ -1037,10 +1027,6 @@ class TestF8LocalhostDefaults:
 
     def test_successful_use_endpoint_defaults_to_localhost(self):
         assert SuccessfulUseConfig().endpoint == "http://localhost:8811/v1"
-
-    def test_blocker_extraction_endpoint_defaults_to_localhost(self):
-        assert BlockerExtractionConfig().endpoint == "http://localhost:8811/v1"
-
 
 class TestF9EmbeddingDimensionsValidator:
     """F9 (TODO-3-613): cross-validator on embedding_model + embedding_dimensions."""

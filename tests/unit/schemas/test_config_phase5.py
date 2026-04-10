@@ -3,6 +3,7 @@ import pytest
 
 from elephantbroker.schemas.config import (
     AuditConfig,
+    CompactionLLMConfig,
     ConflictDetectionConfig,
     EmbeddingCacheConfig,
     ElephantBrokerConfig,
@@ -77,7 +78,7 @@ class TestGoalRefinementConfig:
         c = GoalRefinementConfig()
         assert c.hints_enabled is True
         assert c.refinement_task_enabled is True
-        assert c.model == "gemini/gemini-2.5-flash"
+        assert c.model == "gemini/gemini-2.5-flash-lite"
         assert c.max_subgoals_per_session == 10
         assert c.progress_confidence_delta == 0.1
         assert c.subgoal_dedup_threshold == 0.6
@@ -115,7 +116,43 @@ class TestSuccessfulUseConfig:
     def test_defaults(self):
         c = SuccessfulUseConfig()
         assert c.enabled is False
-        assert c.model == "gemini/gemini-2.5-flash"
+        assert c.model == "gemini/gemini-2.5-flash-lite"
+
+
+class TestFlashLiteModelDefaults:
+    """Regression for Task #36 — every flash-class config default must point at
+    the working flash-lite alias. The unsuffixed "gemini/gemini-2.5-flash"
+    alias on the staging LiteLLM proxy resolves to a deleted Gemini preview
+    and returns HTTP 404. This test pins all three configs so a future
+    operator cannot silently revert one of them."""
+
+    def test_all_flash_configs_use_flash_lite(self):
+        expected = "gemini/gemini-2.5-flash-lite"
+        assert SuccessfulUseConfig().model == expected
+        assert GoalRefinementConfig().model == expected
+        assert CompactionLLMConfig().model == expected
+
+    def test_default_yaml_matches_python_defaults(self, monkeypatch):
+        """Pin YAML ↔ Python-default drift. Task #36 landed after 1e0cb47
+        changed GoalRefinementConfig.model in the Python schema but forgot
+        to update default.yaml — YAML values win at load time, so the fix
+        was silently ignored on any deployment that ships default.yaml (i.e.
+        every deployment). This regression test asserts that the packaged
+        default.yaml's three flash-class models all resolve to flash-lite
+        when loaded end-to-end."""
+        # Strip env overrides so only the YAML file drives the load.
+        for key in list(
+            [
+                "EB_COMPACTION_LLM_MODEL",
+                "EB_SUCCESSFUL_USE_MODEL",
+            ]
+        ):
+            monkeypatch.delenv(key, raising=False)
+        config = ElephantBrokerConfig.load()
+        expected = "gemini/gemini-2.5-flash-lite"
+        assert config.successful_use.model == expected
+        assert config.goal_refinement.model == expected
+        assert config.compaction_llm.model == expected
 
 
 class TestElephantBrokerConfigPhase5:

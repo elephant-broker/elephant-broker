@@ -58,7 +58,7 @@ class CandidateGenerator:
 
         # Fire all sources concurrently
         retrieval_task = asyncio.ensure_future(
-            self._get_retrieval_candidates(query, policy, session_key)
+            self._get_retrieval_candidates(query, policy, session_key, session_id=str(session_id))
         )
         session_goals_task = asyncio.ensure_future(
             self._get_session_goal_items(session_key, session_id)
@@ -83,9 +83,10 @@ class CandidateGenerator:
         direct_items = list(session_goal_items) + list(persistent_goal_items) + list(procedure_items)
         return (retrieval_candidates, direct_items)
 
-    async def _get_retrieval_candidates(self, query, policy, session_key):
+    async def _get_retrieval_candidates(self, query, policy, session_key, session_id=None):
         return await self._retrieval.retrieve_candidates(
             query, policy=policy, session_key=session_key,
+            session_id=session_id,
             auto_recall=True,  # Working set is auto-injection — exclude blacklisted facts
         )
 

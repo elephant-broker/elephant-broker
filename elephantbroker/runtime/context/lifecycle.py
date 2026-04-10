@@ -82,7 +82,6 @@ class ContextLifecycle:
         procedure_engine=None,
         async_analyzer=None,
         successful_use_task=None,
-        blocker_extraction_task=None,
     ) -> None:
         self._wsm = working_set_manager
         self._assembler = context_assembler
@@ -98,7 +97,6 @@ class ContextLifecycle:
         self._procedure_engine = procedure_engine
         self._async_analyzer = async_analyzer
         self._successful_use_task = successful_use_task
-        self._blocker_extraction_task = blocker_extraction_task
         self._trace = trace_ledger
         self._llm = llm_client
         self._redis = redis
@@ -947,27 +945,6 @@ class ContextLifecycle:
                         session_goals=[],
                         gateway_id=self._gateway_id,
                     ))
-
-        # Phase 9: RT-2 — blocker extraction (periodic trigger)
-        if self._blocker_extraction_task and self._config:
-            be_cfg = getattr(self._config, "blocker_extraction", None)
-            if be_cfg and be_cfg.enabled:
-                session_ctx.rt2_turn_counter += 1
-                if session_ctx.rt2_turn_counter >= be_cfg.run_every_n_turns:
-                    session_ctx.rt2_turn_counter = 0
-                    goals = []
-                    if self._session_goal_store:
-                        try:
-                            goals = await self._session_goal_store.get_goals(sk, sid)
-                        except Exception:
-                            pass
-                    if goals:
-                        import asyncio
-                        asyncio.create_task(self._blocker_extraction_task.extract(
-                            session_key=sk, session_id=sid,
-                            gateway_id=self._gateway_id,
-                            messages=[], goals=goals,
-                        ))
 
         # Auto-trigger compaction check
         if self._compaction and self._redis and self._keys:

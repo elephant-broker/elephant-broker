@@ -50,6 +50,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         actor_id: str | None = None,
         memory_class: MemoryClass | None = None,
         session_key: str | None = None,
+        session_id: str | None = None,
         auto_recall: bool = False,
         caller_gateway_id: str = "",
     ) -> list[RetrievalCandidate]:
@@ -180,6 +181,8 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         await self._trace.append_event(
             TraceEvent(
                 event_type=TraceEventType.RETRIEVAL_PERFORMED,
+                session_id=session_id,
+                session_key=session_key,
                 payload={
                     "action": "retrieve_candidates", "query": query[:100],
                     "sources": source_names, "results": len(capped),

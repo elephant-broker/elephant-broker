@@ -151,6 +151,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self, query: str, max_results: int = 20, min_score: float = 0.0,
         scope: Scope | None = None, actor_id: str | None = None,
         memory_class: MemoryClass | None = None, session_key: str | None = None,
+        session_id: str | None = None,
         profile_name: str = "default", auto_recall: bool = False,
         caller_gateway_id: str = "",
     ) -> list[FactAssertion]:
@@ -201,6 +202,8 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         await self._trace.append_event(
             TraceEvent(
                 event_type=TraceEventType.RETRIEVAL_PERFORMED,
+                session_id=session_id,
+                session_key=session_key,
                 payload={"action": "search", "query": query[:100], "results": len(fact_list)},
             )
         )

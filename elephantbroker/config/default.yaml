@@ -151,7 +151,7 @@ llm:
 # Falls back to llm.endpoint and llm.api_key when these are empty.
 
 compaction_llm:
-  model: "gemini/gemini-2.5-flash"      # env: EB_COMPACTION_LLM_MODEL — cheaper, faster than the primary extraction model
+  model: "gemini/gemini-2.5-flash-lite" # env: EB_COMPACTION_LLM_MODEL — staging LiteLLM alias "gemini/gemini-2.5-flash" resolves to a deleted preview; flash-lite is the working flash-class model
   endpoint: ""                          # env: EB_COMPACTION_LLM_ENDPOINT — F7: empty inherits llm.endpoint at load time; set explicitly only if compaction targets a different LiteLLM proxy
   api_key: ""                           # env: EB_COMPACTION_LLM_API_KEY (secret) — falls back to llm.api_key if empty
   max_tokens: 2000                      # compaction summaries are short
@@ -256,7 +256,7 @@ goal_injection:
 goal_refinement:
   hints_enabled: true                   # the Tier 1 zero-cost path
   refinement_task_enabled: true         # the Tier 2 LLM path — disable to avoid all refinement LLM calls
-  model: "gemini/gemini-2.5-flash"      # cheap model is fine for refinement
+  model: "gemini/gemini-2.5-flash-lite" # cheap model is fine for refinement — staging LiteLLM alias "gemini/gemini-2.5-flash" resolves to a deleted preview (HTTP 404); flash-lite is the working flash-class model
   max_subgoals_per_session: 10          # cap to prevent runaway sub-goal creation
   feed_recent_messages: 6               # last N messages fed to the refinement prompt
   run_refinement_async: true            # if false, refinement blocks the ingest pipeline (latency spike risk)
@@ -375,25 +375,12 @@ successful_use:
   enabled: false                        # env: EB_SUCCESSFUL_USE_ENABLED — (off) when on, runs an LLM batch evaluation to determine which injected facts actually helped the agent. Used by the consolidation pipeline to strengthen useful facts and decay useless ones. Cost: ~1 LLM call per N turns. Worth enabling for long-running deployments where memory quality matters
   endpoint: "http://localhost:8811/v1"  # env: EB_SUCCESSFUL_USE_ENDPOINT
   api_key: ""                           # env: EB_SUCCESSFUL_USE_API_KEY (secret) — falls back to llm.api_key if empty
-  model: "gemini/gemini-2.5-flash"      # env: EB_SUCCESSFUL_USE_MODEL — cheap model is fine
+  model: "gemini/gemini-2.5-flash-lite" # env: EB_SUCCESSFUL_USE_MODEL — staging LiteLLM alias "gemini/gemini-2.5-flash" resolves to a deleted preview; flash-lite is the working flash-class model
   batch_size: 5                         # env: EB_SUCCESSFUL_USE_BATCH_SIZE — facts evaluated per LLM call
   batch_timeout_seconds: 120.0
   feed_last_facts: 20                   # window of recent facts considered per evaluation
   min_confidence: 0.7                   # only evaluate facts above this confidence
   run_async: true                       # run evaluation in background — false = blocks turn completion
-
-
-# -----------------------------------------------------------------------------
-# Blocker extraction — automatic blocker detection (Phase 9, off by default)
-# -----------------------------------------------------------------------------
-
-blocker_extraction:
-  enabled: false                        # env: EB_BLOCKER_EXTRACTION_ENABLED — (off) when on, periodically runs an LLM call to detect blockers in recent conversation and auto-add them to active goals. Useful for long debugging/research sessions where the agent doesn't notice it's stuck
-  endpoint: "http://localhost:8811/v1"  # env: EB_BLOCKER_EXTRACTION_ENDPOINT
-  api_key: ""                           # env: EB_BLOCKER_EXTRACTION_API_KEY (secret) — falls back to llm.api_key if empty
-  model: "gemini/gemini-2.5-flash"      # env: EB_BLOCKER_EXTRACTION_MODEL
-  run_every_n_turns: 3                  # env: EB_BLOCKER_EXTRACTION_EVERY_N_TURNS — cadence: every N turns, fire one blocker-detection call
-  recent_messages_window: 10            # how many recent messages fed to the blocker prompt
 
 
 # -----------------------------------------------------------------------------

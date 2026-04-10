@@ -49,9 +49,17 @@ members = ["hitl-middleware"]
 ```
 
 **The root `uv.lock` is the single source of truth for both packages.**
-A single `uv sync --frozen --no-dev` installs both into the same `.venv`,
-with versions that satisfy both packages' constraints simultaneously. This
-gives bit-for-bit reproducibility across the entire monorepo.
+A single `uv sync --frozen --no-dev --all-packages` installs both into the
+same `.venv`, with versions that satisfy both packages' constraints
+simultaneously. This gives bit-for-bit reproducibility across the entire
+monorepo.
+
+**`--all-packages` is required** because `hitl-middleware` is a workspace
+member but NOT a dependency of the root `elephantbroker` project. Without
+the flag, `uv sync` only installs the root project and silently skips the
+workspace member — `/opt/elephantbroker/.venv/bin/hitl-middleware` is
+never created, and the `elephantbroker-hitl` systemd unit crashes with
+`status=203/EXEC` on the next restart.
 
 ### What this means for dep upgrades
 
@@ -67,8 +75,9 @@ gives bit-for-bit reproducibility across the entire monorepo.
   bypasses the lockfile and reintroduces the dependency-drift bug the
   workspace conversion was meant to fix. The deploy scripts (`install.sh`,
   `update.sh`) used to do this and have been corrected.
-- **`uv sync --frozen --no-dev` is the production install command** for
-  both packages — no separate install step for HITL.
+- **`uv sync --frozen --no-dev --all-packages` is the production install
+  command** for both packages — no separate install step for HITL. The
+  `--all-packages` flag is non-optional; see the warning above.
 
 ### Why workspaces (not separate lockfiles)
 
@@ -116,6 +125,8 @@ Reproducible builds and dependency hygiene. The reasoning:
 ---
 
 ## Common operations
+
+> Note: the `uv sync --extra dev` commands below are for **dev-machine workflows**. Production installs always use `uv sync --frozen --no-dev --all-packages` via `deploy/install.sh` / `deploy/update.sh` — see § Production deployment below, and § Workspace structure for why `--all-packages` is mandatory.
 
 ### Bump a single dependency to a newer version
 
@@ -227,18 +238,21 @@ upstream's stated range. Use sparingly — it's a workaround, not a fix.
 ## Production deployment after a dep update
 
 The `deploy/install.sh` and `deploy/update.sh` scripts on the DB VM use
-`uv sync --frozen` by default — they install EXACTLY what `uv.lock` says,
-nothing more, nothing less. After committing a dep update locally and merging
-to main:
+`uv sync --frozen --all-packages` by default — they install EXACTLY what
+`uv.lock` says, nothing more, nothing less, and the `--all-packages` flag
+ensures the `hitl-middleware` workspace member is installed alongside the
+root `elephantbroker` project. After committing a dep update locally and
+merging to main:
 
 ```bash
 # On the DB VM
 sudo /opt/elephantbroker/deploy/update.sh
 ```
 
-This pulls the latest `pyproject.toml` + `uv.lock`, runs `uv sync --frozen`
-to install exactly the new lockfile, re-chowns the install tree, and restarts
-both systemd services.
+This pulls the latest `pyproject.toml` + `uv.lock`, runs
+`uv sync --frozen --no-dev --all-packages` to install exactly the new
+lockfile (both packages), re-chowns the install tree, and restarts both
+systemd services.
 
 If you want to upgrade dependencies on the DB VM directly (without a commit
 on dev first), use `--upgrade`:
@@ -348,8 +362,8 @@ local development on machines with multiple Python versions.
 | `pyproject.toml` | Direct dependency declarations + project metadata | Yes |
 | `uv.lock` | Full transitive lock with versions, hashes, sources | **Yes — always commit alongside pyproject.toml** |
 | `.venv/` | Local virtual environment built by `uv sync` | **No** (in .gitignore) |
-| `deploy/install.sh` | Production installer — runs `uv sync --frozen` | Yes |
-| `deploy/update.sh` | Production updater — runs `uv sync --frozen` | Yes |
+| `deploy/install.sh` | Production installer — runs `uv sync --frozen --no-dev --all-packages` | Yes |
+| `deploy/update.sh` | Production updater — runs `uv sync --frozen --no-dev --all-packages` | Yes |
 | `Dockerfile` | Dev/CI container — also uses `uv sync --frozen` | Yes |
 
 ---
