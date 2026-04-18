@@ -234,6 +234,28 @@ class TestAutonomyClassifier:
         assert classifier._last_tier == 0
         assert classifier._last_source == "uncategorized"
 
+    def test_classify_financial_credit_card_purchase(self):
+        """TD-56: natural-language purchase vocabulary classifies as financial."""
+        classifier = AutonomyClassifier()
+        action = GuardCheckInput(
+            action_type=GuardActionType.MESSAGE_SEND,
+            action_content="use my credit card to buy a macbook",
+        )
+        assert classifier.classify_domain(action) == "financial"
+        assert classifier._last_tier == 4
+        assert classifier._last_source == "keyword"
+
+    def test_classify_code_change_refactor_middleware(self):
+        """TD-56: refactor/middleware vocabulary classifies as code_change."""
+        classifier = AutonomyClassifier()
+        action = GuardCheckInput(
+            action_type=GuardActionType.MESSAGE_SEND,
+            action_content="refactor the authentication middleware",
+        )
+        assert classifier.classify_domain(action) == "code_change"
+        assert classifier._last_tier == 4
+        assert classifier._last_source == "keyword"
+
     def test_removed_keywords_do_not_trigger_domains(self):
         """ISSUE-20: 'chat', 'message', 'share' removed to avoid false positives."""
         classifier = AutonomyClassifier()

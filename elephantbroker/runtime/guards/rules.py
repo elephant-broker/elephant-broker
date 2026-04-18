@@ -115,7 +115,7 @@ class StaticRuleRegistry:
 
     @staticmethod
     def get_builtin_rules() -> list[StaticRule]:
-        """Return the 13 built-in guard rules."""
+        """Return the 16 built-in guard rules."""
         return [
             StaticRule(id="builtin_credential_keyword", pattern_type=StaticRulePatternType.KEYWORD,
                        pattern="api_key", outcome=GuardOutcome.WARN,
@@ -156,4 +156,16 @@ class StaticRuleRegistry:
             StaticRule(id="builtin_delete_production", pattern_type=StaticRulePatternType.PHRASE,
                        pattern="delete production", outcome=GuardOutcome.BLOCK,
                        description="Production deletion attempt"),
+            StaticRule(id="builtin_credit_card_purchase", pattern_type=StaticRulePatternType.REGEX,
+                       pattern=r"(?i)(buy|purchase|order|spend).{0,50}(credit card|debit card|my card|saved card)",
+                       outcome=GuardOutcome.REQUIRE_APPROVAL,
+                       description="Purchase using saved payment method"),
+            StaticRule(id="builtin_refactor_sensitive_subsystem", pattern_type=StaticRulePatternType.REGEX,
+                       pattern=r"(?i)(refactor|rewrite).{0,40}(auth|authentication|middleware|payment|billing|security)",
+                       outcome=GuardOutcome.REQUIRE_APPROVAL,
+                       description="Refactor sensitive production subsystem"),
+            StaticRule(id="builtin_prod_deploy_natural", pattern_type=StaticRulePatternType.REGEX,
+                       pattern=r"(?i)(deploy|ship|release).{0,20}(to prod|to production|live)",
+                       outcome=GuardOutcome.REQUIRE_APPROVAL,
+                       description="Production deployment"),
         ]

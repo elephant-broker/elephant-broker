@@ -48,10 +48,18 @@ _DEFAULT_TOOL_DOMAINS: dict[str, str] = {
 
 # Keyword→domain heuristics for Tier 1 classification
 _KEYWORD_DOMAINS: dict[str, list[str]] = {
-    "financial": ["payment", "transfer", "refund", "invoice", "billing", "charge", "cost", "budget", "price"],
+    "financial": [
+        "payment", "transfer", "refund", "invoice", "billing", "charge", "cost", "budget", "price",
+        "credit card", "debit card", "card", "buy", "purchase", "order", "spend", "subscribe",
+        "paypal", "venmo", "stripe", "checkout", "cart", "$",
+    ],
     "data_access": ["database", "query", "export", "download", "backup", "dump"],
     "communication": ["email", "notify", "announce", "slack"],
-    "code_change": ["deploy", "push", "merge", "release", "rollback", "commit"],
+    "code_change": [
+        "deploy", "push", "merge", "release", "rollback", "commit",
+        "refactor", "rewrite", "modify", "edit", "middleware", "endpoint",
+        "migration", "schema change", "production code",
+    ],
     "scope_change": ["scope", "requirements", "deadline", "priority", "redefine"],
     "resource": ["provision", "allocate", "scale", "instance", "cluster"],
     "info_share": ["publish", "broadcast", "distribute"],

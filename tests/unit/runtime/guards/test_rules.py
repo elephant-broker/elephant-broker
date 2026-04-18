@@ -22,7 +22,7 @@ class TestStaticRuleRegistry:
     def test_load_builtin_rules(self):
         reg = StaticRuleRegistry()
         reg.load_rules()
-        assert len(reg._rules) == 13  # 12 original + 1 credential keyword (Amendment 7.2)
+        assert len(reg._rules) == 16  # 13 original + 3 natural-language (TD-56)
 
     def test_keyword_match(self):
         reg = StaticRuleRegistry()
@@ -297,3 +297,30 @@ class TestStaticRuleRegistry:
         exfil_matches = [m for m in matches if m.rule.id == "builtin_exfiltrate"]
         assert len(exfil_matches) >= 1
         assert exfil_matches[0].rule.outcome == GuardOutcome.BLOCK
+
+    def test_builtin_credit_card_purchase_matches(self):
+        """TD-56: natural-language purchase using saved card triggers approval."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("buy this with my credit card"))
+        hits = [m for m in matches if m.rule.id == "builtin_credit_card_purchase"]
+        assert len(hits) >= 1
+        assert hits[0].rule.outcome == GuardOutcome.REQUIRE_APPROVAL
+
+    def test_builtin_refactor_sensitive_subsystem_matches(self):
+        """TD-56: refactor of sensitive subsystem triggers approval."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("refactor the auth middleware"))
+        hits = [m for m in matches if m.rule.id == "builtin_refactor_sensitive_subsystem"]
+        assert len(hits) >= 1
+        assert hits[0].rule.outcome == GuardOutcome.REQUIRE_APPROVAL
+
+    def test_builtin_prod_deploy_natural_matches(self):
+        """TD-56: natural-language production deploy triggers approval."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("deploy to production"))
+        hits = [m for m in matches if m.rule.id == "builtin_prod_deploy_natural"]
+        assert len(hits) >= 1
+        assert hits[0].rule.outcome == GuardOutcome.REQUIRE_APPROVAL
