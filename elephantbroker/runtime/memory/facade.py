@@ -50,6 +50,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         dataset_name: str = "elephantbroker",
         gateway_id: str = "",
         metrics=None,
+        ingest_buffer=None,
     ) -> None:
         self._graph = graph
         self._vector = vector
@@ -58,6 +59,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self._dataset_name = dataset_name
         self._gateway_id = gateway_id
         self._metrics = metrics
+        self._ingest_buffer = ingest_buffer
 
     @traced
     async def store(
@@ -386,6 +388,16 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
         except Exception as exc:
             logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
+
+        # Scrub from recent_facts extraction-context window (prevents LLM
+        # re-extraction of deleted fact — see Phase 4 TD #2)
+        if self._ingest_buffer is not None:
+            session_key = entity.get("session_key")
+            if session_key:
+                try:
+                    await self._ingest_buffer.scrub_fact_from_recent(session_key, str(fact_id))
+                except Exception as exc:
+                    logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
 
         await self._trace.append_event(
             TraceEvent(

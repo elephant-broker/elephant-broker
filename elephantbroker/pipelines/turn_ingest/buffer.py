@@ -80,3 +80,36 @@ class IngestBuffer:
         await self._redis.set(
             key, json.dumps(trimmed), ex=self._config.extraction_context_ttl_seconds,
         )
+
+    @traced
+    async def scrub_fact_from_recent(self, session_key: str, fact_id: str) -> int:
+        """Remove a fact entry from the recent_facts extraction-context window.
+
+        Called on GDPR delete. Without this, the deleted fact's text stays in
+        the extraction prompt's "PREVIOUSLY EXTRACTED FACTS" block and the LLM
+        may re-extract it as a new FactDataPoint within the TTL window.
+
+        Returns count of entries removed (0 if key missing or id not present).
+        """
+        key = self._keys.recent_facts(session_key) if self._keys else f"eb:recent_facts:{session_key}"
+        data = await self._redis.get(key)
+        if not data:
+            return 0
+        try:
+            entries = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            return 0
+        if not isinstance(entries, list):
+            return 0
+        target = str(fact_id)
+        filtered = [e for e in entries if not (isinstance(e, dict) and e.get("id") == target)]
+        removed = len(entries) - len(filtered)
+        if removed == 0:
+            return 0
+        if filtered:
+            await self._redis.set(
+                key, json.dumps(filtered), ex=self._config.extraction_context_ttl_seconds,
+            )
+        else:
+            await self._redis.delete(key)
+        return removed

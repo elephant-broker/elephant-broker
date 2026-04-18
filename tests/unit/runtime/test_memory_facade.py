@@ -598,6 +598,90 @@ class TestMemoryStoreFacadePhase4:
         await facade.delete(fact.id)  # Should not raise
         graph.delete_entity.assert_called_once()
 
+    # --- TF-ER-003 Tier A: recent_facts GDPR scrub on delete ---
+
+    def _make_with_buffer(self):
+        import json as _json
+
+        from elephantbroker.pipelines.turn_ingest.buffer import IngestBuffer
+        from elephantbroker.schemas.config import LLMConfig
+
+        class _FakeRedis:
+            def __init__(self):
+                self._kv: dict[str, str] = {}
+
+            async def get(self, key):
+                return self._kv.get(key)
+
+            async def set(self, key, value, ex=None):
+                self._kv[key] = value
+
+            async def delete(self, key):
+                self._kv.pop(key, None)
+
+        graph = AsyncMock()
+        vector = AsyncMock()
+        embeddings = AsyncMock()
+        embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+        ledger = TraceLedger()
+        redis = _FakeRedis()
+        buffer = IngestBuffer(redis=redis, config=LLMConfig(), redis_keys=None)
+        facade = MemoryStoreFacade(
+            graph, vector, embeddings, ledger, dataset_name="test_ds", ingest_buffer=buffer,
+        )
+        return facade, graph, vector, redis, _json
+
+    async def test_delete_scrubs_fact_from_recent_facts_buffer(self, monkeypatch, mock_add_data_points, mock_cognee):
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        buffer_key = "eb:recent_facts:sk:test"
+        redis._kv[buffer_key] = _json.dumps([
+            {"id": str(fact.id), "text": fact.text, "category": "general"},
+        ])
+        await facade.delete(fact.id)
+        # Key deleted when scrub empties the list
+        assert buffer_key not in redis._kv
+
+    async def test_delete_preserves_other_facts_in_buffer(self, monkeypatch, mock_add_data_points, mock_cognee):
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        other_1 = {"id": str(uuid.uuid4()), "text": "other one", "category": "general"}
+        other_2 = {"id": str(uuid.uuid4()), "text": "other two", "category": "general"}
+        target = {"id": str(fact.id), "text": fact.text, "category": "general"}
+        buffer_key = "eb:recent_facts:sk:test"
+        redis._kv[buffer_key] = _json.dumps([other_1, target, other_2])
+        await facade.delete(fact.id)
+        remaining = _json.loads(redis._kv[buffer_key])
+        ids = [e["id"] for e in remaining]
+        assert str(fact.id) not in ids
+        assert other_1["id"] in ids
+        assert other_2["id"] in ids
+        assert len(remaining) == 2
+
+    async def test_delete_idempotent_when_fact_not_in_buffer(self, monkeypatch, mock_add_data_points, mock_cognee):
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        # Buffer populated with unrelated facts only
+        unrelated = [
+            {"id": str(uuid.uuid4()), "text": "a", "category": "general"},
+            {"id": str(uuid.uuid4()), "text": "b", "category": "general"},
+        ]
+        buffer_key = "eb:recent_facts:sk:test"
+        redis._kv[buffer_key] = _json.dumps(unrelated)
+        await facade.delete(fact.id)  # Should not raise
+        # Buffer contents unchanged
+        assert _json.loads(redis._kv[buffer_key]) == unrelated
+        graph.delete_entity.assert_called_once()
+
     async def test_update_recomputes_token_size(self, monkeypatch, mock_add_data_points, mock_cognee):
         facade, graph, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)

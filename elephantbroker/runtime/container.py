@@ -300,6 +300,14 @@ class RuntimeContainer:
             metrics=c.metrics_ctx,
         )
 
+        # IngestBuffer (shared Redis client) — created here so it can be injected
+        # into MemoryStoreFacade for recent_facts GDPR scrub on delete.
+        if c.redis:
+            from elephantbroker.pipelines.turn_ingest.buffer import IngestBuffer
+            c.ingest_buffer = IngestBuffer(redis=c.redis, config=config.llm, redis_keys=c.redis_keys)
+        else:
+            c.ingest_buffer = None
+
         # --- OTEL tracing ---
         setup_tracing(config.infra, gw_id)
 
@@ -366,7 +374,7 @@ class RuntimeContainer:
         if _enabled(tier, "IMemoryStoreFacade"):
             c.memory_store = MemoryStoreFacade(
                 c.graph, c.vector, c.embeddings, c.trace_ledger, dataset_name=dataset_name,
-                gateway_id=gw_id, metrics=c.metrics_ctx,
+                gateway_id=gw_id, metrics=c.metrics_ctx, ingest_buffer=c.ingest_buffer,
             )
 
         if _enabled(tier, "IProcedureEngine"):
@@ -539,13 +547,6 @@ class RuntimeContainer:
             c.compaction_engine._llm = c.compaction_llm_client
         if c.guard_engine:
             c.guard_engine._llm = c.llm_client
-
-        # IngestBuffer with shared Redis client (resolves Phase 4 tech debt)
-        if c.redis:
-            from elephantbroker.pipelines.turn_ingest.buffer import IngestBuffer
-            c.ingest_buffer = IngestBuffer(redis=c.redis, config=config.llm, redis_keys=c.redis_keys)
-        else:
-            c.ingest_buffer = None
 
         # --- Phase 5: Session goals, refinement, audit (created before pipelines so they can be injected) ---
         c.session_goal_store = SessionGoalStore(
