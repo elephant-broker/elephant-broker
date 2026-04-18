@@ -188,6 +188,9 @@ export interface OCAssembleParams {
   sessionId: string;
   messages: AgentMessage[];
   tokenBudget: number;
+  /** User's clean query text, supplied by OpenClaw. Forwarded to the runtime
+   * as `query` so retrieval matches intent rather than the prompt envelope. */
+  prompt?: string;
 }
 
 export interface OCCompactParams {

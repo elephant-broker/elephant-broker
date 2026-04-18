@@ -145,7 +145,7 @@ export class ContextEngineImpl {
       session_key: this.currentSessionKey,
       messages: params.messages || [],
       profile_name: this.profileName,
-      query: "",
+      query: params.prompt || "",
       token_budget: params.tokenBudget,
       context_window_tokens: this.contextWindowTokens,
       goal_ids: undefined,

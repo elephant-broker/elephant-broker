@@ -162,6 +162,32 @@ describe("TestLifecycleMethods", () => {
     expect((result as Record<string, unknown>).estimated_tokens).toBeUndefined();
   });
 
+  // RC-A (TD-54): OpenClaw supplies the user's clean question as `params.prompt`;
+  // the engine must forward it to the runtime as `query` so retrieval matches
+  // user intent instead of the prompt envelope.
+  it("assemble forwards params.prompt to client.assemble as query", async () => {
+    engine.setSessionContext("sk", "sid");
+    await engine.assemble({
+      sessionId: "sid",
+      messages: [],
+      tokenBudget: 8000,
+      prompt: "What is the capital of France?",
+    });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "What is the capital of France?" }),
+    );
+  });
+
+  // Backward-compat: when OpenClaw omits `prompt`, query falls back to "" so
+  // callers pre-dating this field continue to work without TS errors.
+  it("assemble sends empty query when params.prompt is omitted", async () => {
+    engine.setSessionContext("sk", "sid");
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000 });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "" }),
+    );
+  });
+
   it("afterTurn flushes buffer first", async () => {
     engine.setSessionContext("sk", "sid");
     await engine.ingest({ sessionId: "sid", message: { role: "user", content: "buffered" } });
