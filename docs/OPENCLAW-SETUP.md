@@ -405,12 +405,13 @@ The plugin sends `POST /sessions/start` with:
 - `agent_id` — from `PluginHookAgentContext.agentId`
 - `agent_key` — `{gateway_id}:{agentId}`
 
-### Session Reset (`before_reset` hook)
+### Session Reset (via `session_end` + `session_start` hooks)
 
-On session reset:
+**OpenClaw does NOT have a `before_reset` hook** (see `local/IMPLEMENTATION-PLAN-Phase-4.md` §4.0.9). When the user issues `/new` or `/reset`, OpenClaw fires `session_end` for the closing session, immediately followed by `session_start` for the new one. Cleanup runs in the `session_end` handler:
+
 1. Old session's goals are flushed to Cognee graph (durable storage)
 2. Redis key `eb:{gateway_id}:session_goals:{session_key}:{old_session_id}` is deleted
-3. New session starts with empty goals
+3. New session starts (via `session_start`) with empty goals
 
 ### Session End (`session_end` hook)
 
