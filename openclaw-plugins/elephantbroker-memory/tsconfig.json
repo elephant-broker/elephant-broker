@@ -4,11 +4,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "outDir": "dist",
-    "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
     "declaration": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["index.ts", "src/**/*.ts", "tests/**/*.ts"]
 }

@@ -214,7 +214,7 @@ export class ElephantBrokerClient {
     description?: string;
     parent_goal_id?: string;
     success_criteria?: string[];
-  }): Promise<GoalState> {
+  }): Promise<GoalState | null> {
     return tracer.startActiveSpan("goals.createSession", { kind: SpanKind.CLIENT }, async (span) => {
       try {
         const params = new URLSearchParams({
@@ -231,6 +231,7 @@ export class ElephantBrokerClient {
             success_criteria: request.success_criteria || [],
           }),
         });
+        if (res.status === 409) return null; // Duplicate goal title in session
         if (!res.ok) throw new Error(`Create session goal failed: ${res.status}`);
         return (await res.json()) as GoalState;
       } finally {
