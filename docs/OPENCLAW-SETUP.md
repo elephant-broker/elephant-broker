@@ -8,28 +8,36 @@ This document describes the configuration changes required on the OpenClaw side 
 
 ### Directory Structure
 
-Both plugins use OpenClaw's flat extension layout — all `.ts` files at root. OpenClaw loads `.ts` files directly via `jiti` (no build step needed). A `src/` directory exists as a legacy copy; OpenClaw uses the root `.ts` files.
+Both plugins use a bundle-dist layout (PR #5, 2026-04-18): source lives in `src/`; esbuild bundles `index.ts` to `dist/index.js`, which is what OpenClaw loads. The root `index.ts` is a thin re-export (`export * from "./src/index.js"`) and the manifest's `entry` + `package.json`'s `openclaw.extensions` both point to `./dist/index.js`. A build step (`npm run build`) is required on the gateway.
 
 ```
 ~/.openclaw/extensions/
   elephantbroker-memory/
-    openclaw.plugin.json     # manifest with id, kind, configSchema
-    package.json             # must have "openclaw": { "extensions": ["./index.ts"] }
-    index.ts                 # entry point — register(api) function
-    client.ts                # HTTP client for ElephantBroker runtime API
-    format.ts                # memory context formatting
-    types.ts                 # TypeScript type definitions
-    tools/                   # 24 tool definitions
-      memory_search.ts
-      memory_get.ts
-      ...
+    openclaw.plugin.json     # manifest: "entry": "./dist/index.js"
+    package.json             # "openclaw": { "extensions": ["./dist/index.js"] }
+    index.ts                 # re-export: export * from "./src/index.js"
+    src/                     # source of truth — client, format, types, tools/
+      index.ts
+      client.ts
+      format.ts
+      types.ts
+      tools/                 # 24 tool definitions
+        memory_search.ts
+        memory_get.ts
+        ...
+    dist/                    # esbuild output (gitignored) — created by `npm run build`
+      index.js               # the bundle OpenClaw loads
   elephantbroker-context/
     openclaw.plugin.json
     package.json
     index.ts
-    client.ts
-    engine.ts
-    types.ts
+    src/
+      index.ts
+      client.ts
+      engine.ts
+      types.ts
+    dist/
+      index.js
 ```
 
 ### Installation Steps
@@ -46,17 +54,17 @@ the lockfiles committed in the repo.
 # Clone the repo on the gateway host
 git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbroker
 
-# Symlink plugins — OpenClaw loads .ts files directly via jiti (no build step)
+# Symlink plugins — OpenClaw loads the compiled bundle from dist/index.js
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies — `npm ci` reads the committed package-lock.json and
-# installs EXACTLY those versions. Errors out if the lockfile is missing or
-# out of sync with package.json. This is the npm equivalent of
-# `uv sync --frozen` on the DB VM and the only supported install command
-# for production gateways.
-cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
-cd ~/.openclaw/extensions/elephantbroker-context && npm ci
+# Install dependencies + build the bundle. `npm ci` reads the committed
+# package-lock.json and installs EXACTLY those versions (errors out if the
+# lockfile is missing or out of sync with package.json — the npm equivalent
+# of `uv sync --frozen`). `npm run build` then runs esbuild to produce
+# dist/index.js, which is what OpenClaw loads.
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci && npm run build
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci && npm run build
 ```
 
 > **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
@@ -67,8 +75,8 @@ cd ~/.openclaw/extensions/elephantbroker-context && npm ci
 > intentionally bumping a dep (and commit the regenerated lockfile).
 
 Symlinks make updates easy — `git pull` in `/opt/elephantbroker` updates both
-plugins. After pulling, re-run `npm ci` in each plugin directory to pick up
-any lockfile changes.
+plugins. After pulling, re-run `npm ci && npm run build` in each plugin
+directory to pick up any lockfile changes and regenerate `dist/index.js`.
 
 **2. Add to `~/.openclaw/openclaw.json`:**
 
@@ -124,11 +132,11 @@ openclaw gateway start         # should load without errors
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `plugin manifest not found: .../dist/openclaw.plugin.json` | `dist/` or `src/` subdirectories confuse the scanner | Delete `dist/` and `src/` — use flat layout with `.ts` at root |
+| `Cannot find module .../dist/index.js` | `npm run build` not run on the gateway after install/update | Run `npm ci && npm run build` in the plugin directory to regenerate `dist/index.js` |
 | `plugin manifest requires configSchema` | Missing `configSchema` in `openclaw.plugin.json` | Add `configSchema` JSON Schema object to manifest |
 | `plugin id mismatch` | Directory name doesn't match manifest `id` | Rename directory to match `id` field (e.g. `elephantbroker-memory`) |
-| `package.json missing openclaw.extensions` | Missing `openclaw` field in `package.json` | Add `"openclaw": { "extensions": ["./index.ts"] }` |
-| `Cannot find module './tools/memory_search.js'` | Source files missing from root | Ensure `tools/` directory and all `.ts` files are at plugin root, not inside `src/` |
+| `package.json missing openclaw.extensions` | Missing `openclaw` field in `package.json` | Add `"openclaw": { "extensions": ["./dist/index.js"] }` |
+| Stale plugin code runs after `git pull` | Forgot to rebuild the bundle | Re-run `npm run build` — OpenClaw loads the compiled `dist/index.js`, not source `.ts` |
 
 ### Tools Profile Requirement
 

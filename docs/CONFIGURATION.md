@@ -2168,7 +2168,7 @@ resolver picks `mistralai==1.12.4` automatically as a transitive of cognee.
 | `kind` | `memory` | Registers in OpenClaw's memory slot |
 | `name` | `ElephantBroker Memory` | Display name |
 | `version` | `0.1.0` | |
-| `entry` | `index.ts` | Loaded via `jiti` (no build step) |
+| `entry` | `dist/index.js` | Bundled via esbuild — requires `npm run build` on the gateway |
 | `configSchema` | JSON Schema object | 4 optional properties (see Section 3) |
 
 #### ContextEngine Plugin (`openclaw.plugin.json`)
@@ -2181,7 +2181,7 @@ resolver picks `mistralai==1.12.4` automatically as a transitive of cognee.
 | `kind` | `context-engine` | Registers in OpenClaw's contextEngine slot |
 | `name` | `ElephantBroker ContextEngine` | Display name |
 | `version` | `0.1.0` | |
-| `entry` | `index.ts` | |
+| `entry` | `dist/index.js` | Bundled via esbuild — requires `npm run build` on the gateway |
 | `configSchema` | JSON Schema object | Same 4 properties as memory plugin |
 
 #### Package Metadata (`package.json`)
@@ -2196,7 +2196,7 @@ Both plugins share identical `package.json` structure (except `name`):
   "type": "module",
   "main": "dist/index.js",
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./dist/index.js"]
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
@@ -2211,8 +2211,9 @@ Both plugins share identical `package.json` structure (except `name`):
 ```
 
 Critical fields:
-- `"openclaw": { "extensions": ["./index.ts"] }` -- required for OpenClaw extension discovery
+- `"openclaw": { "extensions": ["./dist/index.js"] }` -- required for OpenClaw extension discovery; the bundle is produced by `npm run build` (esbuild)
 - `"type": "module"` -- ESM imports with `.js` suffixes in source
+- Root `index.ts` is a thin re-export from `src/`; the source of truth lives under `src/`
 
 ---
 
@@ -2304,22 +2305,22 @@ Example `openclaw.json` config block:
 
 | Value | Location | Purpose |
 |-------|----------|---------|
-| `"agent:main:main"` | `index.ts:47` | Default `currentSessionKey` before `session_start` hook fires |
-| `crypto.randomUUID()` | `index.ts:48` | Initial `currentSessionId` (overwritten by `session_start`) |
-| `10` | `index.ts:115` | `max_results` for auto-recall search in `before_agent_start` hook |
-| `4` | `index.ts:133` (`messages.slice(-4)`) | Last N messages sent for ingest in `agent_end` hook |
+| `"agent:main:main"` | `src/index.ts` | Default `currentSessionKey` before `session_start` hook fires |
+| `crypto.randomUUID()` | `src/index.ts` | Initial `currentSessionId` (overwritten by `session_start`) |
+| `10` | `src/index.ts` | `max_results` for auto-recall search in `before_agent_start` hook |
+| `4` | `src/index.ts` (`messages.slice(-4)`) | Last N messages sent for ingest in `agent_end` hook |
 
 #### Memory Plugin (`client.ts`)
 
 | Value | Location | Purpose |
 |-------|----------|---------|
-| `"http://localhost:8420"` | `client.ts:38` | Constructor default for `baseUrl` |
-| `.substring(0, 8)` | `client.ts:46` | Default `gatewayShortName` derived from `gatewayId` |
-| `"session"` | `client.ts:333` | Default `scope` for procedure creation |
-| `5` | `client.ts:452` | Default `maxResults` for `searchArtifacts()` |
-| `5` | `client.ts:479` | Default `max_results` for `searchSessionArtifacts()` |
-| `"manual"` | `client.ts:519` | Default `tool_name` for `createArtifact()` |
-| `"session"` | `client.ts:520` | Default `scope` for `createArtifact()` |
+| `"http://localhost:8420"` | `src/client.ts` | Constructor default for `baseUrl` |
+| `.substring(0, 8)` | `src/client.ts` | Default `gatewayShortName` derived from `gatewayId` |
+| `"session"` | `src/client.ts` | Default `scope` for procedure creation |
+| `5` | `src/client.ts` | Default `maxResults` for `searchArtifacts()` |
+| `5` | `src/client.ts` | Default `max_results` for `searchSessionArtifacts()` |
+| `"manual"` | `src/client.ts` | Default `tool_name` for `createArtifact()` |
+| `"session"` | `src/client.ts` | Default `scope` for `createArtifact()` |
 
 #### Memory Plugin (tools)
 
@@ -2637,10 +2638,12 @@ ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory \
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context \
       ~/.openclaw/extensions/elephantbroker-context
 
-## 3. Install deps from the committed lockfile (npm ci, NOT npm install)
+## 3. Install deps + build the bundle (npm ci + npm run build; NOT npm install)
 ##    Requires Node 24+ — pinned via engines.node in each plugin's package.json
-cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
-cd ~/.openclaw/extensions/elephantbroker-context && npm ci
+##    `npm run build` produces dist/index.js via esbuild; OpenClaw loads that
+##    bundle (see openclaw.plugin.json entry + package.json openclaw.extensions).
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci && npm run build
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci && npm run build
 
 ## 4. Configure openclaw.json (see Section 3 for full example)
 

@@ -375,13 +375,12 @@ git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbr
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies — use `npm ci` (NOT `npm install`).
-# `npm ci` is the lockfile-driven install: it reads package-lock.json and
-# installs EXACTLY those versions, errors out if the lockfile is missing or
-# out of sync with package.json. This is the npm equivalent of
-# `uv sync --frozen` on the DB VM.
-cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
-cd ~/.openclaw/extensions/elephantbroker-context && npm ci
+# Install dependencies + build the bundle. Both plugins use a bundle-dist
+# layout — esbuild compiles `index.ts` to `dist/index.js`, and that file is
+# what OpenClaw loads. `npm ci` is the lockfile-driven install (the npm
+# equivalent of `uv sync --frozen`); `npm run build` produces the bundle.
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci && npm run build
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci && npm run build
 ```
 
 > **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
@@ -516,10 +515,12 @@ dependency upgrade workflow.
 cd /opt/elephantbroker
 git pull origin main
 
-# Re-install npm deps from the committed lockfile (use `npm ci`, NOT
-# `npm install`, so the install is reproducible — same as the DB VM).
-cd openclaw-plugins/elephantbroker-memory && npm ci
-cd ../elephantbroker-context && npm ci
+# Re-install npm deps from the committed lockfile and rebuild the bundles.
+# `npm ci` is lockfile-driven (reproducible); `npm run build` regenerates
+# `dist/index.js`, which is what OpenClaw loads. Skipping the build leaves
+# the old bundle in place — the `git pull` changes won't take effect.
+cd openclaw-plugins/elephantbroker-memory && npm ci && npm run build
+cd ../elephantbroker-context && npm ci && npm run build
 
 # Restart gateway to reload plugins
 openclaw gateway restart
