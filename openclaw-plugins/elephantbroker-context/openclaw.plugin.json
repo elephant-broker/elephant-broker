@@ -4,7 +4,7 @@
   "name": "ElephantBroker ContextEngine",
   "version": "0.1.0",
   "description": "ElephantBroker ContextEngine Plugin — assembly, compaction, subagent lifecycle",
-  "entry": "index.ts",
+  "entry": "./dist/index.js",
   "configSchema": {
     "type": "object",
     "properties": {
