@@ -162,32 +162,6 @@ describe("TestLifecycleMethods", () => {
     expect((result as Record<string, unknown>).estimated_tokens).toBeUndefined();
   });
 
-  // RC-A (TD-54): OpenClaw supplies the user's clean question as `params.prompt`;
-  // the engine must forward it to the runtime as `query` so retrieval matches
-  // user intent instead of the prompt envelope.
-  it("assemble forwards params.prompt to client.assemble as query", async () => {
-    engine.setSessionContext("sk", "sid");
-    await engine.assemble({
-      sessionId: "sid",
-      messages: [],
-      tokenBudget: 8000,
-      prompt: "What is the capital of France?",
-    });
-    expect(client.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ query: "What is the capital of France?" }),
-    );
-  });
-
-  // Backward-compat: when OpenClaw omits `prompt`, query falls back to "" so
-  // callers pre-dating this field continue to work without TS errors.
-  it("assemble sends empty query when params.prompt is omitted", async () => {
-    engine.setSessionContext("sk", "sid");
-    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000 });
-    expect(client.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ query: "" }),
-    );
-  });
-
   it("afterTurn flushes buffer first", async () => {
     engine.setSessionContext("sk", "sid");
     await engine.ingest({ sessionId: "sid", message: { role: "user", content: "buffered" } });
@@ -441,5 +415,49 @@ describe("TestSessionIdentity", () => {
     engine.onLlmInput({ provider: "openai", model: "gpt-4", context_window_tokens: 128000 });
     engine.onLlmInput({ provider: "openai", model: "gpt-4", context_window_tokens: 128000 });
     expect(client.reportContextWindow).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- TestStripOpenClawEnvelope ---
+// RC-A (TD-54): OpenClaw wraps params.prompt in a sender-metadata envelope.
+// Retrieval needs the user's raw text, not the envelope. assemble() must
+// strip the envelope before forwarding to the runtime as `query`.
+
+describe("stripOpenClawEnvelope", () => {
+  let client: ContextEngineClient;
+  let engine: ContextEngineImpl;
+
+  beforeEach(() => {
+    client = createMockClient();
+    engine = new ContextEngineImpl(client);
+    engine.setSessionContext("sk", "sid");
+  });
+
+  it("extracts user text from an OpenClaw envelope", async () => {
+    const envelope =
+      "Sender (untrusted metadata):\n" +
+      "```json\n" +
+      "{\"label\":\"cli\"}\n" +
+      "```\n" +
+      "\n" +
+      "[Sat 2026-04-18 15:30 UTC] what is X?";
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000, prompt: envelope });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "what is X?" }),
+    );
+  });
+
+  it("passes through plain text prompts unchanged", async () => {
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000, prompt: "what is X?" });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "what is X?" }),
+    );
+  });
+
+  it("handles empty prompt as empty query", async () => {
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000 });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "" }),
+    );
   });
 });

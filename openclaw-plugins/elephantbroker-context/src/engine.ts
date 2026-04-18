@@ -35,6 +35,27 @@ export interface ContextEngineOptions {
   gatewayId?: string;
 }
 
+/**
+ * OpenClaw wraps user messages in a sender-metadata envelope before forwarding
+ * to the context engine via `params.prompt`:
+ *
+ *   Sender (untrusted metadata):
+ *   ```json
+ *   {...}
+ *   ```
+ *
+ *   [YYYY-MM-DD HH:MM UTC] <user's actual text>
+ *
+ * Retrieval needs just the user's text, not the envelope. Extract the portion
+ * after the last `\n[<timestamp>] ` marker. If the pattern doesn't match
+ * (non-enveloped prompt), return the input trimmed.
+ */
+export function stripOpenClawEnvelope(prompt: string): string {
+  if (!prompt) return "";
+  const match = prompt.match(/\n\[[^\]]+\]\s+([\s\S]+)$/);
+  return match ? match[1].trim() : prompt.trim();
+}
+
 export class ContextEngineImpl {
   readonly info = {
     id: "elephantbroker-context",
@@ -145,7 +166,7 @@ export class ContextEngineImpl {
       session_key: this.currentSessionKey,
       messages: params.messages || [],
       profile_name: this.profileName,
-      query: params.prompt || "",
+      query: stripOpenClawEnvelope(params.prompt ?? ""),
       token_budget: params.tokenBudget,
       context_window_tokens: this.contextWindowTokens,
       goal_ids: undefined,
