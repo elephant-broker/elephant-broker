@@ -407,7 +407,7 @@ The plugin sends `POST /sessions/start` with:
 
 ### Session Reset (via `session_end` + `session_start` hooks)
 
-**OpenClaw does NOT have a `before_reset` hook** (see `local/IMPLEMENTATION-PLAN-Phase-4.md` §4.0.9). When the user issues `/new` or `/reset`, OpenClaw fires `session_end` for the closing session, immediately followed by `session_start` for the new one. Cleanup runs in the `session_end` handler:
+When the user issues `/new` or `/reset`, OpenClaw fires `session_end` for the closing session, immediately followed by `session_start` for the new one. Cleanup runs in the `session_end` handler. OpenClaw v2026.4.15+ also exposes a `before_reset` hook for plugins that need a pre-reset cleanup point (verified in `dist/plugin-sdk/src/plugins/hook-types.d.ts:12`), but EB plugins do not currently register it — `session_end` is sufficient for our needs.
 
 1. Old session's goals are flushed to Cognee graph (durable storage)
 2. Redis key `eb:{gateway_id}:session_goals:{session_key}:{old_session_id}` is deleted
