@@ -171,6 +171,27 @@ export class ContextEngineImpl {
       context_window_tokens: this.contextWindowTokens,
       goal_ids: undefined,
     });
+    // [DIAG-55-C] tool_use/tool_result pair audit — TD-55 hypothesis test
+    try {
+      const perMsg: Array<{ i: number; role: string; tool_use?: string[]; tool_result_for?: string[] }> = [];
+      const allToolUseIds = new Set<string>();
+      const allToolResultRefs = new Set<string>();
+      (result.messages || []).forEach((m: any, i: number) => {
+        const entry: { i: number; role: string; tool_use?: string[]; tool_result_for?: string[] } = { i, role: m.role };
+        if (Array.isArray(m.content)) {
+          const tu: string[] = m.content.filter((b: any) => b?.type === "tool_use").map((b: any) => b.id).filter(Boolean);
+          const tr: string[] = m.content.filter((b: any) => b?.type === "tool_result").map((b: any) => b.tool_use_id).filter(Boolean);
+          if (tu.length) { entry.tool_use = tu; if (m.role === "assistant") tu.forEach(id => allToolUseIds.add(id)); }
+          if (tr.length) { entry.tool_result_for = tr; tr.forEach(id => allToolResultRefs.add(id)); }
+        }
+        perMsg.push(entry);
+      });
+      const orphanToolUses = [...allToolUseIds].filter(id => !allToolResultRefs.has(id));
+      const orphanToolResults = [...allToolResultRefs].filter(id => !allToolUseIds.has(id));
+      console.error(`[DIAG-55-C] session_id=${this.currentSessionId} session_key=${this.currentSessionKey} params_msgs=${(params.messages || []).length} result_msgs=${result.messages.length} orphan_tool_uses=${JSON.stringify(orphanToolUses)} orphan_tool_results=${JSON.stringify(orphanToolResults)} per_msg=${JSON.stringify(perMsg)}`);
+    } catch (diagErr) {
+      console.error(`[DIAG-55-C] audit_failed err=${diagErr}`);
+    }
     // Map snake_case response to camelCase for OpenClaw
     return {
       messages: result.messages,
