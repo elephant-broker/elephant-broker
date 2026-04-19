@@ -165,7 +165,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
 
         # Post-retrieval isolation filter
         filtered = list(best.values())
-        if policy.isolation_scope == IsolationScope.SESSION_KEY and session_key:
+        if policy.isolation_scope == IsolationScope.SESSION_KEY and session_key and not auto_recall:
             filtered = [c for c in filtered if c.fact.session_key == session_key or c.fact.session_key is None]
         elif policy.isolation_scope == IsolationScope.ACTOR and actor_id:
             filtered = [c for c in filtered
