@@ -24,7 +24,7 @@ from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 from elephantbroker.runtime.metrics import (
     MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
-    inc_gdpr_delete, inc_store,
+    inc_gdpr_delete, inc_recent_facts_scrubbed, inc_store,
 )
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
@@ -529,14 +529,25 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             )
 
         # Scrub from recent_facts extraction-context window (prevents LLM
-        # re-extraction of deleted fact — see Phase 4 TD #2)
+        # re-extraction of deleted fact — see Phase 4 TD #2). Outcome is
+        # reported via eb_recent_facts_scrubbed_total (status=scrubbed|noop|
+        # failure) so dashboards can alert on scrub regressions — the merge
+        # report's TF-ER-003 flow-result claim depends on this metric.
         if self._ingest_buffer is not None:
             session_key = entity.get("session_key")
             if session_key:
                 try:
-                    await self._ingest_buffer.scrub_fact_from_recent(session_key, str(fact_id))
+                    removed = await self._ingest_buffer.scrub_fact_from_recent(
+                        session_key, str(fact_id),
+                    )
+                    scrub_status = "scrubbed" if removed else "noop"
                 except Exception as exc:
                     logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
+                    scrub_status = "failure"
+                if self._metrics:
+                    self._metrics.inc_recent_facts_scrubbed(scrub_status)
+                else:
+                    inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
 
         await self._trace.append_event(
             TraceEvent(

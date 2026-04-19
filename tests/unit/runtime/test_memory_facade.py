@@ -692,6 +692,75 @@ class TestMemoryStoreFacadePhase4:
         assert result.token_size is not None
         assert result.token_size > 0
 
+    # --- eb_recent_facts_scrubbed_total metric (PR #5 TODOs 5-501, 5-602) ---
+    # The merge report's TF-ER-003 flow-result line claims this metric
+    # increments on every /memory/{id} delete that reaches the scrub path.
+    # The three tests below pin the three status labels exhaustively so a
+    # future regression on any branch (scrub hit / scrub no-op / Redis
+    # error) fires a test.
+
+    async def test_delete_scrub_success_increments_scrubbed_metric(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        from unittest.mock import MagicMock
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        redis._kv["eb:recent_facts:sk:test"] = _json.dumps([
+            {"id": str(fact.id), "text": fact.text, "category": "general"},
+        ])
+        await facade.delete(fact.id)
+        metrics.inc_recent_facts_scrubbed.assert_called_once_with("scrubbed")
+
+    async def test_delete_scrub_noop_increments_noop_metric(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Fact was never buffered (expired TTL, different session) → noop."""
+        from unittest.mock import MagicMock
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        # recent_facts key exists but contains only unrelated entries.
+        redis._kv["eb:recent_facts:sk:test"] = _json.dumps([
+            {"id": str(uuid.uuid4()), "text": "other", "category": "general"},
+        ])
+        await facade.delete(fact.id)
+        metrics.inc_recent_facts_scrubbed.assert_called_once_with("noop")
+
+    async def test_delete_scrub_failure_increments_failure_metric(
+        self, monkeypatch, mock_add_data_points, mock_cognee, caplog,
+    ):
+        """Redis raises during scrub → failure label, warning logged, delete
+        continues (does not propagate the exception)."""
+        from unittest.mock import MagicMock
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        # Monkey-patch the buffer's scrub to raise.
+        async def _boom(session_key, fact_id):
+            raise RuntimeError("redis down")
+        facade._ingest_buffer.scrub_fact_from_recent = _boom
+        with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
+            await facade.delete(fact.id)  # Must not raise.
+        metrics.inc_recent_facts_scrubbed.assert_called_once_with("failure")
+        assert any(
+            "recent_facts scrub failed" in rec.message and str(fact.id) in rec.message
+            for rec in caplog.records
+        ), "failure branch must still emit the WARNING log"
+        graph.delete_entity.assert_called_once()
+
     # --- TD-50 regression: cognee_data_id capture + cascade-on-update ---
 
     async def test_store_captures_cognee_data_id(self, monkeypatch, mock_add_data_points, mock_cognee):

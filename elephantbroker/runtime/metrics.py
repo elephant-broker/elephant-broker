@@ -37,6 +37,11 @@ try:
         "Times cognee.add() returned a shape the facade could not extract a data_id from — the fact is stored with cognee_data_id=None and the TD-50 delete cascade will skip Cognee cleanup",
         ["gateway_id", "operation"],
     )
+    eb_recent_facts_scrubbed_total = Counter(
+        "eb_recent_facts_scrubbed_total",
+        "recent_facts GDPR buffer scrub outcomes on delete (TF-ER-003 Tier A). status=scrubbed when the deleted fact was removed from the extraction-context window, noop when the fact was not present, failure when Redis raised.",
+        ["gateway_id", "status"],
+    )
 
     # Phase 5 metrics
     eb_working_set_builds_total = Counter("eb_working_set_builds_total", "Working set builds", ["gateway_id", "profile_name", "status"])
@@ -245,6 +250,13 @@ def inc_cognee_capture_failure(operation: str, gateway_id: str = "") -> None:
         ).inc()
 
 
+def inc_recent_facts_scrubbed(status: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_recent_facts_scrubbed_total.labels(
+            gateway_id=gateway_id, status=status,
+        ).inc()
+
+
 # --- Phase 5 safe helpers ---
 
 def inc_working_set_build(profile_name: str, status: str = "ok", gateway_id: str = "") -> None:
@@ -328,6 +340,9 @@ class MetricsContext:
 
     def inc_cognee_capture_failure(self, operation: str) -> None:
         inc_cognee_capture_failure(operation, gateway_id=self._gw)
+
+    def inc_recent_facts_scrubbed(self, status: str) -> None:
+        inc_recent_facts_scrubbed(status, gateway_id=self._gw)
 
     def inc_working_set_build(self, profile_name: str, status: str = "ok") -> None:
         inc_working_set_build(profile_name, status, gateway_id=self._gw)
