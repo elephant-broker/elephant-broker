@@ -97,14 +97,13 @@ class TestGatewayIsolationIntegration:
 
 @pytest.mark.integration
 class TestCrossSessionRetrieval:
-    """Facts stored in session A should be retrievable in session B.
+    """Verify cross-session fact visibility via the EXPLICIT memory_search path.
 
-    NOTE: this class covers the explicit `memory_facade.search()` path,
-    which does NOT apply the `RetrievalOrchestrator` post-retrieval
-    SESSION_KEY isolation filter. The auto-recall companion — which
-    exercises the `retrieve_candidates(auto_recall=True)` path affected
-    by TD-60 + TD-61 — lives at
-    ``tests/integration/runtime/test_memory_facade.py::TestMemoryStoreFacadeIntegration::test_store_fact_then_auto_recall_returns_it``.
+    NOTE: This class tests the explicit-search path. The auto-recall companion
+    (cross-session via before_agent_start → orchestrator → prependContext) lives
+    at tests/integration/runtime/test_memory_facade.py::test_store_fact_then_auto_recall_returns_it
+    (added in TD-50 Phase 4 follow-up commit ab5bec1). The two together cover
+    both retrieval surfaces.
     """
 
     async def test_fact_visible_across_sessions(self, memory_facade):
