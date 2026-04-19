@@ -1,15 +1,12 @@
 """Neo4j graph adapter — wraps the Neo4j async driver directly."""
 from __future__ import annotations
 
-import logging  # [DIAG-50-D]
 from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from pydantic import BaseModel
 
 from elephantbroker.schemas.config import CogneeConfig
-
-logger = logging.getLogger("elephantbroker.graph")  # [DIAG-50-D]
 
 
 class SubgraphResult(BaseModel):
@@ -179,19 +176,7 @@ class GraphAdapter:
         cypher = "MATCH (n {eb_id: $entity_id}) DETACH DELETE n"
 
         async with driver.session() as session:
-            result = await session.run(cypher, entity_id=entity_id)
-            try:
-                summary = await result.consume()
-                counters = summary.counters
-                logger.info(
-                    "[DIAG-50-D] graph_delete_entity id=%s nodes_deleted=%d rels_deleted=%d",
-                    entity_id,
-                    getattr(counters, "nodes_deleted", -1),
-                    getattr(counters, "relationships_deleted", -1),
-                )
-            except Exception as diag_exc:
-                logger.info("[DIAG-50-D] graph_delete_entity id=%s summary_failed err=%r",
-                            entity_id, diag_exc)
+            await session.run(cypher, entity_id=entity_id)
 
     async def query_cypher(
         self,
