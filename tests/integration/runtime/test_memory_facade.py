@@ -23,6 +23,34 @@ class TestMemoryStoreFacadeIntegration:
         assert len(results) >= 1
         assert any("Paris" in r.text for r in results)
 
+    async def test_store_fact_then_auto_recall_returns_it(self, memory_facade, retrieval_orchestrator):
+        # TD-60 + TD-61 regression guard: a fact stored under session-A must
+        # surface when the orchestrator runs under session-B with
+        # auto_recall=True. Pre-TD-61 the post-retrieval SESSION_KEY
+        # isolation filter silently dropped all cross-session vector hits
+        # regardless of auto_recall, breaking before_agent_start recall.
+        # Exercises retrieve_candidates directly — memory_facade.search uses
+        # a different code path that does not apply the isolation filter.
+        fact = make_fact_assertion(
+            text="Project codename PELICAN uses TypeScript on the frontend",
+            scope=Scope.SESSION,
+            session_key="session-A",
+        )
+        await memory_facade.store(fact)
+
+        candidates = await retrieval_orchestrator.retrieve_candidates(
+            query="PELICAN project frontend TypeScript",
+            session_key="session-B",
+            auto_recall=True,
+        )
+
+        fact_ids = [str(c.fact.id) for c in candidates]
+        assert str(fact.id) in fact_ids, (
+            f"Fact {fact.id} stored under session-A should surface under "
+            f"session-B with auto_recall=True; got {len(candidates)} "
+            f"candidates: {fact_ids}"
+        )
+
     async def test_promote_updates_scope_in_graph(self, memory_facade):
         fact = make_fact_assertion(scope=Scope.SESSION)
         await memory_facade.store(fact)
