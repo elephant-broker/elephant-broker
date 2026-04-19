@@ -108,7 +108,7 @@ class TestMemoryRoutes:
         container.memory_store.update = AsyncMock(return_value=fact)
         r = await client.patch(
             f"/memory/{fact.id}",
-            json={"updates": {"text": "updated text"}},
+            json={"text": "updated text"},
         )
         assert r.status_code == 200
         assert r.json()["text"] == "updated text"
@@ -117,7 +117,7 @@ class TestMemoryRoutes:
         container.memory_store.update = AsyncMock(side_effect=KeyError("not found"))
         r = await client.patch(
             f"/memory/{uuid.uuid4()}",
-            json={"updates": {"text": "nope"}},
+            json={"text": "nope"},
         )
         assert r.status_code == 404
 
@@ -179,6 +179,78 @@ class TestMemoryRoutes:
             json={"text": "anything"},
         )
         assert r.status_code == 422
+
+    # --- TODO-5-610: PATCH mass-assignment whitelist (extra="forbid") ---
+    # UpdateFactRequest declares an explicit whitelist of user-updatable
+    # fields. Pydantic rejects (a) internal/scoring fields like
+    # `use_count` / `freshness_score`, (b) immutable identity fields like
+    # `gateway_id`, and (c) typos/unknown keys — all with 422 at the
+    # FastAPI validation boundary, before the facade is called. This
+    # closes the mass-assignment hole where the facade setattr loop only
+    # blocked 4 fields and silently accepted everything else.
+
+    async def test_patch_whitelisted_field_allowed(self, client, container):
+        """Whitelisted user-facing field (confidence) passes validation
+        and reaches the facade. `extra="forbid"` must not reject legal
+        fields from the 11-field whitelist."""
+        captured: dict = {}
+
+        async def capture_update(fact_id, updates, *, caller_gateway_id=""):
+            captured.update(updates)
+            return FactAssertion(text="ok", confidence=0.42)
+
+        container.memory_store.update = AsyncMock(side_effect=capture_update)
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"confidence": 0.42},
+        )
+        assert r.status_code == 200
+        assert captured == {"confidence": 0.42}
+
+    async def test_patch_rejects_internal_scoring_field(self, client, container):
+        """Caller attempts to spoof `use_count` (internal scoring
+        counter) — the exact mass-assignment attack TODO-5-610 was
+        opened for. Must return 422 at the schema layer, NOT reach the
+        facade."""
+        container.memory_store.update = AsyncMock(
+            side_effect=AssertionError("facade must not be called"),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"use_count": 999},
+        )
+        assert r.status_code == 422
+        container.memory_store.update.assert_not_called()
+
+    async def test_patch_rejects_immutable_gateway_id(self, client, container):
+        """Caller attempts to rewrite `gateway_id` (tenant-isolation
+        boundary). The setattr loop blocks this defense-in-depth, but
+        the schema should reject it earlier with 422 since it's not in
+        the whitelist."""
+        container.memory_store.update = AsyncMock(
+            side_effect=AssertionError("facade must not be called"),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"gateway_id": "attacker-tenant"},
+        )
+        assert r.status_code == 422
+        container.memory_store.update.assert_not_called()
+
+    async def test_patch_rejects_unknown_field(self, client, container):
+        """Typo / unknown field (txet instead of text) must 422 rather
+        than silently no-op. Old `body: dict` + setattr `hasattr()`
+        check would drop the update without signal; the new schema
+        makes the error loud."""
+        container.memory_store.update = AsyncMock(
+            side_effect=AssertionError("facade must not be called"),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"txet": "typo"},
+        )
+        assert r.status_code == 422
+        container.memory_store.update.assert_not_called()
 
     async def test_promote_class(self, client, container):
         fact = FactAssertion(text="promoted", memory_class=MemoryClass.SEMANTIC)
