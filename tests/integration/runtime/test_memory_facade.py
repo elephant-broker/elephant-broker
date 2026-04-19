@@ -31,6 +31,17 @@ class TestMemoryStoreFacadeIntegration:
         # regardless of auto_recall, breaking before_agent_start recall.
         # Exercises retrieve_candidates directly — memory_facade.search uses
         # a different code path that does not apply the isolation filter.
+        #
+        # TODO 5-405 alignment: both fixtures now share dataset_name
+        # "test_integration". Pre-fix the orchestrator defaulted to
+        # "elephantbroker" while MemoryStoreFacade stored into
+        # "test_integration", so every Cognee-backed source (keyword/graph/
+        # artifact) silently pointed at an empty dataset and returned zero
+        # hits. The test still passed because the structural Cypher path
+        # and the direct-Qdrant vector fallback do not depend on
+        # dataset_name — so the regression guard only validated those two
+        # paths. With the fixtures aligned, Cognee-backed sources now
+        # target the correct dataset.
         fact = make_fact_assertion(
             text="Project codename PELICAN uses TypeScript on the frontend",
             scope=Scope.SESSION,
@@ -49,6 +60,24 @@ class TestMemoryStoreFacadeIntegration:
             f"Fact {fact.id} stored under session-A should surface under "
             f"session-B with auto_recall=True; got {len(candidates)} "
             f"candidates: {fact_ids}"
+        )
+
+        # TODO 5-405: cross-source coverage check. The previous test only
+        # validated surfacing via the structural Cypher path. Post-fix we
+        # require at least one non-structural source to also produce
+        # candidates — proving retrieval is exercising more than the
+        # Cypher fallback. Accepts any Cognee-backed source ("keyword",
+        # "graph", "artifact") or the vector path ("vector"); direct-
+        # Qdrant fallback is also labeled "vector" and is a valid signal
+        # that vector retrieval is actually running end-to-end.
+        non_structural_sources = {c.source for c in candidates if c.source != "structural"}
+        assert non_structural_sources, (
+            f"Retrieval produced only structural candidates "
+            f"({len(candidates)} total). Pre-5-405 the dataset_name "
+            f"mismatch caused every Cognee-backed source to return empty; "
+            f"post-fix at least one of keyword/graph/artifact/vector must "
+            f"surface results. Candidate sources: "
+            f"{sorted({c.source for c in candidates})}"
         )
 
     async def test_promote_updates_scope_in_graph(self, memory_facade):
