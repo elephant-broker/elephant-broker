@@ -50,6 +50,7 @@ class FactDataPoint(DataPoint):
     decision_domain: str | None = None
     archived: bool = False
     autorecall_blacklisted: bool = False
+    cognee_data_id: str | None = None
     metadata: dict[str, Any] = {"index_fields": ["text"]}
 
     @classmethod
@@ -78,6 +79,7 @@ class FactDataPoint(DataPoint):
             decision_domain=getattr(fact, "decision_domain", None),
             archived=getattr(fact, "archived", False),
             autorecall_blacklisted=getattr(fact, "autorecall_blacklisted", False),
+            cognee_data_id=str(fact.cognee_data_id) if getattr(fact, "cognee_data_id", None) else None,
         )
 
     def to_schema(self) -> FactAssertion:
@@ -104,6 +106,7 @@ class FactDataPoint(DataPoint):
             decision_domain=self.decision_domain,
             archived=self.archived,
             autorecall_blacklisted=self.autorecall_blacklisted,
+            cognee_data_id=uuid.UUID(self.cognee_data_id) if self.cognee_data_id else None,
         )
 
 

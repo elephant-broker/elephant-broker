@@ -126,6 +126,20 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             fact.id, type(cognee_add_result).__name__, cognee_add_result,
         )
 
+        # Capture cognee data_id for future delete cascade (TD-50).
+        # Probe B10 confirmed: cognee_add_result.data_ingestion_info[0]['data_id']
+        # yields a UUID. Persist onto FactDataPoint so delete() can cascade.
+        try:
+            captured_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+            fact.cognee_data_id = captured_data_id
+            dp.cognee_data_id = str(captured_data_id)
+            await add_data_points([dp])
+        except (AttributeError, IndexError, KeyError, TypeError) as exc:
+            logger.warning(
+                "Could not capture cognee_data_id for fact %s (delete cascade will skip cognee cleanup): %s",
+                fact.id, exc,
+            )
+
         # Graph edges (best-effort)
         edges_created = 0
         if fact.source_actor_id:
@@ -418,6 +432,50 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
         except Exception as exc:
             logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
+
+        # Cascade Cognee-owned artifacts (TD-50).
+        # Probe B10 confirmed: cognee.datasets.delete_data(dataset_id, data_id,
+        # mode="soft", delete_dataset_if_empty=False) removes Neo4j chunks/
+        # documents/summaries, Qdrant points across 3 collections, SQLite data/
+        # dataset_data/nodes/edges rows, and the .data_storage/<hash>.txt file.
+        cognee_data_id = entity.get("cognee_data_id") if isinstance(entity, dict) else None
+        if cognee_data_id:
+            try:
+                from uuid import UUID
+                from cognee.modules.data.methods import get_datasets_by_name
+                from cognee.modules.users.methods import get_default_user
+                user = await get_default_user()
+                datasets = await get_datasets_by_name([self._dataset_name], user.id)
+                if datasets:
+                    dataset_id = datasets[0].id
+                    data_id_uuid = UUID(str(cognee_data_id))
+                    result = await cognee.datasets.delete_data(
+                        dataset_id=dataset_id,
+                        data_id=data_id_uuid,
+                        mode="soft",
+                        delete_dataset_if_empty=False,
+                    )
+                    logger.info(
+                        "TD-50 cascade complete: fact_id=%s data_id=%s cognee_result=%r",
+                        fact_id, cognee_data_id, result,
+                    )
+                else:
+                    logger.warning(
+                        "TD-50 cascade skipped: dataset %s not found for fact %s",
+                        self._dataset_name, fact_id,
+                    )
+            except Exception as exc:
+                # Log but don't fail the EB-layer delete — partial cleanup
+                # is better than rollback since graph + vector are already gone.
+                logger.warning(
+                    "TD-50 cascade failed (EB-layer delete already succeeded): fact_id=%s err=%r",
+                    fact_id, exc,
+                )
+        else:
+            logger.info(
+                "TD-50 cascade skipped: fact %s has no cognee_data_id (pre-TD-50 fact)",
+                fact_id,
+            )
 
         # Scrub from recent_facts extraction-context window (prevents LLM
         # re-extraction of deleted fact — see Phase 4 TD #2)

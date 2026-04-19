@@ -66,6 +66,7 @@ class FactAssertion(BaseModel):
     decision_domain: str | None = None
     archived: bool = False
     autorecall_blacklisted: bool = False
+    cognee_data_id: uuid.UUID | None = None
 
 
 class FactConflict(BaseModel):
