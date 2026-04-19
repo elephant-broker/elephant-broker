@@ -430,6 +430,40 @@ class _FakeRedis:
         self._ttls.pop(key, None)
         return 1 if existed else 0
 
+    async def eval(self, script, numkeys, *keys_and_args):
+        """Minimal Lua eval emulation for _SCRUB_LUA.
+
+        Redis Lua executes atomically server-side. The Python GIL gives this
+        mock the same property for simple reentrancy — the whole body runs
+        without yielding control to another coroutine awaiting eval() on the
+        same key, which is what 5-101's "no lost-update" guarantee hinges on.
+        The script is identified by signature rather than parsed.
+        """
+        assert "tostring(e.id) == ARGV[1]" in script, "only _SCRUB_LUA is emulated"
+        key = keys_and_args[0]
+        target = keys_and_args[1]
+        ttl = int(keys_and_args[2])
+        data = self._kv.get(key)
+        if not data:
+            return 0
+        try:
+            entries = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            return 0
+        if not isinstance(entries, list):
+            return 0
+        filtered = [e for e in entries if not (isinstance(e, dict) and str(e.get("id")) == target)]
+        removed = len(entries) - len(filtered)
+        if removed == 0:
+            return 0
+        if filtered:
+            self._kv[key] = json.dumps(filtered)
+            self._ttls[key] = ttl
+        else:
+            self._kv.pop(key, None)
+            self._ttls.pop(key, None)
+        return removed
+
 
 class _FakePipeline:
     def __init__(self, redis: _FakeRedis):
@@ -634,6 +668,113 @@ class TestIngestBuffer:
         assert "eb::ingest_buffer:sk:test" in redis._data
         # The legacy hardcoded fallback format must NOT be present anywhere.
         assert "eb:ingest_buffer:sk:test" not in redis._data
+
+
+# ---------------------------------------------------------------------------
+# TODO 5-101: scrub_fact_from_recent is atomic (Lua eval). The previous
+# read-modify-write pattern could drop concurrent scrubs' results.
+# ---------------------------------------------------------------------------
+
+
+class TestIngestBufferAtomicScrub:
+    def _make_config(self, **overrides):
+        defaults = {
+            "ingest_batch_size": 10,
+            "ingest_buffer_ttl_seconds": 300,
+            "ingest_batch_timeout_seconds": 60.0,
+            "extraction_context_ttl_seconds": 3600,
+        }
+        defaults.update(overrides)
+        return LLMConfig(**defaults)
+
+    async def test_scrub_uses_redis_eval_not_get_set(self):
+        """5-101: scrub_fact_from_recent must route through redis.eval (Lua),
+        not a GET→SET RMW. Regression guard so the atomic path doesn't get
+        reverted to the lost-update pattern."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        await buf.update_recent_facts("s1", [{"id": "a", "text": "x"}])
+
+        eval_calls: list = []
+        orig_eval = redis.eval
+
+        async def _spy_eval(script, numkeys, *args):
+            eval_calls.append((script, numkeys, args))
+            return await orig_eval(script, numkeys, *args)
+
+        redis.eval = _spy_eval  # type: ignore[assignment]
+        await buf.scrub_fact_from_recent("s1", "a")
+        assert len(eval_calls) == 1
+        script = eval_calls[0][0]
+        assert "cjson.decode" in script  # Lua, not Python RMW
+        assert "redis.call('SET'" in script or 'redis.call("SET"' in script
+
+    async def test_concurrent_scrubs_disjoint_ids_no_lost_update(self):
+        """Two scrubs of distinct ids running concurrently must both succeed
+        and the final state must reflect BOTH removals. Under the old RMW
+        pattern one scrub's SET could overwrite the other's filtered list."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        initial = [
+            {"id": "a", "text": "fact a"},
+            {"id": "b", "text": "fact b"},
+            {"id": "c", "text": "fact c"},
+        ]
+        await buf.update_recent_facts("s1", initial)
+
+        import asyncio
+        results = await asyncio.gather(
+            buf.scrub_fact_from_recent("s1", "a"),
+            buf.scrub_fact_from_recent("s1", "b"),
+        )
+        assert results == [1, 1]
+        # Only "c" remains.
+        remaining = await buf.load_recent_facts("s1")
+        remaining_ids = {e["id"] for e in remaining}
+        assert remaining_ids == {"c"}
+
+    async def test_concurrent_scrubs_same_id_idempotent(self):
+        """Two scrubs of the same id: one sees removed=1, the other sees
+        removed=0. Neither corrupts the stored data."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        await buf.update_recent_facts("s1", [
+            {"id": "a", "text": "x"},
+            {"id": "b", "text": "y"},
+        ])
+
+        import asyncio
+        results = await asyncio.gather(
+            buf.scrub_fact_from_recent("s1", "a"),
+            buf.scrub_fact_from_recent("s1", "a"),
+        )
+        assert sorted(results) == [0, 1]
+        remaining = await buf.load_recent_facts("s1")
+        assert [e["id"] for e in remaining] == ["b"]
+
+    async def test_scrub_last_entry_deletes_key(self):
+        """Scrubbing the last remaining entry must DEL the key rather than
+        leaving an empty JSON object behind (cjson encodes empty tables as
+        {} not [], which would corrupt subsequent loads)."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        await buf.update_recent_facts("s1", [{"id": "only", "text": "x"}])
+        key = buf._keys.recent_facts("s1")
+        assert key in redis._kv
+        removed = await buf.scrub_fact_from_recent("s1", "only")
+        assert removed == 1
+        assert key not in redis._kv
+
+    async def test_scrub_missing_key_returns_zero(self):
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        result = await buf.scrub_fact_from_recent("s1", "nope")
+        assert result == 0
 
 
 # ---------------------------------------------------------------------------

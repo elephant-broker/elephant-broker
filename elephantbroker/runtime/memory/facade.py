@@ -638,6 +638,30 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 except (ValueError, TypeError):
                     session_id_val = None
 
+            # 5-210: Scrub recent_facts BEFORE the graph delete, not after.
+            # Rationale — the previous order (scrub after cascade) left a
+            # window between graph.delete_entity and scrub_fact_from_recent
+            # where a concurrent turn-ingest cycle could observe the
+            # still-cached entry and keep the deleted fact's text alive in
+            # the extraction-context window. Scrubbing first closes that
+            # window: after the graph delete, the recent_facts window is
+            # already clean. A narrow residual race remains if an ingest was
+            # already mid-flight before scrub began, but the simple pre-order
+            # removes the common case without needing a lock pattern.
+            if self._ingest_buffer is not None and session_key_val:
+                try:
+                    removed = await self._ingest_buffer.scrub_fact_from_recent(
+                        session_key_val, str(fact_id),
+                    )
+                    scrub_status = "scrubbed" if removed else "noop"
+                except Exception as exc:
+                    logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
+                    scrub_status = "failure"
+                if self._metrics:
+                    self._metrics.inc_recent_facts_scrubbed(scrub_status)
+                else:
+                    inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
+
             # Three-step cascade. Each step runs independently — a failure in
             # any one layer must not short-circuit the remaining layers (TD-50
             # + 5-607). Per-step failures emit DEGRADED_OPERATION + metric via
@@ -694,25 +718,6 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     fact_id,
                 )
                 cognee_data_status = "skipped_no_data_id"
-
-            # Scrub from recent_facts extraction-context window (prevents LLM
-            # re-extraction of deleted fact — see Phase 4 TD #2). Outcome is
-            # reported via eb_recent_facts_scrubbed_total (status=scrubbed|noop|
-            # failure) so dashboards can alert on scrub regressions — the merge
-            # report's TF-ER-003 flow-result claim depends on this metric.
-            if self._ingest_buffer is not None and session_key_val:
-                try:
-                    removed = await self._ingest_buffer.scrub_fact_from_recent(
-                        session_key_val, str(fact_id),
-                    )
-                    scrub_status = "scrubbed" if removed else "noop"
-                except Exception as exc:
-                    logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
-                    scrub_status = "failure"
-                if self._metrics:
-                    self._metrics.inc_recent_facts_scrubbed(scrub_status)
-                else:
-                    inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
 
             # GDPR_DELETE audit event — emitted on every delete that reached
             # this point, INCLUDING partial-cascade failures. cascade_status

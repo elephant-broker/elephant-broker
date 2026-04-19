@@ -13,6 +13,38 @@ from elephantbroker.schemas.config import LLMConfig
 logger = logging.getLogger("elephantbroker.pipelines.turn_ingest.buffer")
 
 
+# 5-101: Atomic scrub of a fact entry from the JSON-serialized recent_facts
+# list. The previous read-modify-write pattern (GET → filter in Python → SET)
+# lost concurrent writes: two scrubs racing against the same key could each
+# SET back a filtered list that had dropped the other's removal. Redis Lua is
+# single-threaded — the whole script runs atomically against the server —
+# which eliminates the lost-update window without needing WATCH/MULTI retry
+# loops. Empty result path DELs the key rather than rewriting `[]`, since
+# cjson would re-encode an empty Lua table as `{}` (object, not array).
+_SCRUB_LUA = """
+local data = redis.call('GET', KEYS[1])
+if not data then return 0 end
+local ok, entries = pcall(cjson.decode, data)
+if not ok or type(entries) ~= 'table' then return 0 end
+local filtered = {}
+local removed = 0
+for _, e in ipairs(entries) do
+  if type(e) == 'table' and tostring(e.id) == ARGV[1] then
+    removed = removed + 1
+  else
+    table.insert(filtered, e)
+  end
+end
+if removed == 0 then return 0 end
+if #filtered == 0 then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('SET', KEYS[1], cjson.encode(filtered), 'EX', tonumber(ARGV[2]))
+end
+return removed
+"""
+
+
 class IngestBuffer(IIngestBuffer):
     """Redis-backed message buffer for batching before fact extraction."""
 
@@ -91,27 +123,14 @@ class IngestBuffer(IIngestBuffer):
         the extraction prompt's "PREVIOUSLY EXTRACTED FACTS" block and the LLM
         may re-extract it as a new FactDataPoint within the TTL window.
 
+        5-101: Runs as a single atomic Lua eval to eliminate the lost-update
+        race present in the prior GET → filter → SET pattern.
+
         Returns count of entries removed (0 if key missing or id not present).
         """
         key = self._keys.recent_facts(session_key)
-        data = await self._redis.get(key)
-        if not data:
-            return 0
-        try:
-            entries = json.loads(data)
-        except (json.JSONDecodeError, TypeError):
-            return 0
-        if not isinstance(entries, list):
-            return 0
-        target = str(fact_id)
-        filtered = [e for e in entries if not (isinstance(e, dict) and e.get("id") == target)]
-        removed = len(entries) - len(filtered)
-        if removed == 0:
-            return 0
-        if filtered:
-            await self._redis.set(
-                key, json.dumps(filtered), ex=self._config.extraction_context_ttl_seconds,
-            )
-        else:
-            await self._redis.delete(key)
-        return removed
+        removed = await self._redis.eval(
+            _SCRUB_LUA, 1, key,
+            str(fact_id), str(self._config.extraction_context_ttl_seconds),
+        )
+        return int(removed) if removed is not None else 0

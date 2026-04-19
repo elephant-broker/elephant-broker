@@ -619,6 +619,36 @@ class TestMemoryStoreFacadePhase4:
             async def delete(self, key):
                 self._kv.pop(key, None)
 
+            async def eval(self, script, numkeys, *keys_and_args):
+                # Minimal Lua eval emulation for the scrub script (5-101).
+                # Redis runs Lua atomically; the Python GIL gives this mock
+                # the same reentrancy guarantee for the body.
+                key = keys_and_args[0]
+                target = keys_and_args[1]
+                ttl = int(keys_and_args[2])
+                data = self._kv.get(key)
+                if not data:
+                    return 0
+                try:
+                    entries = _json.loads(data)
+                except (_json.JSONDecodeError, TypeError):
+                    return 0
+                if not isinstance(entries, list):
+                    return 0
+                filtered = [
+                    e for e in entries
+                    if not (isinstance(e, dict) and str(e.get("id")) == target)
+                ]
+                removed = len(entries) - len(filtered)
+                if removed == 0:
+                    return 0
+                if filtered:
+                    self._kv[key] = _json.dumps(filtered)
+                else:
+                    self._kv.pop(key, None)
+                _ = ttl  # TTL applied by real Redis; the fake has no TTL store
+                return removed
+
         graph = AsyncMock()
         vector = AsyncMock()
         embeddings = AsyncMock()
@@ -691,6 +721,68 @@ class TestMemoryStoreFacadePhase4:
         result = await facade.update(fact.id, {"text": "much longer text here for testing"})
         assert result.token_size is not None
         assert result.token_size > 0
+
+    # --- 5-210: delete/scrub ordering. Scrub must run BEFORE graph.delete
+    # so the recent_facts window is already clean when the cascade begins.
+    # If a concurrent turn-ingest cycle reads recent_facts between scrub
+    # and graph-delete, it will observe the already-purged state.
+
+    async def test_delete_scrubs_before_graph_delete(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        redis._kv["eb::recent_facts:sk:test"] = _json.dumps([
+            {"id": str(fact.id), "text": fact.text, "category": "general"},
+        ])
+
+        call_order: list[str] = []
+
+        orig_scrub = facade._ingest_buffer.scrub_fact_from_recent
+
+        async def _track_scrub(session_key, fact_id):
+            call_order.append("scrub")
+            return await orig_scrub(session_key, fact_id)
+
+        async def _track_graph_delete(fact_id):
+            call_order.append("graph_delete")
+
+        facade._ingest_buffer.scrub_fact_from_recent = _track_scrub  # type: ignore[assignment]
+        graph.delete_entity = AsyncMock(side_effect=_track_graph_delete)
+
+        await facade.delete(fact.id)
+
+        assert call_order == ["scrub", "graph_delete"], (
+            f"5-210: scrub must precede graph delete, got {call_order}"
+        )
+
+    async def test_delete_then_concurrent_ingest_does_not_resurface(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """5-210 end-state guarantee: after facade.delete() completes, the
+        recent_facts window no longer contains the deleted fact. A
+        subsequent ingest cycle that reads the window observes the purged
+        state."""
+        facade, graph, vector, redis, _json = self._make_with_buffer()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        fact = make_fact_assertion(session_key="sk:test")
+        props = self._fact_props(fact, session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=props)
+        buffer_key = "eb::recent_facts:sk:test"
+        redis._kv[buffer_key] = _json.dumps([
+            {"id": str(fact.id), "text": fact.text, "category": "general"},
+            {"id": str(uuid.uuid4()), "text": "survivor", "category": "general"},
+        ])
+
+        await facade.delete(fact.id)
+
+        # Simulate a subsequent ingest cycle loading recent_facts.
+        loaded = await facade._ingest_buffer.load_recent_facts("sk:test")
+        loaded_ids = {e["id"] for e in loaded}
+        assert str(fact.id) not in loaded_ids
 
     # --- eb_recent_facts_scrubbed_total metric (PR #5 TODOs 5-501, 5-602) ---
     # The merge report's TF-ER-003 flow-result line claims this metric
