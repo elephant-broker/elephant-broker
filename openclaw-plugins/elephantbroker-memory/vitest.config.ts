@@ -12,5 +12,9 @@ export default defineConfig({
   test: {
     environment: "node",
     setupFiles: ["./tests/setup.ts"],
+    // Include shared cross-plugin tests (e.g. envelope helper) so parity
+    // between the two plugins is automatically enforced: the same test file
+    // runs under both `elephantbroker-context` and `elephantbroker-memory`.
+    include: ["tests/**/*.test.ts", "../shared/**/*.test.ts"],
   },
 });

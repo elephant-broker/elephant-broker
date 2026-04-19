@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatMemoryContext } from "../src/format.js";
+import { formatMemoryContext, stripOpenClawEnvelope } from "../src/format.js";
 
 describe("formatMemoryContext", () => {
   it("returns empty string for no results", () => {
@@ -32,5 +32,24 @@ describe("formatMemoryContext", () => {
       },
     ];
     expect(formatMemoryContext(results)).toContain("0.88");
+  });
+});
+
+// Wiring smoke test: confirms format.ts re-exports the shared helper under
+// the same name. Exhaustive behavior coverage lives in
+// openclaw-plugins/shared/envelope.test.ts (runs under this plugin via the
+// include pattern in vitest.config.ts). This test only pins the re-export
+// path so a refactor that breaks it fails immediately inside the memory
+// plugin's own suite.
+describe("stripOpenClawEnvelope re-export (memory plugin)", () => {
+  it("is re-exported from ../src/format and strips enveloped prompts", () => {
+    const envelope =
+      "Sender (untrusted metadata):\n" +
+      "```json\n" +
+      "{\"label\":\"cli\"}\n" +
+      "```\n" +
+      "\n" +
+      "[Sat 2026-04-18 15:30 UTC] hello from memory plugin";
+    expect(stripOpenClawEnvelope(envelope)).toBe("hello from memory plugin");
   });
 });

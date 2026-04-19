@@ -418,12 +418,14 @@ describe("TestSessionIdentity", () => {
   });
 });
 
-// --- TestStripOpenClawEnvelope ---
+// --- Envelope stripping — assemble() wiring ---
 // RC-A (TD-54): OpenClaw wraps params.prompt in a sender-metadata envelope.
-// Retrieval needs the user's raw text, not the envelope. assemble() must
-// strip the envelope before forwarding to the runtime as `query`.
+// Retrieval needs the user's raw text, not the envelope. These tests assert
+// assemble() actually wires the shared stripOpenClawEnvelope helper onto
+// `query`. Pure-function behavior (regex, gate, 5-102 regression cases) lives
+// in openclaw-plugins/shared/envelope.test.ts and runs under both plugins.
 
-describe("stripOpenClawEnvelope", () => {
+describe("assemble() envelope stripping", () => {
   let client: ContextEngineClient;
   let engine: ContextEngineImpl;
 

@@ -28,32 +28,17 @@ import type {
   OCSubagentSpawnParams,
   SubagentSpawnResult,
 } from "./types.js";
+// Re-exported from the shared cross-plugin helper so the memory plugin and the
+// context plugin cannot drift: both import from `openclaw-plugins/shared`.
+// See that module for the extraction contract and the 5-102 RC-A hardening.
+import { stripOpenClawEnvelope } from "../../shared/envelope.js";
+
+export { stripOpenClawEnvelope };
 
 export interface ContextEngineOptions {
   batchSize?: number;
   profileName?: string;
   gatewayId?: string;
-}
-
-/**
- * OpenClaw wraps user messages in a sender-metadata envelope before forwarding
- * to the context engine via `params.prompt`:
- *
- *   Sender (untrusted metadata):
- *   ```json
- *   {...}
- *   ```
- *
- *   [YYYY-MM-DD HH:MM UTC] <user's actual text>
- *
- * Retrieval needs just the user's text, not the envelope. Extract the portion
- * after the last `\n[<timestamp>] ` marker. If the pattern doesn't match
- * (non-enveloped prompt), return the input trimmed.
- */
-export function stripOpenClawEnvelope(prompt: string): string {
-  if (!prompt) return "";
-  const match = prompt.match(/\n\[[^\]]+\]\s+([\s\S]+)$/);
-  return match ? match[1].trim() : prompt.trim();
 }
 
 export class ContextEngineImpl {
