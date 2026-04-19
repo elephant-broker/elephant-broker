@@ -107,7 +107,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         # Store via Cognee
         dp = FactDataPoint.from_schema(fact)
         await add_data_points([dp])
-        await cognee.add(fact.text, dataset_name=self._dataset_name)
+        cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
 
         # Capture cognee data_id for future delete cascade (TD-50).
         # Probe B10 confirmed: cognee_add_result.data_ingestion_info[0]['data_id']
