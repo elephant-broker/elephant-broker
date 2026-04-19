@@ -450,11 +450,18 @@ class _FakeRedis:
         data = self._kv.get(key)
         if not data:
             return 0
+        # 5-317: non-table decode results (JSON parse failure or non-array
+        # payload) DEL the corrupt key and return 0 — mirrors the Lua script's
+        # defense-in-depth branch so the mock cannot drift from prod behavior.
         try:
             entries = json.loads(data)
         except (json.JSONDecodeError, TypeError):
+            self._kv.pop(key, None)
+            self._ttls.pop(key, None)
             return 0
         if not isinstance(entries, list):
+            self._kv.pop(key, None)
+            self._ttls.pop(key, None)
             return 0
         filtered = [e for e in entries if not (isinstance(e, dict) and str(e.get("id")) == target)]
         removed = len(entries) - len(filtered)
@@ -779,6 +786,53 @@ class TestIngestBufferAtomicScrub:
         buf = IngestBuffer(redis, config)
         result = await buf.scrub_fact_from_recent("s1", "nope")
         assert result == 0
+
+    # --- 5-317: non-table branch DELs corrupt keys (defense-in-depth) ---
+
+    async def test_scrub_corrupt_json_dels_key(self):
+        """If the recent_facts key holds a non-JSON payload (corrupt write,
+        byte-order mangle, partial failure), the Lua scrub must DEL the key
+        rather than leave the bad value in place. Without DEL, every
+        subsequent scrub would re-hit the same corrupt blob until TTL expiry
+        and the extraction prompt would keep reading garbage."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        key = buf._keys.recent_facts("s1")
+        redis._kv[key] = "this-is-not-valid-json-{"
+        result = await buf.scrub_fact_from_recent("s1", "any-id")
+        assert result == 0
+        # 5-317: key must be DELed, not left in place.
+        assert key not in redis._kv
+
+    async def test_scrub_non_array_json_dels_key(self):
+        """If the recent_facts key holds a JSON object (not an array) — e.g.
+        a migration artifact or a writer that accidentally stored a dict —
+        the Lua scrub must DEL the key. Arrays are the only valid shape; any
+        other JSON top-level shape is treated as corruption and cleaned."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        key = buf._keys.recent_facts("s1")
+        redis._kv[key] = '{"not": "an array"}'
+        result = await buf.scrub_fact_from_recent("s1", "any-id")
+        assert result == 0
+        assert key not in redis._kv
+
+    async def test_scrub_corrupt_json_self_heals_before_next_update(self):
+        """After DEL on corruption, a subsequent update_recent_facts() can
+        seed clean state — the key re-appears with a valid array payload."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        key = buf._keys.recent_facts("s1")
+        redis._kv[key] = "}{not-json"
+        await buf.scrub_fact_from_recent("s1", "x")  # DELs corrupt key
+        assert key not in redis._kv
+        await buf.update_recent_facts("s1", [{"id": "fresh", "text": "t"}])
+        assert key in redis._kv
+        loaded = await buf.load_recent_facts("s1")
+        assert loaded == [{"id": "fresh", "text": "t"}]
 
 
 # ---------------------------------------------------------------------------

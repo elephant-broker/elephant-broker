@@ -1,6 +1,10 @@
 """Gateway-scoped Redis key builder — replaces all hardcoded ``f"eb:..."`` patterns."""
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger("elephantbroker.runtime.redis_keys")
+
 
 class RedisKeyBuilder:
     """Builds Redis keys namespaced by gateway_id.
@@ -10,6 +14,23 @@ class RedisKeyBuilder:
     """
 
     def __init__(self, gateway_id: str) -> None:
+        # 5-214: Empty gateway_id is a valid constructor argument (the turn-ingest
+        # buffer's default branch explicitly passes "" when the container hasn't
+        # injected a builder yet, and test conftests pass "" as a sentinel). But
+        # in a real runtime this produces `eb::...` double-colon keys that look
+        # nearly identical to real ones and silently bypass multi-gateway
+        # isolation — a bootstrap bug in which the container failed to wire
+        # gateway_id would go undetected. Emit a WARNING so the gap surfaces in
+        # logs without breaking legitimate empty-id paths (tests, default-branch
+        # fallback). The warning is intentionally non-fatal per team-lead
+        # direction ("least intrusive").
+        if gateway_id == "":
+            logger.warning(
+                "RedisKeyBuilder constructed with empty gateway_id — keys will "
+                "be prefixed 'eb::' which bypasses multi-gateway isolation. "
+                "This is expected in tests and the buffer's default branch, but "
+                "indicates a bootstrap gap if seen in production.",
+            )
         self._prefix = f"eb:{gateway_id}"
 
     @property

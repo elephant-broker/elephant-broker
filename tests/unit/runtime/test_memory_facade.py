@@ -633,11 +633,15 @@ class TestMemoryStoreFacadePhase4:
                 data = self._kv.get(key)
                 if not data:
                     return 0
+                # 5-317: non-table decode results DEL the corrupt key and
+                # return 0 — mirrors the Lua script's defense-in-depth branch.
                 try:
                     entries = _json.loads(data)
                 except (_json.JSONDecodeError, TypeError):
+                    self._kv.pop(key, None)
                     return 0
                 if not isinstance(entries, list):
+                    self._kv.pop(key, None)
                     return 0
                 filtered = [
                     e for e in entries

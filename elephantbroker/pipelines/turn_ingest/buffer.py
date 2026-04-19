@@ -21,11 +21,20 @@ logger = logging.getLogger("elephantbroker.pipelines.turn_ingest.buffer")
 # which eliminates the lost-update window without needing WATCH/MULTI retry
 # loops. Empty result path DELs the key rather than rewriting `[]`, since
 # cjson would re-encode an empty Lua table as `{}` (object, not array).
+#
+# 5-317: Non-table fall-through (decode failure or non-array JSON) also DELs
+# the key. Defense-in-depth: the previous `return 0` silently left corrupt
+# state in place, so every subsequent call would re-hit the same non-table
+# value and leak extraction-context noise until the TTL elapsed. DEL on the
+# bad-shape path forces a clean re-seed on the next update_recent_facts().
 _SCRUB_LUA = """
 local data = redis.call('GET', KEYS[1])
 if not data then return 0 end
 local ok, entries = pcall(cjson.decode, data)
-if not ok or type(entries) ~= 'table' then return 0 end
+if not ok or type(entries) ~= 'table' then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
 local filtered = {}
 local removed = 0
 for _, e in ipairs(entries) do
