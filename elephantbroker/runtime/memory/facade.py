@@ -8,7 +8,9 @@ import uuid
 from datetime import UTC, datetime
 
 import cognee
+from cognee.modules.data.methods import get_datasets_by_name
 from cognee.modules.search.types import SearchType
+from cognee.modules.users.methods import get_default_user
 from cognee.tasks.storage import add_data_points
 
 from elephantbroker.runtime.adapters.cognee.datapoints import FactDataPoint
@@ -16,6 +18,7 @@ from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
+from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
 from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.observability import traced
@@ -54,7 +57,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         dataset_name: str = "elephantbroker",
         gateway_id: str = "",
         metrics=None,
-        ingest_buffer=None,
+        ingest_buffer: IIngestBuffer | None = None,
     ) -> None:
         self._graph = graph
         self._vector = vector
@@ -577,9 +580,6 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                                   trace + metric by the caller
         """
         try:
-            from uuid import UUID
-            from cognee.modules.data.methods import get_datasets_by_name
-            from cognee.modules.users.methods import get_default_user
             user = await get_default_user()
             datasets = await get_datasets_by_name([self._dataset_name], user.id)
             if not datasets:
@@ -588,7 +588,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     context, self._dataset_name, fact_id,
                 )
                 return "skipped_no_dataset"
-            data_id_uuid = UUID(str(cognee_data_id))
+            data_id_uuid = uuid.UUID(str(cognee_data_id))
             result = await cognee.datasets.delete_data(
                 dataset_id=datasets[0].id,
                 data_id=data_id_uuid,

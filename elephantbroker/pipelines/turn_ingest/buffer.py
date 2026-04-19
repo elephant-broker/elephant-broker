@@ -5,6 +5,7 @@ import json
 import logging
 import time
 
+from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
 from elephantbroker.runtime.observability import traced
 from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.config import LLMConfig
@@ -12,7 +13,7 @@ from elephantbroker.schemas.config import LLMConfig
 logger = logging.getLogger("elephantbroker.pipelines.turn_ingest.buffer")
 
 
-class IngestBuffer:
+class IngestBuffer(IIngestBuffer):
     """Redis-backed message buffer for batching before fact extraction."""
 
     def __init__(self, redis, config: LLMConfig, redis_keys=None) -> None:

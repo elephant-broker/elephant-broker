@@ -12,6 +12,7 @@ from elephantbroker.runtime.interfaces import (
     evidence_engine,
     goal_manager,
     guard_engine,
+    ingest_buffer,
     memory_store,
     procedure_engine,
     profile_registry,
@@ -41,6 +42,7 @@ ALL_INTERFACE_MODULES = [
     profile_registry,
     trace_ledger,
     scoring_tuner,
+    ingest_buffer,
 ]
 
 EXPECTED_METHODS = {
@@ -66,6 +68,10 @@ EXPECTED_METHODS = {
     "IProfileRegistry": ["resolve_profile", "get_effective_policy", "get_scoring_weights"],
     "ITraceLedger": ["append_event", "query_trace", "get_evidence_chain"],
     "IScoringTuner": ["get_weights", "apply_feedback", "run_tuning_cycle"],
+    "IIngestBuffer": [
+        "add_messages", "flush", "force_flush", "check_timeout_flush",
+        "load_recent_facts", "update_recent_facts", "scrub_fact_from_recent",
+    ],
 }
 
 
@@ -80,9 +86,9 @@ def _get_interface_classes():
 
 
 class TestInterfaceCompleteness:
-    def test_all_17_interfaces_exist(self):
+    def test_all_18_interfaces_exist(self):
         classes = _get_interface_classes()
-        assert len(classes) == 17
+        assert len(classes) == 18
 
     def test_all_interfaces_are_abstract(self):
         for name, cls in _get_interface_classes():

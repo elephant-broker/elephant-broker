@@ -637,6 +637,77 @@ class TestIngestBuffer:
 
 
 # ---------------------------------------------------------------------------
+# TODO 5-304 / 5-308: IngestBuffer conforms to IIngestBuffer contract.
+# The facade and turn-ingest pipeline both inject IngestBuffer — hoisting its
+# public surface into an ABC prevents silent duck-typed skew (e.g. renaming
+# scrub_fact_from_recent and breaking the facade.delete() scrub path).
+# ---------------------------------------------------------------------------
+
+
+class TestIngestBufferABCConformance:
+    def test_ingest_buffer_is_subclass_of_iingest_buffer(self):
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        assert issubclass(IngestBuffer, IIngestBuffer)
+
+    def test_iingest_buffer_declares_scrub_contract(self):
+        """5-308: scrub_fact_from_recent must be an abstract method on the ABC
+        so any future IngestBuffer implementation is forced to provide it —
+        facade.delete() relies on it to purge deleted facts from the
+        extraction-context window."""
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        scrub = IIngestBuffer.scrub_fact_from_recent
+        assert getattr(scrub, "__isabstractmethod__", False) is True
+
+    def test_iingest_buffer_is_abstract_cannot_instantiate(self):
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        with pytest.raises(TypeError):
+            IIngestBuffer()  # type: ignore[abstract]
+
+    def test_partial_impl_missing_scrub_raises_typeerror(self):
+        """A subclass that forgets scrub_fact_from_recent cannot be
+        instantiated — the ABC is load-bearing, not cosmetic."""
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+
+        class _Partial(IIngestBuffer):
+            async def add_messages(self, session_key, messages): return False
+            async def flush(self, session_key): return []
+            async def force_flush(self, session_key): return []
+            async def check_timeout_flush(self, session_key): return False
+            async def load_recent_facts(self, session_key): return []
+            async def update_recent_facts(self, session_key, new_facts, max_count=20): return None
+            # scrub_fact_from_recent deliberately omitted
+
+        with pytest.raises(TypeError):
+            _Partial()  # type: ignore[abstract]
+
+    async def test_mock_iingest_buffer_substitutes_in_facade(self):
+        """A minimal IIngestBuffer implementation can be passed as the
+        facade's ingest_buffer — the facade only depends on the ABC, not on
+        IngestBuffer concretely."""
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        from elephantbroker.runtime.memory.facade import MemoryStoreFacade
+
+        class _StubBuffer(IIngestBuffer):
+            def __init__(self): self.scrubbed: list[tuple[str, str]] = []
+            async def add_messages(self, session_key, messages): return False
+            async def flush(self, session_key): return []
+            async def force_flush(self, session_key): return []
+            async def check_timeout_flush(self, session_key): return False
+            async def load_recent_facts(self, session_key): return []
+            async def update_recent_facts(self, session_key, new_facts, max_count=20): return None
+            async def scrub_fact_from_recent(self, session_key, fact_id):
+                self.scrubbed.append((session_key, fact_id))
+                return 1
+
+        stub = _StubBuffer()
+        facade = MemoryStoreFacade(
+            graph=MagicMock(), vector=MagicMock(), embeddings=MagicMock(),
+            trace_ledger=MagicMock(), ingest_buffer=stub,
+        )
+        assert facade._ingest_buffer is stub
+
+
+# ---------------------------------------------------------------------------
 # Phase 7: decision_domain extraction
 # ---------------------------------------------------------------------------
 
