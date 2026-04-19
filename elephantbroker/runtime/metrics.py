@@ -47,6 +47,11 @@ try:
         "TD-50 delete cascade step failures in facade.delete(). step=graph|vector|cognee_data identifies which layer threw. The EB-layer delete continues on each failure (best-effort cascade) so a step-level counter increment is compatible with an eventually-emitted GDPR_DELETE trace whose cascade_status marks that step as failed.",
         ["gateway_id", "step"],
     )
+    eb_memory_search_stage_failures_total = Counter(
+        "eb_memory_search_stage_failures_total",
+        "MemoryStoreFacade.search() stage failures. stage=semantic|structural identifies which search stage raised. Search downgrades to partial results (still returns a list) rather than crashing; this counter makes the per-stage failure visible.",
+        ["gateway_id", "stage", "exception_type"],
+    )
 
     # Phase 5 metrics
     eb_working_set_builds_total = Counter("eb_working_set_builds_total", "Working set builds", ["gateway_id", "profile_name", "status"])
@@ -269,6 +274,13 @@ def inc_fact_delete_cascade_failure(step: str, gateway_id: str = "") -> None:
         ).inc()
 
 
+def inc_search_stage_failure(stage: str, exception_type: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_memory_search_stage_failures_total.labels(
+            gateway_id=gateway_id, stage=stage, exception_type=exception_type,
+        ).inc()
+
+
 # --- Phase 5 safe helpers ---
 
 def inc_working_set_build(profile_name: str, status: str = "ok", gateway_id: str = "") -> None:
@@ -358,6 +370,9 @@ class MetricsContext:
 
     def inc_fact_delete_cascade_failure(self, step: str) -> None:
         inc_fact_delete_cascade_failure(step, gateway_id=self._gw)
+
+    def inc_search_stage_failure(self, stage: str, exception_type: str) -> None:
+        inc_search_stage_failure(stage, exception_type, gateway_id=self._gw)
 
     def inc_working_set_build(self, profile_name: str, status: str = "ok") -> None:
         inc_working_set_build(profile_name, status, gateway_id=self._gw)

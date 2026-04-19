@@ -25,7 +25,7 @@ from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 from elephantbroker.runtime.metrics import (
     MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
     inc_fact_delete_cascade_failure, inc_gdpr_delete,
-    inc_recent_facts_scrubbed, inc_store,
+    inc_recent_facts_scrubbed, inc_search_stage_failure, inc_store,
 )
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
@@ -204,8 +204,35 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             )
             for fact in self._parse_graph_completion_to_facts(cognee_hits):
                 results[str(fact.id)] = fact
-        except Exception:
-            pass
+        except Exception as exc:
+            # 5-205: downgrade Stage 1 failure to partial results (Stage 2
+            # structural may still produce hits) but emit log + metric +
+            # DEGRADED_OPERATION trace so the silent failure is visible.
+            exc_type = type(exc).__name__
+            logger.warning(
+                "facade.search Stage 1 (semantic) failed — downgrading to "
+                "structural-only results (gateway=%s, query=%r, exc=%s: %s)",
+                self._gateway_id, query[:80], exc_type, exc,
+            )
+            if self._metrics:
+                self._metrics.inc_search_stage_failure("semantic", exc_type)
+            else:
+                inc_search_stage_failure("semantic", exc_type, gateway_id=self._gateway_id)
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.DEGRADED_OPERATION,
+                    session_key=session_key,
+                    session_id=session_id,
+                    payload={
+                        "component": "memory_facade",
+                        "operation": "search",
+                        "failure": "stage_exception",
+                        "stage": "semantic",
+                        "exception_type": exc_type,
+                        "exception": str(exc),
+                    },
+                )
+            )
 
         # Stage 2: Structural — property-filtered Cypher
         cypher, params = self._build_structural_query(

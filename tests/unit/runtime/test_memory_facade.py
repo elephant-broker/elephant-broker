@@ -1358,6 +1358,91 @@ class TestMemoryStoreFacadePhase4:
         assert len(events) == 1
         assert events[0].payload["auto_recall"] is False
 
+    # 5-205: Stage 1 (semantic) exception observability —
+    # log + metric + DEGRADED_OPERATION trace; search still returns a list.
+
+    async def test_search_stage1_exception_emits_metric_trace_log(
+        self, monkeypatch, mock_add_data_points, mock_cognee, caplog,
+    ):
+        """Stage 1 (cognee semantic) raises → metric emitted with
+        (stage="semantic", exception_type), DEGRADED_OPERATION trace
+        emitted with matching payload, WARNING log emitted with gateway
+        + query context. Final result is still a list (empty here)."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        facade._gateway_id = "gw-test"
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        mock_cognee.search = AsyncMock(side_effect=RuntimeError("cognee down"))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        graph.query_cypher = AsyncMock(return_value=[])
+
+        with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
+            results = await facade.search("test query", scope=Scope.SESSION)
+
+        assert isinstance(results, list)  # downgrade preserved
+        metrics.inc_search_stage_failure.assert_called_once_with("semantic", "RuntimeError")
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await facade._trace.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(degraded) == 1
+        payload = degraded[0].payload
+        assert payload["component"] == "memory_facade"
+        assert payload["operation"] == "search"
+        assert payload["failure"] == "stage_exception"
+        assert payload["stage"] == "semantic"
+        assert payload["exception_type"] == "RuntimeError"
+        assert "cognee down" in payload["exception"]
+
+        # WARNING log captured with context.
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("Stage 1" in r.getMessage() for r in warnings)
+
+    async def test_search_stage1_exception_still_yields_structural_results(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Stage 1 raises but Stage 2 (structural Cypher) returns a row —
+        search returns the structural hit rather than empty."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        facade._metrics = MagicMock()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        mock_cognee.search = AsyncMock(side_effect=RuntimeError("boom"))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        graph.query_cypher = AsyncMock(return_value=[{
+            "props": self._fact_props(fact),
+        }])
+        results = await facade.search("q", scope=Scope.SESSION)
+        assert len(results) == 1
+        assert str(results[0].id) == str(fact.id)
+
+    async def test_search_stage1_success_does_not_emit_degraded_metric_trace(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Happy path (no Stage 1 exception) must not emit the metric or
+        DEGRADED_OPERATION trace — regression guard against spurious
+        emission on success."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        graph.query_cypher = AsyncMock(return_value=[])
+
+        await facade.search("q")
+
+        metrics.inc_search_stage_failure.assert_not_called()
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await facade._trace.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert degraded == []
+
 
 class TestCogneeDataIdCaptureObservability:
     """TD-50 capture-failure observability (PR #5 TODO 5-301).

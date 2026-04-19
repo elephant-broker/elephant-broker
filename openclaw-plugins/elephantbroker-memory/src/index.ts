@@ -210,6 +210,6 @@ export function register(api: PluginAPI) {
   });
 }
 
-export { ElephantBrokerClient } from "./client.js";
+export { ElephantBrokerClient, HttpStatusError } from "./client.js";
 export { formatMemoryContext } from "./format.js";
 export type * from "./types.js";

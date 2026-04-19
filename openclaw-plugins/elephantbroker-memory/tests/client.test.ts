@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ElephantBrokerClient } from "../src/client.js";
+import { ElephantBrokerClient, HttpStatusError } from "../src/client.js";
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -103,5 +103,45 @@ describe("ElephantBrokerClient", () => {
   it("forget throws on 404", async () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
     await expect(client.forget("missing")).rejects.toThrow();
+  });
+
+  // 5-603: client must throw HttpStatusError (not plain Error) so that
+  // tools can discriminate backend signals by status code.
+
+  it("forget throws HttpStatusError(404) on 404", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(client.forget("missing")).rejects.toBeInstanceOf(HttpStatusError);
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(client.forget("missing")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("forget throws HttpStatusError(403) on 403", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 403 });
+    await expect(client.forget("cross-tenant")).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("forget throws HttpStatusError(500) on 500", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await expect(client.forget("boom")).rejects.toMatchObject({ status: 500 });
+  });
+
+  it("update throws HttpStatusError(404) on 404", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(client.update("missing", { text: "x" })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("update throws HttpStatusError(403) on 403", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 403 });
+    await expect(client.update("cross-tenant", { text: "x" })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("update throws HttpStatusError(422) on 422", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 422 });
+    await expect(client.update("abc", { category: 42 })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("update throws HttpStatusError(500) on 500", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await expect(client.update("abc", { text: "x" })).rejects.toMatchObject({ status: 500 });
   });
 });

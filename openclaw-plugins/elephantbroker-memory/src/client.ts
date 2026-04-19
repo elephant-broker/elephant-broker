@@ -22,6 +22,26 @@ import type {
 
 const tracer = trace.getTracer("elephantbroker.memory-plugin");
 
+/**
+ * Error thrown by client methods when the backend returns a non-2xx HTTP status.
+ * Callers (tools) should discriminate on `.status` to map backend signals to
+ * client-side result shapes rather than swallowing all failures uniformly.
+ *
+ * 403 — cross-tenant ownership rejection (post-C7 gateway-ownership check)
+ * 404 — resource not found
+ * 409 — conflict (dedup skip)
+ * 422 — invalid input
+ * 5xx — backend error — do NOT mask as not_found
+ */
+export class HttpStatusError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpStatusError";
+    this.status = status;
+  }
+}
+
 export class ElephantBrokerClient {
   private baseUrl: string;
   private sessionKeyCache: Map<string, string> = new Map();
@@ -120,9 +140,9 @@ export class ElephantBrokerClient {
           method: "DELETE",
           headers: this.getHeaders(),
         });
-        if (res.status === 403) throw new Error(`Permission denied: fact ${factId} belongs to another gateway`);
-        if (res.status === 404) throw new Error(`Fact not found: ${factId}`);
-        if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+        if (res.status === 403) throw new HttpStatusError(403, `Permission denied: fact ${factId} belongs to another gateway`);
+        if (res.status === 404) throw new HttpStatusError(404, `Fact not found: ${factId}`);
+        if (!res.ok) throw new HttpStatusError(res.status, `Delete failed: ${res.status}`);
       } finally {
         span.end();
       }
@@ -137,8 +157,10 @@ export class ElephantBrokerClient {
           headers: this.getHeaders(),
           body: JSON.stringify(updates),
         });
-        if (res.status === 404) throw new Error(`Fact not found: ${factId}`);
-        if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+        if (res.status === 403) throw new HttpStatusError(403, `Permission denied: fact ${factId} belongs to another gateway`);
+        if (res.status === 404) throw new HttpStatusError(404, `Fact not found: ${factId}`);
+        if (res.status === 422) throw new HttpStatusError(422, `Invalid update payload for ${factId}`);
+        if (!res.ok) throw new HttpStatusError(res.status, `Update failed: ${res.status}`);
         return (await res.json()) as FactAssertion;
       } finally {
         span.end();
