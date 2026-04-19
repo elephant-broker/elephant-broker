@@ -319,6 +319,64 @@ class TestCanonicalize:
         canonical_dp = captured_dps[0]
         assert canonical_dp.cognee_data_id is None
 
+    async def test_canonicalize_capture_failure_on_non_uuid_data_id(self, monkeypatch):
+        """TODO-5-003 / TODO-5-211: cognee.add() returns a non-UUID-parseable
+        data_id → ValueError routed through _emit_capture_failure exactly
+        like a shape mismatch. Canonical fact persisted with
+        cognee_data_id=None; metric + DEGRADED_OPERATION fire.
+        Pre-fix the canonicalize except tuple omitted ValueError so this
+        crashed the stage with an unhandled exception."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        bad_result = _MagicMock()
+        bad_result.data_ingestion_info = [{"data_id": "definitely-not-a-uuid"}]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=bad_result))
+
+        trace_calls: list = []
+
+        class FakeTrace:
+            async def append_event(self, event):
+                trace_calls.append(event)
+
+        class FakeMetrics:
+            def __init__(self):
+                self.capture_calls: list[str] = []
+            def inc_cognee_capture_failure(self, operation):
+                self.capture_calls.append(operation)
+
+        fake_metrics = FakeMetrics()
+        fake_trace = FakeTrace()
+        captured_dps: list = []
+
+        async def capture_adp(dps):
+            if dps:
+                captured_dps.append(dps[0])
+
+        monkeypatch.setattr("cognee.tasks.storage.add_data_points", AsyncMock(side_effect=capture_adp))
+
+        stage, *_ = _make_stage(
+            llm_text="merged canonical text",
+            trace=fake_trace,
+            metrics=fake_metrics,
+        )
+        facts = [
+            make_fact_assertion(text="a", session_key="s1"),
+            make_fact_assertion(text="b", session_key="s2"),
+        ]
+        cluster = _make_cluster(facts)
+        ctx = _make_context()
+        results = await stage.run([cluster], facts, "gw", ctx)
+
+        assert len(results) == 1
+        assert fake_metrics.capture_calls == ["canonicalize"]
+        from elephantbroker.schemas.trace import TraceEventType
+        degraded = [e for e in trace_calls if e.event_type == TraceEventType.DEGRADED_OPERATION]
+        assert len(degraded) == 1
+        assert degraded[0].payload["exception_type"] == "ValueError"
+        assert degraded[0].payload["failure"] == "cognee_data_id_capture"
+        assert len(captured_dps) >= 1
+        assert captured_dps[0].cognee_data_id is None
+
     async def test_canonicalize_enqueues_superseded_cognee_data_ids_for_cascade(self, monkeypatch):
         """Each pre-existing fact with cognee_data_id has that id passed through to the
         Cognee delete cascade (so the old documents are not silently orphaned)."""

@@ -209,9 +209,19 @@ class CanonicalizationStage:
             logger.debug("cognee.add failed for canonical — non-fatal", exc_info=True)
 
         if cognee_add_result is not None:
+            # TODO-5-003 / TODO-5-211: explicit UUID coercion at capture
+            # (ValueError now in the except tuple). Mirrors the two sites
+            # in facade.py — see that file's store-path block for the full
+            # rationale. Pydantic v2 does not validate on assignment, so
+            # without explicit coercion a malformed data_id would land on
+            # the graph node and only fail later at cascade parse time.
             try:
-                new_fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-            except (AttributeError, IndexError, KeyError, TypeError) as exc:
+                raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+                new_fact.cognee_data_id = (
+                    raw_data_id if isinstance(raw_data_id, uuid.UUID)
+                    else uuid.UUID(str(raw_data_id))
+                )
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
                 await self._emit_capture_failure(fact_id=new_fact.id, exc=exc)
 
         # Store canonical via Cognee-first dual write (BS-10)
@@ -337,12 +347,29 @@ class CanonicalizationStage:
             user = await get_default_user()
             datasets = await get_datasets_by_name([dataset_name], user.id)
             if not datasets:
+                # TODO-5-309: datasets[0].id below is only reached after
+                # this guard, so an empty dataset list cannot IndexError.
                 logger.debug(
                     "Superseded-cascade skipped: dataset %s not found for fact %s",
                     dataset_name, fact_id,
                 )
                 return
-            data_id_uuid = UUID(str(cognee_data_id))
+            try:
+                data_id_uuid = (
+                    cognee_data_id if isinstance(cognee_data_id, UUID)
+                    else UUID(str(cognee_data_id))
+                )
+            except (ValueError, TypeError) as exc:
+                # TODO-5-109: stored cognee_data_id not UUID-parseable (legacy
+                # row from pre-5-003 capture coercion, or corrupted value).
+                # Distinguish from a Cognee-side delete failure: no Cognee
+                # call is attempted, nothing to retry at that layer.
+                logger.warning(
+                    "Superseded-cascade skipped: cognee_data_id=%r on fact "
+                    "%s is not UUID-parseable (%s: %s)",
+                    cognee_data_id, fact_id, type(exc).__name__, exc,
+                )
+                return
             await cognee.datasets.delete_data(
                 dataset_id=datasets[0].id,
                 data_id=data_id_uuid,

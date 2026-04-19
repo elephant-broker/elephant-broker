@@ -121,9 +121,22 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             #       permanently orphan the cognee-owned artifacts on delete
             #       because the cascade call had no data_id to pass.
             cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+            # TODO-5-003 / TODO-5-211: explicit UUID coercion at capture. The
+            # schema declares `cognee_data_id: uuid.UUID | None`, but Pydantic
+            # v2 does NOT validate on assignment by default, so a malformed
+            # string would be persisted unchallenged and only fail later at
+            # the cascade parse (TODO-5-109). Coercing here + widening the
+            # except tuple to include ValueError routes every shape AND every
+            # non-UUID-parseable value through the existing observability
+            # helper — one metric + DEGRADED_OPERATION trace regardless of
+            # which part of the capture failed.
             try:
-                fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-            except (AttributeError, IndexError, KeyError, TypeError) as exc:
+                raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+                fact.cognee_data_id = (
+                    raw_data_id if isinstance(raw_data_id, uuid.UUID)
+                    else uuid.UUID(str(raw_data_id))
+                )
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
                 await self._emit_capture_failure(
                     operation="store", fact_id=fact.id, exc=exc,
                     session_key=fact.session_key, session_id=fact.session_id,
@@ -449,9 +462,15 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             # artifacts for the NEW text become permanent orphans that
             # delete() cannot reach — the TD-50 regression in update().
             cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+            # TODO-5-003 / TODO-5-211: same UUID coercion shape as store().
+            # See the store-path comment for the full rationale.
             try:
-                fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-            except (AttributeError, IndexError, KeyError, TypeError) as exc:
+                raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+                fact.cognee_data_id = (
+                    raw_data_id if isinstance(raw_data_id, uuid.UUID)
+                    else uuid.UUID(str(raw_data_id))
+                )
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
                 await self._emit_capture_failure(
                     operation="update", fact_id=fact.id, exc=exc,
                     session_key=fact.session_key, session_id=fact.session_id,
@@ -571,13 +590,25 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
         Returns a status string so callers can include the outcome in
         downstream audit events (GDPR_DELETE cascade_status):
-          "ok"                  — Cognee cleanup completed
-          "skipped_no_dataset"  — dataset lookup returned nothing (the
-                                  EB-side delete still proceeds; there
-                                  is nothing Cognee-side left to clean)
-          "failed"              — Cognee raised; partial cleanup, the
-                                  step is reported via DEGRADED_OPERATION
-                                  trace + metric by the caller
+          "ok"                   — Cognee cleanup completed
+          "skipped_no_dataset"   — dataset lookup returned nothing (the
+                                   EB-side delete still proceeds; there
+                                   is nothing Cognee-side left to clean).
+                                   TODO-5-309: datasets[0].id is indexed
+                                   only after this `if not datasets`
+                                   guard, so the cascade is safe against
+                                   empty-list IndexError.
+          "skipped_bad_data_id"  — TODO-5-109: stored cognee_data_id is
+                                   not UUID-parseable (legacy row from
+                                   before the TODO-5-003 capture-time
+                                   coercion was added, or a corrupted
+                                   value). Distinguished from "failed"
+                                   because no Cognee call is even
+                                   attempted — there is nothing to retry
+                                   at the Cognee layer.
+          "failed"               — Cognee raised; partial cleanup, the
+                                   step is reported via DEGRADED_OPERATION
+                                   trace + metric by the caller.
         """
         try:
             user = await get_default_user()
@@ -588,7 +619,18 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     context, self._dataset_name, fact_id,
                 )
                 return "skipped_no_dataset"
-            data_id_uuid = uuid.UUID(str(cognee_data_id))
+            try:
+                data_id_uuid = (
+                    cognee_data_id if isinstance(cognee_data_id, uuid.UUID)
+                    else uuid.UUID(str(cognee_data_id))
+                )
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "TD-50 cascade skipped (%s): cognee_data_id=%r on fact %s "
+                    "is not UUID-parseable (%s: %s) — no Cognee call attempted",
+                    context, cognee_data_id, fact_id, type(exc).__name__, exc,
+                )
+                return "skipped_bad_data_id"
             result = await cognee.datasets.delete_data(
                 dataset_id=datasets[0].id,
                 data_id=data_id_uuid,

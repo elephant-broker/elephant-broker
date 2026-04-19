@@ -1702,3 +1702,214 @@ class TestCogneeDataIdCaptureObservability:
             TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
         )
         assert events == [], "success path must not emit DEGRADED_OPERATION"
+
+    async def test_store_capture_failure_on_non_uuid_data_id(
+        self, monkeypatch, mock_add_data_points, mock_cognee, caplog,
+    ):
+        """TODO-5-003 / TODO-5-211: cognee.add() returns a data_id that is
+        NOT UUID-parseable → the UUID coercion raises ValueError, which is
+        routed through _emit_capture_failure exactly like a shape mismatch.
+        Fact persisted with cognee_data_id=None; metric + DEGRADED_OPERATION
+        still fire. Pre-fix the except tuple omitted ValueError, so this
+        path crashed store() with an unhandled exception."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        facade, _, _, _, ledger = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": "not-a-uuid-at-all"}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        fact = make_fact_assertion()
+        with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
+            result = await facade.store(fact)
+
+        assert result.id == fact.id
+        assert result.cognee_data_id is None
+        metrics.inc_cognee_capture_failure.assert_called_once_with("store")
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(events) == 1
+        assert events[0].payload["exception_type"] == "ValueError"
+        assert events[0].payload["failure"] == "cognee_data_id_capture"
+
+    async def test_store_coerces_string_uuid_data_id_to_uuid(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-5-003: cognee.add() returns data_id as a UUID-parseable
+        STRING (not a uuid.UUID instance) → capture coerces to uuid.UUID
+        so downstream code sees a guaranteed-type value. Pre-fix the
+        string leaked through and later failed at cascade parse time."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        facade, _, _, _, _ = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        canonical_id = uuid.uuid4()
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": str(canonical_id)}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        fact = make_fact_assertion()
+        result = await facade.store(fact)
+
+        assert isinstance(result.cognee_data_id, uuid.UUID)
+        assert result.cognee_data_id == canonical_id
+        metrics.inc_cognee_capture_failure.assert_not_called()
+
+    async def test_update_capture_failure_on_non_uuid_data_id(
+        self, monkeypatch, mock_add_data_points, mock_cognee, caplog,
+    ):
+        """TODO-5-003 / TODO-5-211: update(text=...) re-ingest returns a
+        non-UUID-parseable data_id → ValueError routed through
+        _emit_capture_failure, fact.cognee_data_id reset to None, old
+        doc still cascades (old text is stale regardless)."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        facade, graph, _, _, ledger = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+
+        existing_data_id = uuid.uuid4()
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(existing_data_id),
+        ))
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": "definitely-not-a-uuid"}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        cascade_spy = AsyncMock()
+        monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
+
+        with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
+            result = await facade.update(fact.id, {"text": "rewritten text"})
+
+        assert result.cognee_data_id is None
+        cascade_spy.assert_called_once()
+        metrics.inc_cognee_capture_failure.assert_called_once_with("update")
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert any(
+            e.payload.get("failure") == "cognee_data_id_capture"
+            and e.payload.get("exception_type") == "ValueError"
+            for e in events
+        ), "update capture ValueError must surface as cognee_data_id_capture"
+
+
+class TestCascadeCogneeDataGuards:
+    """TODO-5-109 + TODO-5-309: explicit guards in _cascade_cognee_data.
+
+    Two code-hygiene guards verified here:
+      - "skipped_no_dataset" fires when get_datasets_by_name returns [],
+        confirming datasets[0].id indexing is unreachable on empty input
+        (TODO-5-309 safety via pre-existing `if not datasets:` guard).
+      - "skipped_bad_data_id" fires when the stored cognee_data_id is
+        not UUID-parseable (TODO-5-109), distinguishing legacy/corrupted
+        data from a Cognee-side delete failure. Pre-5-109 both paths
+        collapsed to "failed" and the distinction was lost.
+    """
+
+    def _make(self):
+        graph = AsyncMock()
+        vector = AsyncMock()
+        embeddings = AsyncMock()
+        embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+        ledger = TraceLedger()
+        return MemoryStoreFacade(graph, vector, embeddings, ledger, dataset_name="test_ds")
+
+    async def test_cascade_returns_skipped_no_dataset_when_empty(
+        self, monkeypatch, mock_cognee,
+    ):
+        """TODO-5-309: get_datasets_by_name returns [] → cascade returns
+        'skipped_no_dataset' and NEVER reaches datasets[0].id. Pins the
+        indexing safety — an empty list can never IndexError here."""
+        facade = self._make()
+        fake_user = type("U", (), {"id": uuid.uuid4()})()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            AsyncMock(return_value=[]),
+        )
+        mock_cognee.datasets.delete_data = AsyncMock()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        status = await facade._cascade_cognee_data(
+            uuid.uuid4(), fact_id=uuid.uuid4(), context="test",
+        )
+        assert status == "skipped_no_dataset"
+        mock_cognee.datasets.delete_data.assert_not_called()
+
+    async def test_cascade_returns_skipped_bad_data_id_on_non_uuid(
+        self, monkeypatch, mock_cognee,
+    ):
+        """TODO-5-109: stored cognee_data_id is a non-UUID-parseable
+        string (legacy row from before TODO-5-003 coercion) → cascade
+        returns 'skipped_bad_data_id' WITHOUT attempting the Cognee call.
+        Distinct from 'failed' so operators can tell bad-data-at-rest
+        from a Cognee-side failure."""
+        facade = self._make()
+        fake_user = type("U", (), {"id": uuid.uuid4()})()
+        fake_ds = type("D", (), {"id": uuid.uuid4()})()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            AsyncMock(return_value=[fake_ds]),
+        )
+        mock_cognee.datasets.delete_data = AsyncMock()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        status = await facade._cascade_cognee_data(
+            "this-is-not-a-uuid", fact_id=uuid.uuid4(), context="test",
+        )
+        assert status == "skipped_bad_data_id"
+        mock_cognee.datasets.delete_data.assert_not_called()
+
+    async def test_cascade_ok_on_uuid_instance_or_parseable_string(
+        self, monkeypatch, mock_cognee,
+    ):
+        """Happy path: both a real uuid.UUID instance and a parseable
+        string coerce cleanly and reach the Cognee delete call. Guards
+        against a regression that would reject strings by mistake."""
+        facade = self._make()
+        fake_user = type("U", (), {"id": uuid.uuid4()})()
+        fake_ds = type("D", (), {"id": uuid.uuid4()})()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            AsyncMock(return_value=[fake_ds]),
+        )
+        mock_cognee.datasets.delete_data = AsyncMock(return_value={"deleted": True})
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        data_id = uuid.uuid4()
+        status_from_uuid = await facade._cascade_cognee_data(
+            data_id, fact_id=uuid.uuid4(), context="test",
+        )
+        status_from_str = await facade._cascade_cognee_data(
+            str(data_id), fact_id=uuid.uuid4(), context="test",
+        )
+        assert status_from_uuid == "ok"
+        assert status_from_str == "ok"
+        assert mock_cognee.datasets.delete_data.await_count == 2
