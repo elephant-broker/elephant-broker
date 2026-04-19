@@ -21,7 +21,7 @@ from elephantbroker.runtime.graph_utils import clean_graph_props
 from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
 from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
-from elephantbroker.runtime.observability import traced
+from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.runtime.utils.tokens import count_tokens
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
@@ -67,6 +67,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self._gateway_id = gateway_id
         self._metrics = metrics
         self._ingest_buffer = ingest_buffer
+        self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
 
     @traced
     async def store(
@@ -556,7 +557,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             self._metrics.inc_cognee_capture_failure(operation)
         else:
             inc_cognee_capture_failure(operation, gateway_id=self._gateway_id)
-        logger.warning(
+        self._log.warning(
             "Could not capture cognee_data_id for fact %s on %s "
             "(delete cascade will skip cognee cleanup): %s",
             fact_id, operation, exc,
@@ -614,7 +615,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             user = await get_default_user()
             datasets = await get_datasets_by_name([self._dataset_name], user.id)
             if not datasets:
-                logger.warning(
+                self._log.warning(
                     "TD-50 cascade skipped (%s): dataset %s not found for fact %s",
                     context, self._dataset_name, fact_id,
                 )
@@ -625,7 +626,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     else uuid.UUID(str(cognee_data_id))
                 )
             except (ValueError, TypeError) as exc:
-                logger.warning(
+                self._log.warning(
                     "TD-50 cascade skipped (%s): cognee_data_id=%r on fact %s "
                     "is not UUID-parseable (%s: %s) — no Cognee call attempted",
                     context, cognee_data_id, fact_id, type(exc).__name__, exc,
@@ -637,13 +638,13 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 mode="soft",
                 delete_dataset_if_empty=False,
             )
-            logger.info(
+            self._log.info(
                 "TD-50 cascade complete (%s): fact_id=%s data_id=%s cognee_result=%r",
                 context, fact_id, cognee_data_id, result,
             )
             return "ok"
         except Exception as exc:
-            logger.warning(
+            self._log.warning(
                 "TD-50 cascade failed (%s, fact_id=%s, data_id=%s): %r",
                 context, fact_id, cognee_data_id, exc,
             )
@@ -697,7 +698,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     )
                     scrub_status = "scrubbed" if removed else "noop"
                 except Exception as exc:
-                    logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
+                    self._log.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
                     scrub_status = "failure"
                 if self._metrics:
                     self._metrics.inc_recent_facts_scrubbed(scrub_status)
@@ -716,7 +717,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 await self._graph.delete_entity(str(fact_id))
                 graph_status = "ok"
             except Exception as exc:
-                logger.warning("Neo4j delete failed for fact %s: %s", fact_id, exc)
+                self._log.warning("Neo4j delete failed for fact %s: %s", fact_id, exc)
                 graph_status = "failed"
                 await self._emit_cascade_failure(
                     step="graph", fact_id=fact_id, exc=exc,
@@ -728,7 +729,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
                 vector_status = "ok"
             except Exception as exc:
-                logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
+                self._log.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
                 vector_status = "failed"
                 await self._emit_cascade_failure(
                     step="vector", fact_id=fact_id, exc=exc,
@@ -755,7 +756,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                         session_key=session_key_val, session_id=session_id_val,
                     )
             else:
-                logger.info(
+                self._log.info(
                     "TD-50 cascade skipped: fact %s has no cognee_data_id (pre-TD-50 fact)",
                     fact_id,
                 )

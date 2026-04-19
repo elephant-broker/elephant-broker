@@ -55,7 +55,7 @@ All intelligence, scoring, storage, and policy logic lives in Python. The plugin
 | **ToolArtifactStore** | Tool output CRUD, SHA-256 dedup, summary + pointer model |
 | **ConsolidationEngine** | 9-stage "sleep" pipeline, Redis distributed lock, ClickHouse bridge |
 | **ProfileRegistry** | Base → named → org override inheritance, 5-minute TTL cache |
-| **TraceLedger** | Append-only trace (47 event types), OTEL export, session timeline queries |
+| **TraceLedger** | Append-only trace (51 event types), OTEL export, session timeline queries |
 | **StatsEngine** | 49 Prometheus counters/gauges |
 | **ScoringTuner** | Per-gateway weight persistence (SQLite), EMA-smoothed deltas (±5% cap) |
 
@@ -139,7 +139,7 @@ Six layers, each cheaper than the next:
 | Layer | Method | Cost |
 |-------|--------|------|
 | 0. Autonomy classification | 10 domains × 4 autonomy levels | Microseconds |
-| 1. Static rules | 12 builtins + profile + procedure-bound + custom | Microseconds |
+| 1. Static rules | 16 builtins + profile + procedure-bound + custom | Microseconds |
 | 2. Semantic matching | BM25 + cosine similarity against exemplars | Milliseconds |
 | 3. Structural validation | Graph queries for approvals, evidence, confirmations | Milliseconds |
 | 4. Forced reinjection | Constraints injected into Block 1 of context assembly | Zero LLM |

@@ -708,7 +708,7 @@ Path prefix: `guards.*`
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `guards.enabled` | `bool` | `True` | `EB_GUARDS_ENABLED` | -- | Master switch for the 6-layer guard pipeline (autonomy classification, static rules, BM25/semantic, structural validators, reinjection, LLM escalation). When `false`, `RedLineGuardEngine.preflight_check()` short-circuits to PASS without invoking any layer. | Disabling removes all safety guardrails; only for testing or controlled benchmarks | `true` / `true` / `true` |
-| `guards.builtin_rules_enabled` | `bool` | `True` | -- | -- | Enables the 12 built-in static guard rules (Layer 2) | Disabling = no static rule matching, only semantic/LLM guards remain | `true` / `true` / `true` |
+| `guards.builtin_rules_enabled` | `bool` | `True` | -- | -- | Enables the 16 built-in static guard rules (Layer 2) | Disabling = no static rule matching, only semantic/LLM guards remain | `true` / `true` / `true` |
 | `guards.history_ttl_seconds` | `int` | `86400` | -- | `ge=60` | TTL for guard evaluation history stored in Redis | Too low = guard history lost mid-session; too high = stale history accumulates | `86400` / `86400` / `86400` |
 | `guards.max_history_events` | `int` | `50` | -- | `ge=1` | Maximum guard evaluation events retained per session | Too low = insufficient history for pattern analysis; too high = memory pressure | `50` / `50` / `100` |
 | `guards.input_summary_max_chars` | `int` | `500` | -- | `ge=50` | Max characters of input context passed to guard evaluators | Too low = guards lack context for accurate evaluation; too high = slow evaluation | `500` / `500` / `500` |
@@ -1177,7 +1177,7 @@ Controls the 6-layer red-line guard pipeline.
 |-------|------|---------|----------------|
 | `force_system_constraint_injection` | `bool` | `True` | Always inject active constraints into Block 1 systemPromptAddition, regardless of guard outcome. |
 | `preflight_check_strictness` | `str` | `"medium"` | Strictness preset name (`"loose"`, `"medium"`, `"strict"`). Controls BM25 threshold multiplier, semantic threshold, structural validators, reinjection triggers, and LLM escalation triggers. See Section 5 below. |
-| `static_rules` | `list[StaticRule]` | `[]` | Custom static rules (keyword/phrase/regex/tool_target patterns). Added on top of 12 built-in rules. |
+| `static_rules` | `list[StaticRule]` | `[]` | Custom static rules (keyword/phrase/regex/tool_target patterns). Added on top of 16 built-in rules. |
 | `redline_exemplars` | `list[str]` | `[]` | Seed exemplar texts for the BM25+semantic similarity index. |
 | `structural_validators` | `list[StructuralValidatorSpec]` | `[]` | Custom structural validators for Layer 3 (required fields, action_target patterns). |
 | `bm25_block_threshold` | `float` | `0.85` | BM25 score threshold for BLOCK outcome in semantic similarity layer. |
@@ -4615,7 +4615,7 @@ Defined in `elephantbroker/schemas/trace.py` as `TraceEventType(StrEnum)`.
 Descriptions in `elephantbroker/api/routes/trace_event_descriptions.py` as `TRACE_EVENT_DESCRIPTIONS` dict.
 Accessible via `GET /trace/event-types`.
 
-#### All 47 TraceEventType values
+#### All 51 TraceEventType values
 
 | # | Value | Description |
 |---|---|---|
@@ -4663,9 +4663,13 @@ Accessible via `GET /trace/event-types`.
 | 42 | `handle_resolved` | Platform-qualified handle resolved to actor |
 | 43 | `persistent_goal_created` | Persistent goal created with scope (GLOBAL/ORGANIZATION/TEAM/ACTOR) |
 | 44 | `bootstrap_org_created` | Organization bootstrapped during first-run initialization |
-| 45 | `consolidation_started` | Consolidation (sleep) pipeline started for gateway |
-| 46 | `consolidation_stage_completed` | Single consolidation stage completed (1 of 9) |
-| 47 | `consolidation_completed` | Full consolidation pipeline completed (all 9 stages) |
+| 45 | `session_goal_created` | Session goal created -- new goal tracked for the session |
+| 46 | `session_goal_updated` | Session goal updated (status/priority/target change) |
+| 47 | `session_goal_blocker_added` | Session goal blocker recorded -- reason why the goal is stalled |
+| 48 | `session_goal_progress` | Session goal progress note -- incremental progress recorded |
+| 49 | `consolidation_started` | Consolidation (sleep) pipeline started for gateway |
+| 50 | `consolidation_stage_completed` | Single consolidation stage completed (1 of 9) |
+| 51 | `consolidation_completed` | Full consolidation pipeline completed (all 9 stages) |
 
 ---
 
@@ -5205,7 +5209,7 @@ These are the 5 named profile presets from arch spec §10.2. Each profile's cons
 | context/lifecycle.py:42-48 | `TOOL_ALIASES` | 22 tool name → canonical name mappings |
 | guards/autonomy.py:17-47 | `_DEFAULT_TOOL_DOMAINS` | 22 tool → domain default mappings |
 | guards/autonomy.py:50-60 | `_KEYWORD_DOMAINS` | 9 domain → keyword list heuristic mappings |
-| guards/rules.py:119-159 | 13 entries | Builtin static guard rules (credential, SQL, shell, exfiltrate) |
+| guards/rules.py:119-171 | 16 entries | Builtin static guard rules (credential, SQL, shell, exfiltrate, payment, refactor-gate, prod-deploy) |
 | consolidation/domain_discovery.py:23-34 | 10 entries | Decision domain names and descriptions for embedding comparison |
 
 ---
