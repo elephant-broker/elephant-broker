@@ -10,14 +10,18 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from elephantbroker.runtime.metrics import inc_cognee_capture_failure
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.consolidation import CanonicalResult
+from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 if TYPE_CHECKING:
     from elephantbroker.runtime.adapters.cognee.cached_embeddings import CachedEmbeddingService
     from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
     from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
     from elephantbroker.runtime.adapters.llm.client import LLMClient
+    from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+    from elephantbroker.runtime.metrics import MetricsContext
     from elephantbroker.schemas.consolidation import (
         ConsolidationConfig,
         ConsolidationContext,
@@ -54,12 +58,16 @@ class CanonicalizationStage:
         llm_client: LLMClient | None,
         embedding_service: CachedEmbeddingService,
         config: ConsolidationConfig,
+        trace_ledger: ITraceLedger | None = None,
+        metrics: MetricsContext | None = None,
     ) -> None:
         self._graph = graph
         self._vector = vector
         self._llm = llm_client
         self._embeddings = embedding_service
         self._config = config
+        self._trace = trace_ledger
+        self._metrics = metrics
 
     @traced
     async def run(
@@ -184,6 +192,28 @@ class CanonicalizationStage:
             decision_domain=best.decision_domain,
         )
 
+        # TD-50 / BS-10: Cognee-first to capture data_id on the canonical
+        # fact BEFORE the graph MERGE. Mirrors facade.store() (C1). Without
+        # this, the canonical graph node is persisted with
+        # cognee_data_id=None and a future delete cascade silently
+        # orphans the Cognee-owned document — same class of bug the
+        # facade fix closed.
+        import cognee
+        dataset_name = f"{gateway_id}__elephantbroker"
+        cognee_add_result = None
+        try:
+            cognee_add_result = await cognee.add(
+                canonical_text.strip(), dataset_name=dataset_name,
+            )
+        except Exception:
+            logger.debug("cognee.add failed for canonical — non-fatal", exc_info=True)
+
+        if cognee_add_result is not None:
+            try:
+                new_fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+            except (AttributeError, IndexError, KeyError, TypeError) as exc:
+                await self._emit_capture_failure(fact_id=new_fact.id, exc=exc)
+
         # Store canonical via Cognee-first dual write (BS-10)
         dp = FactDataPoint.from_schema(new_fact)
         try:
@@ -192,12 +222,18 @@ class CanonicalizationStage:
             logger.warning("add_data_points failed for canonical %s", new_id, exc_info=True)
             return None
 
-        try:
-            import cognee
-            dataset_name = f"{gateway_id}__elephantbroker"
-            await cognee.add(canonical_text.strip(), dataset_name=dataset_name)
-        except Exception:
-            logger.debug("cognee.add failed for canonical — non-fatal", exc_info=True)
+        # Collect the superseded facts' cognee_data_ids BEFORE archival
+        # mutates member state. Each old id points at a Cognee document
+        # that is now dead weight — the canonical's new document
+        # supersedes it. These must be cascaded after the graph nodes
+        # are re-MERGEd as archived, so an observer never sees an
+        # archived fact whose cognee_data_id already points at a
+        # half-deleted document.
+        superseded_data_ids: list[tuple[uuid.UUID, object]] = [
+            (member.id, member.cognee_data_id)
+            for member in members
+            if member.cognee_data_id
+        ]
 
         # Archive ALL originals (AD-3)
         archived_ids: list[str] = []
@@ -225,6 +261,13 @@ class CanonicalizationStage:
             except Exception:
                 logger.debug("SUPERSEDED_BY edge failed for %s", member.id)
 
+        # Cascade superseded Cognee documents. Best-effort per-item — a
+        # failure for one superseded id does not block the others.
+        for member_id, old_data_id in superseded_data_ids:
+            await self._cascade_superseded_data_id(
+                old_data_id, fact_id=member_id, dataset_name=dataset_name,
+            )
+
         return CanonicalResult(
             cluster_id=cluster.cluster_id,
             new_canonical_fact_id=str(new_id),
@@ -236,3 +279,78 @@ class CanonicalizationStage:
             merged_goal_ids=merged_goal_ids_str,
             llm_used=needs_llm,
         )
+
+    async def _emit_capture_failure(
+        self, *, fact_id: uuid.UUID, exc: Exception,
+    ) -> None:
+        """TD-50 silent-failure observability for the canonicalize path.
+
+        Fires when cognee.add() returns a shape we cannot extract a
+        data_id from. The canonical fact is still persisted with
+        cognee_data_id=None, but the delete cascade will not be able to
+        reach the Cognee-owned document — the orphan TD-50 exists to
+        prevent. Emits the same metric + DEGRADED_OPERATION trace shape
+        as facade.store()/update(), with operation="canonicalize" so
+        dashboards can split capture failures by call site.
+        """
+        if self._metrics:
+            self._metrics.inc_cognee_capture_failure("canonicalize")
+        else:
+            inc_cognee_capture_failure("canonicalize")
+        logger.warning(
+            "Could not capture cognee_data_id for canonical fact %s "
+            "(delete cascade will skip cognee cleanup): %s",
+            fact_id, exc,
+        )
+        if self._trace is not None:
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.DEGRADED_OPERATION,
+                    payload={
+                        "component": "consolidation_canonicalize",
+                        "operation": "canonicalize",
+                        "failure": "cognee_data_id_capture",
+                        "fact_id": str(fact_id),
+                        "exception_type": type(exc).__name__,
+                        "exception": str(exc),
+                    },
+                )
+            )
+
+    async def _cascade_superseded_data_id(
+        self, cognee_data_id, *, fact_id: uuid.UUID, dataset_name: str,
+    ) -> None:
+        """Remove the Cognee-side document for a superseded fact.
+
+        Called once per archived original that had a cognee_data_id.
+        Same shape as facade._cascade_cognee_data (intentionally
+        duplicated rather than imported — keeping the consolidation
+        stage decoupled from the memory facade is worth the few lines).
+        Best-effort: failures are logged and swallowed so one dead
+        document does not block the remaining cascades.
+        """
+        import cognee
+        try:
+            from uuid import UUID
+            from cognee.modules.data.methods import get_datasets_by_name
+            from cognee.modules.users.methods import get_default_user
+            user = await get_default_user()
+            datasets = await get_datasets_by_name([dataset_name], user.id)
+            if not datasets:
+                logger.debug(
+                    "Superseded-cascade skipped: dataset %s not found for fact %s",
+                    dataset_name, fact_id,
+                )
+                return
+            data_id_uuid = UUID(str(cognee_data_id))
+            await cognee.datasets.delete_data(
+                dataset_id=datasets[0].id,
+                data_id=data_id_uuid,
+                mode="soft",
+                delete_dataset_if_empty=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Superseded-cascade failed (fact_id=%s, data_id=%s): %r",
+                fact_id, cognee_data_id, exc,
+            )

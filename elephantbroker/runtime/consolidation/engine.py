@@ -154,6 +154,7 @@ class ConsolidationEngine(IConsolidationEngine):
             if self._graph and self._vector:
                 stages[2] = CanonicalizationStage(
                     self._graph, self._vector, self._llm, self._embeddings, consolidation_cfg,
+                    trace_ledger=self._trace, metrics=self._metrics,
                 )
         except Exception:
             pass

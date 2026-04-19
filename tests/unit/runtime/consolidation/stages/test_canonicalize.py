@@ -31,7 +31,7 @@ def _mock_cognee_for_canonicalize(monkeypatch):
     return mock_adp
 
 
-def _make_stage(llm_text="merged fact", llm_fail=False):
+def _make_stage(llm_text="merged fact", llm_fail=False, trace=None, metrics=None):
     from elephantbroker.runtime.consolidation.stages.canonicalize import CanonicalizationStage
 
     graph = AsyncMock()
@@ -43,7 +43,10 @@ def _make_stage(llm_text="merged fact", llm_fail=False):
     else:
         llm.complete = AsyncMock(return_value=llm_text)
     config = ConsolidationConfig()
-    stage = CanonicalizationStage(graph, vector, llm, embeddings, config)
+    stage = CanonicalizationStage(
+        graph, vector, llm, embeddings, config,
+        trace_ledger=trace, metrics=metrics,
+    )
     return stage, graph, vector, llm
 
 
@@ -198,3 +201,183 @@ class TestCanonicalize:
         ctx = _make_context()
         results = await stage.run([], [], "gw", ctx)
         assert results == []
+
+    # --- PR #5 TODO 5-201: canonicalize TD-50 cognee_data_id capture ---
+    # Three tests pinning the C8 fix:
+    #   1. Success path — cognee.add() return wired onto new_fact.cognee_data_id
+    #      BEFORE the graph MERGE (so the canonical node is storable with a
+    #      cascade-reachable pointer, not the pre-fix silent None).
+    #   2. Capture failure — when cognee.add() returns a malformed shape the
+    #      facade cannot extract a data_id from, the DEGRADED_OPERATION trace
+    #      and the eb_cognee_data_id_capture_failures_total metric (operation
+    #      label "canonicalize") both fire. The fact is still persisted with
+    #      cognee_data_id=None (graceful degradation — same contract as
+    #      facade.store()/update()).
+    #   3. Superseded cascade — each pre-existing fact that carried its own
+    #      cognee_data_id has that id enqueued for the Cognee-side delete so
+    #      the old documents don't silently accumulate as orphans after the
+    #      canonical merge supersedes them.
+
+    async def test_canonicalize_captures_cognee_data_id_on_new_fact(self, monkeypatch):
+        """Success path: cognee.add() returns a valid shape → new_fact.cognee_data_id is set
+        BEFORE add_data_points() runs (so the MERGEd canonical node points at the new doc).
+
+        Note: add_data_points is called 3× in this flow (1 canonical + 2 archived
+        originals). We capture ALL calls and inspect the FIRST one — the canonical —
+        because archived originals legitimately have cognee_data_id=None in this
+        factory setup and would mask the canonical's data_id on a last-write capture.
+        """
+        from unittest.mock import MagicMock as _MagicMock
+
+        captured_dps: list = []
+
+        async def capture_adp(dps):
+            if dps:
+                captured_dps.append(dps[0])
+
+        monkeypatch.setattr("cognee.tasks.storage.add_data_points", AsyncMock(side_effect=capture_adp))
+
+        fake_data_id = uuid.uuid4()
+        fake_result = _MagicMock()
+        fake_result.data_ingestion_info = [{"data_id": fake_data_id}]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=fake_result))
+
+        stage, *_ = _make_stage(llm_text="merged canonical text")
+        facts = [
+            make_fact_assertion(text="a", session_key="s1"),
+            make_fact_assertion(text="b", session_key="s2"),
+        ]
+        cluster = _make_cluster(facts)
+        ctx = _make_context()
+        results = await stage.run([cluster], facts, "gw", ctx)
+        assert len(results) == 1
+        # The first add_data_points call is the canonical dp — it must carry the
+        # captured data_id, not the pre-fix silent None.
+        assert len(captured_dps) >= 1
+        canonical_dp = captured_dps[0]
+        assert canonical_dp.cognee_data_id == str(fake_data_id)
+
+    async def test_canonicalize_emits_degraded_operation_on_capture_failure(self, monkeypatch):
+        """Malformed cognee.add() return → DEGRADED_OPERATION trace + capture-failure metric.
+        The canonical fact is still persisted with cognee_data_id=None."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        # Malformed shape: data_ingestion_info missing → KeyError on extraction
+        bad_result = _MagicMock()
+        bad_result.data_ingestion_info = []  # IndexError on [0]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=bad_result))
+
+        trace_calls: list = []
+
+        class FakeTrace:
+            async def append_event(self, event):
+                trace_calls.append(event)
+
+        class FakeMetrics:
+            def __init__(self):
+                self.capture_calls: list[str] = []
+            def inc_cognee_capture_failure(self, operation):
+                self.capture_calls.append(operation)
+
+        fake_metrics = FakeMetrics()
+        fake_trace = FakeTrace()
+
+        captured_dps: list = []
+
+        async def capture_adp(dps):
+            if dps:
+                captured_dps.append(dps[0])
+
+        monkeypatch.setattr("cognee.tasks.storage.add_data_points", AsyncMock(side_effect=capture_adp))
+
+        stage, *_ = _make_stage(
+            llm_text="merged canonical text",
+            trace=fake_trace,
+            metrics=fake_metrics,
+        )
+        facts = [
+            make_fact_assertion(text="a", session_key="s1"),
+            make_fact_assertion(text="b", session_key="s2"),
+        ]
+        cluster = _make_cluster(facts)
+        ctx = _make_context()
+        results = await stage.run([cluster], facts, "gw", ctx)
+
+        assert len(results) == 1
+        # Capture failure metric fired with operation="canonicalize"
+        assert fake_metrics.capture_calls == ["canonicalize"]
+        # DEGRADED_OPERATION trace emitted
+        from elephantbroker.schemas.trace import TraceEventType
+        degraded = [e for e in trace_calls if e.event_type == TraceEventType.DEGRADED_OPERATION]
+        assert len(degraded) == 1
+        assert degraded[0].payload["operation"] == "canonicalize"
+        assert degraded[0].payload["failure"] == "cognee_data_id_capture"
+        # First add_data_points call is the canonical dp — it must carry cognee_data_id=None
+        # under graceful-degradation contract (pre-fix silent None is now accompanied by
+        # metric + trace, but the persist still succeeds with the missing id).
+        assert len(captured_dps) >= 1
+        canonical_dp = captured_dps[0]
+        assert canonical_dp.cognee_data_id is None
+
+    async def test_canonicalize_enqueues_superseded_cognee_data_ids_for_cascade(self, monkeypatch):
+        """Each pre-existing fact with cognee_data_id has that id passed through to the
+        Cognee delete cascade (so the old documents are not silently orphaned)."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        # cognee.add succeeds for canonical (so the new fact is storable and the
+        # test focuses on the superseded-cascade branch only)
+        fake_data_id = uuid.uuid4()
+        fake_result = _MagicMock()
+        fake_result.data_ingestion_info = [{"data_id": fake_data_id}]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=fake_result))
+
+        # Stub Cognee internals that the cascade reaches into
+        fake_user = _MagicMock()
+        fake_user.id = uuid.uuid4()
+        fake_dataset = _MagicMock()
+        fake_dataset.id = uuid.uuid4()
+        monkeypatch.setattr(
+            "cognee.modules.users.methods.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "cognee.modules.data.methods.get_datasets_by_name",
+            AsyncMock(return_value=[fake_dataset]),
+        )
+
+        delete_calls: list = []
+
+        async def capture_delete(**kwargs):
+            delete_calls.append(kwargs)
+
+        # cognee.datasets.delete_data is what the cascade calls
+        import cognee as _cognee
+        fake_datasets_mod = _MagicMock()
+        fake_datasets_mod.delete_data = AsyncMock(side_effect=capture_delete)
+        monkeypatch.setattr(_cognee, "datasets", fake_datasets_mod, raising=False)
+
+        stage, *_ = _make_stage(llm_text="merged canonical text")
+
+        old_data_id_a = uuid.uuid4()
+        old_data_id_b = uuid.uuid4()
+        facts = [
+            make_fact_assertion(
+                text="identical", session_key="s1",
+                cognee_data_id=old_data_id_a,
+            ),
+            make_fact_assertion(
+                text="identical", session_key="s2",
+                cognee_data_id=old_data_id_b,
+            ),
+        ]
+        cluster = _make_cluster(facts)
+        ctx = _make_context()
+        await stage.run([cluster], facts, "gw", ctx)
+
+        # Both superseded originals' cognee_data_ids cascaded
+        assert len(delete_calls) == 2
+        cascaded_ids = {call["data_id"] for call in delete_calls}
+        assert cascaded_ids == {old_data_id_a, old_data_id_b}
+        # All cascades use soft-delete mode, preserving the dataset
+        assert all(call["mode"] == "soft" for call in delete_calls)
+        assert all(call["delete_dataset_if_empty"] is False for call in delete_calls)
