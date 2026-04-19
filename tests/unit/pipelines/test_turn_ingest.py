@@ -423,6 +423,13 @@ class _FakeRedis:
         if ex:
             self._ttls[key] = ex
 
+    async def delete(self, key):
+        existed = (key in self._kv) or (key in self._data)
+        self._kv.pop(key, None)
+        self._data.pop(key, None)
+        self._ttls.pop(key, None)
+        return 1 if existed else 0
+
 
 class _FakePipeline:
     def __init__(self, redis: _FakeRedis):
@@ -571,6 +578,62 @@ class TestIngestBuffer:
         assert len(flushed) == 9
         assert flushed[0]["content"] == "msg3"  # oldest surviving message
         assert flushed[-1]["content"] == "msg11"  # newest message
+
+    # --- Gateway Identity: Redis key prefix (PR #5 TODOs 5-202, 5-310) ---
+    # Every Redis key MUST be built via RedisKeyBuilder so two gateways sharing
+    # Redis never collide. buffer.py previously fell back to hardcoded
+    # `f"eb:ingest_buffer:..."` / `f"eb:recent_facts:..."` strings when
+    # `redis_keys=None`, bypassing the gateway prefix. The three tests below
+    # pin the post-fix behavior.
+
+    async def test_ingest_buffer_key_carries_gateway_prefix(self):
+        """With an explicit RedisKeyBuilder(gateway_id=...), add/flush use the
+        gateway-prefixed key `eb:{gw}:ingest_buffer:{sk}`."""
+        from elephantbroker.runtime.redis_keys import RedisKeyBuilder
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=10)
+        keys = RedisKeyBuilder(gateway_id="gw-alpha")
+        buf = IngestBuffer(redis, config, redis_keys=keys)
+        await buf.add_messages("sk:test", [{"role": "user", "content": "hi"}])
+        # The gateway-prefixed key must exist on the fake Redis.
+        assert "eb:gw-alpha:ingest_buffer:sk:test" in redis._data
+        # And the legacy unprefixed key must NOT exist.
+        assert "eb:ingest_buffer:sk:test" not in redis._data
+
+    async def test_recent_facts_key_carries_gateway_prefix(self):
+        """update_recent_facts / load_recent_facts / scrub_fact_from_recent
+        all use `eb:{gw}:recent_facts:{sk}` when a RedisKeyBuilder is provided."""
+        from elephantbroker.runtime.redis_keys import RedisKeyBuilder
+        redis = _FakeRedis()
+        config = self._make_config()
+        keys = RedisKeyBuilder(gateway_id="gw-beta")
+        buf = IngestBuffer(redis, config, redis_keys=keys)
+        fact_id = str(uuid.uuid4())
+        await buf.update_recent_facts(
+            "sk:test", [{"id": fact_id, "text": "x", "category": "general"}],
+        )
+        assert "eb:gw-beta:recent_facts:sk:test" in redis._kv
+        assert "eb:recent_facts:sk:test" not in redis._kv
+        loaded = await buf.load_recent_facts("sk:test")
+        assert len(loaded) == 1 and loaded[0]["id"] == fact_id
+        removed = await buf.scrub_fact_from_recent("sk:test", fact_id)
+        assert removed == 1
+        # Scrub removed the only entry → key deleted under gateway prefix.
+        assert "eb:gw-beta:recent_facts:sk:test" not in redis._kv
+
+    async def test_redis_keys_none_defaults_to_empty_gateway_builder(self):
+        """When `redis_keys` is omitted or None, the buffer still routes all
+        keys through an internal RedisKeyBuilder (gateway_id="") — no
+        hardcoded fallback string reaches Redis."""
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=10)
+        buf = IngestBuffer(redis, config)  # redis_keys defaults to None
+        await buf.add_messages("sk:test", [{"role": "user", "content": "hi"}])
+        # Default builder produces `eb::ingest_buffer:sk:test` (empty gateway
+        # → double colon between `eb:` and the key name).
+        assert "eb::ingest_buffer:sk:test" in redis._data
+        # The legacy hardcoded fallback format must NOT be present anywhere.
+        assert "eb:ingest_buffer:sk:test" not in redis._data
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import logging
 import time
 
 from elephantbroker.runtime.observability import traced
+from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.config import LLMConfig
 
 logger = logging.getLogger("elephantbroker.pipelines.turn_ingest.buffer")
@@ -18,7 +19,7 @@ class IngestBuffer:
         self._redis = redis
         self._config = config
         self._last_flush: dict[str, float] = {}
-        self._keys = redis_keys
+        self._keys = redis_keys if redis_keys is not None else RedisKeyBuilder(gateway_id="")
 
     @traced
     async def add_messages(self, session_key: str, messages: list[dict]) -> bool:
@@ -28,7 +29,7 @@ class IngestBuffer:
         method from being called — extraction is handled by ContextLifecycle.ingest_batch().
         The overflow guard below is only reachable in MEMORY_ONLY mode (TODO(TD-15)).
         """
-        key = self._keys.ingest_buffer(session_key) if self._keys else f"eb:ingest_buffer:{session_key}"
+        key = self._keys.ingest_buffer(session_key)
         max_size = self._config.ingest_batch_size * 3  # 3x = ~3 flushes of headroom
         pipe = self._redis.pipeline()
         for msg in messages:
@@ -42,7 +43,7 @@ class IngestBuffer:
     @traced
     async def flush(self, session_key: str) -> list[dict]:
         """Atomically drain all buffered messages for a session."""
-        key = self._keys.ingest_buffer(session_key) if self._keys else f"eb:ingest_buffer:{session_key}"
+        key = self._keys.ingest_buffer(session_key)
         pipe = self._redis.pipeline()
         pipe.lrange(key, 0, -1)
         pipe.delete(key)
@@ -64,7 +65,7 @@ class IngestBuffer:
     @traced
     async def load_recent_facts(self, session_key: str) -> list[dict]:
         """Load recently extracted facts for extraction context."""
-        key = self._keys.recent_facts(session_key) if self._keys else f"eb:recent_facts:{session_key}"
+        key = self._keys.recent_facts(session_key)
         data = await self._redis.get(key)
         if data:
             return json.loads(data)
@@ -75,7 +76,7 @@ class IngestBuffer:
         self, session_key: str, new_facts: list[dict], max_count: int = 20,
     ) -> None:
         """Update the recent facts window, keeping only the last max_count."""
-        key = self._keys.recent_facts(session_key) if self._keys else f"eb:recent_facts:{session_key}"
+        key = self._keys.recent_facts(session_key)
         trimmed = new_facts[-max_count:]
         await self._redis.set(
             key, json.dumps(trimmed), ex=self._config.extraction_context_ttl_seconds,
@@ -91,7 +92,7 @@ class IngestBuffer:
 
         Returns count of entries removed (0 if key missing or id not present).
         """
-        key = self._keys.recent_facts(session_key) if self._keys else f"eb:recent_facts:{session_key}"
+        key = self._keys.recent_facts(session_key)
         data = await self._redis.get(key)
         if not data:
             return 0

@@ -637,7 +637,7 @@ class TestMemoryStoreFacadePhase4:
         fact = make_fact_assertion(session_key="sk:test")
         props = self._fact_props(fact, session_key="sk:test")
         graph.get_entity = AsyncMock(return_value=props)
-        buffer_key = "eb:recent_facts:sk:test"
+        buffer_key = "eb::recent_facts:sk:test"
         redis._kv[buffer_key] = _json.dumps([
             {"id": str(fact.id), "text": fact.text, "category": "general"},
         ])
@@ -654,7 +654,7 @@ class TestMemoryStoreFacadePhase4:
         other_1 = {"id": str(uuid.uuid4()), "text": "other one", "category": "general"}
         other_2 = {"id": str(uuid.uuid4()), "text": "other two", "category": "general"}
         target = {"id": str(fact.id), "text": fact.text, "category": "general"}
-        buffer_key = "eb:recent_facts:sk:test"
+        buffer_key = "eb::recent_facts:sk:test"
         redis._kv[buffer_key] = _json.dumps([other_1, target, other_2])
         await facade.delete(fact.id)
         remaining = _json.loads(redis._kv[buffer_key])
@@ -675,7 +675,7 @@ class TestMemoryStoreFacadePhase4:
             {"id": str(uuid.uuid4()), "text": "a", "category": "general"},
             {"id": str(uuid.uuid4()), "text": "b", "category": "general"},
         ]
-        buffer_key = "eb:recent_facts:sk:test"
+        buffer_key = "eb::recent_facts:sk:test"
         redis._kv[buffer_key] = _json.dumps(unrelated)
         await facade.delete(fact.id)  # Should not raise
         # Buffer contents unchanged
@@ -710,7 +710,7 @@ class TestMemoryStoreFacadePhase4:
         fact = make_fact_assertion(session_key="sk:test")
         props = self._fact_props(fact, session_key="sk:test")
         graph.get_entity = AsyncMock(return_value=props)
-        redis._kv["eb:recent_facts:sk:test"] = _json.dumps([
+        redis._kv["eb::recent_facts:sk:test"] = _json.dumps([
             {"id": str(fact.id), "text": fact.text, "category": "general"},
         ])
         await facade.delete(fact.id)
@@ -729,7 +729,7 @@ class TestMemoryStoreFacadePhase4:
         props = self._fact_props(fact, session_key="sk:test")
         graph.get_entity = AsyncMock(return_value=props)
         # recent_facts key exists but contains only unrelated entries.
-        redis._kv["eb:recent_facts:sk:test"] = _json.dumps([
+        redis._kv["eb::recent_facts:sk:test"] = _json.dumps([
             {"id": str(uuid.uuid4()), "text": "other", "category": "general"},
         ])
         await facade.delete(fact.id)
