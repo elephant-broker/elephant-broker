@@ -45,6 +45,7 @@ def _make_stage(llm_text="merged fact", llm_fail=False, trace=None, metrics=None
     config = ConsolidationConfig()
     stage = CanonicalizationStage(
         graph, vector, llm, embeddings, config,
+        dataset_name="gw__elephantbroker",
         trace_ledger=trace, metrics=metrics,
     )
     return stage, graph, vector, llm
@@ -396,17 +397,20 @@ class TestCanonicalize:
         fake_result.data_ingestion_info = [{"data_id": fake_data_id}]
         monkeypatch.setattr("cognee.add", AsyncMock(return_value=fake_result))
 
-        # Stub Cognee internals that the cascade reaches into
+        # Stub Cognee internals bound into the shared cascade helper's
+        # namespace (TODO-5-314: cascade now lives in
+        # elephantbroker.runtime.memory.cascade_helper, so module-level
+        # `from ... import X` bindings are what the patches must target).
         fake_user = _MagicMock()
         fake_user.id = uuid.uuid4()
         fake_dataset = _MagicMock()
         fake_dataset.id = uuid.uuid4()
         monkeypatch.setattr(
-            "cognee.modules.users.methods.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "cognee.modules.data.methods.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[fake_dataset]),
         )
 
@@ -451,3 +455,101 @@ class TestCanonicalize:
         # All cascades use soft-delete mode, preserving the dataset
         assert all(call["mode"] == "soft" for call in delete_calls)
         assert all(call["delete_dataset_if_empty"] is False for call in delete_calls)
+
+    async def test_superseded_cascade_recovers_from_qdrant_404(self, monkeypatch):
+        """TODO-5-314 regression: the shared cascade helper's TD-Cognee-
+        Qdrant-404 recovery branch now covers the canonicalize path too.
+
+        Pre-extraction, canonicalize carried an intentionally-duplicated
+        cascade body WITHOUT the 404 branch — if a cluster included a
+        member whose Cognee Data row was added but never cognify()'d, the
+        vector collection would 404 mid-cascade and Cognee's outer
+        delete_data would abort before unbinding the Data↔Dataset. This
+        test pins that canonicalize now invokes the shared helper which
+        manually completes the metadata removal on 404, returning
+        "ok_idempotent" rather than "failed".
+        """
+        from unittest.mock import MagicMock as _MagicMock
+        from httpx import Headers
+        from qdrant_client.http.exceptions import UnexpectedResponse
+
+        # cognee.add for the canonical succeeds so we reach the cascade loop
+        fake_data_id = uuid.uuid4()
+        fake_result = _MagicMock()
+        fake_result.data_ingestion_info = [{"data_id": fake_data_id}]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=fake_result))
+
+        fake_user = _MagicMock()
+        fake_user.id = uuid.uuid4()
+        fake_dataset = _MagicMock()
+        fake_ds_id = uuid.uuid4()
+        fake_dataset.id = fake_ds_id
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
+            AsyncMock(return_value=[fake_dataset]),
+        )
+
+        # Inner Qdrant delete raises 404 — the exact shape we see when a
+        # Data row was added but never cognify()'d (no derived vector
+        # collection exists).
+        qdrant_404 = UnexpectedResponse(
+            status_code=404,
+            reason_phrase="Not Found",
+            content=b'{"status":{"error":"Collection not found"}}',
+            headers=Headers({}),
+        )
+        import cognee as _cognee
+        fake_datasets_mod = _MagicMock()
+        fake_datasets_mod.delete_data = AsyncMock(side_effect=qdrant_404)
+        monkeypatch.setattr(_cognee, "datasets", fake_datasets_mod, raising=False)
+
+        # Recovery path: helper re-fetches Data rows and calls inner
+        # delete_data to complete the Data↔Dataset unbind manually.
+        old_data_id = uuid.uuid4()
+        fake_data_row = type("Data", (), {"id": old_data_id, "__tablename__": "data"})()
+        get_dataset_data_mock = AsyncMock(return_value=[fake_data_row])
+        delete_data_row_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.cascade_helper.get_dataset_data",
+            get_dataset_data_mock,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.cascade_helper._delete_data_row",
+            delete_data_row_mock,
+        )
+
+        stage, graph, *_ = _make_stage(llm_text="merged canonical text")
+
+        facts = [
+            make_fact_assertion(text="identical", session_key="s1"),
+            make_fact_assertion(text="identical", session_key="s2"),
+        ]
+        member_ids_by_fact: dict[str, str] = {
+            str(facts[0].id): str(old_data_id),
+            str(facts[1].id): str(uuid.uuid4()),
+        }
+
+        async def _get_entity(node_id: str):
+            return {"cognee_data_id": member_ids_by_fact.get(node_id)}
+
+        graph.get_entity = AsyncMock(side_effect=_get_entity)
+
+        cluster = _make_cluster(facts)
+        ctx = _make_context()
+        # Must not raise — helper returns status strings; canonicalize's
+        # per-member cascade loop swallows results best-effort.
+        await stage.run([cluster], facts, "gw", ctx)
+
+        # Recovery fired for the member whose data_id we set up:
+        # get_dataset_data was called with the dataset id, and the inner
+        # delete_data_row was awaited to complete the Data↔Dataset unbind.
+        get_dataset_data_mock.assert_awaited()
+        delete_data_row_mock.assert_awaited()
+        # Assert the recovery call targeted the correct row.
+        called_with_row = delete_data_row_mock.await_args_list[0].args
+        assert called_with_row[0] is fake_data_row
+        assert called_with_row[1] == fake_ds_id

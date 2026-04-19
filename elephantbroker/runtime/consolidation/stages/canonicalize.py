@@ -58,6 +58,7 @@ class CanonicalizationStage:
         llm_client: LLMClient | None,
         embedding_service: CachedEmbeddingService,
         config: ConsolidationConfig,
+        dataset_name: str,
         trace_ledger: ITraceLedger | None = None,
         metrics: MetricsContext | None = None,
     ) -> None:
@@ -66,6 +67,7 @@ class CanonicalizationStage:
         self._llm = llm_client
         self._embeddings = embedding_service
         self._config = config
+        self._dataset_name = dataset_name
         self._trace = trace_ledger
         self._metrics = metrics
 
@@ -198,12 +200,16 @@ class CanonicalizationStage:
         # cognee_data_id=None and a future delete cascade silently
         # orphans the Cognee-owned document — same class of bug the
         # facade fix closed.
+        # TODO-5-313: dataset_name is threaded from ConsolidationEngine →
+        # container (which composes it from gateway_id + EB_DEFAULT_DATASET).
+        # Do NOT hardcode "elephantbroker" here — a deployment with a custom
+        # EB_DEFAULT_DATASET would silently canonicalize into the wrong
+        # Cognee dataset, leaving the intended one without canonicals.
         import cognee
-        dataset_name = f"{gateway_id}__elephantbroker"
         cognee_add_result = None
         try:
             cognee_add_result = await cognee.add(
-                canonical_text.strip(), dataset_name=dataset_name,
+                canonical_text.strip(), dataset_name=self._dataset_name,
             )
         except Exception:
             logger.debug("cognee.add failed for canonical — non-fatal", exc_info=True)
@@ -301,7 +307,7 @@ class CanonicalizationStage:
         # failure for one superseded id does not block the others.
         for member_id, old_data_id in superseded_data_ids:
             await self._cascade_superseded_data_id(
-                old_data_id, fact_id=member_id, dataset_name=dataset_name,
+                old_data_id, fact_id=member_id,
             )
 
         return CanonicalResult(
@@ -354,56 +360,28 @@ class CanonicalizationStage:
             )
 
     async def _cascade_superseded_data_id(
-        self, cognee_data_id, *, fact_id: uuid.UUID, dataset_name: str,
+        self, cognee_data_id, *, fact_id: uuid.UUID,
     ) -> None:
-        """Remove the Cognee-side document for a superseded fact.
+        """Thin wrapper over `memory.cascade_helper.cascade_cognee_data`.
 
-        Called once per archived original that had a cognee_data_id.
-        Same shape as facade._cascade_cognee_data (intentionally
-        duplicated rather than imported — keeping the consolidation
-        stage decoupled from the memory facade is worth the few lines).
-        Best-effort: failures are logged and swallowed so one dead
-        document does not block the remaining cascades.
+        TODO-5-314: shared with the memory facade's delete/update cascade.
+        See `elephantbroker/runtime/memory/cascade_helper.py` for the
+        pin-invariant docstring (TODO-5-006), status-code contract, and
+        TD-Cognee-Qdrant-404 recovery rationale. Prior to this extraction
+        canonicalize carried a near-copy that was MISSING the 404 recovery
+        branch — a cluster canonicalized against a never-cognify()'d
+        member would 404 mid-cascade and leave the Data↔Dataset
+        association orphaned. Best-effort: the helper returns a status
+        string and does not raise, so one dead document does not block
+        the remaining cascades in the enclosing loop.
         """
-        import cognee
-        try:
-            from uuid import UUID
-            from cognee.modules.data.methods import get_datasets_by_name
-            from cognee.modules.users.methods import get_default_user
-            user = await get_default_user()
-            datasets = await get_datasets_by_name([dataset_name], user.id)
-            if not datasets:
-                # TODO-5-309: datasets[0].id below is only reached after
-                # this guard, so an empty dataset list cannot IndexError.
-                logger.debug(
-                    "Superseded-cascade skipped: dataset %s not found for fact %s",
-                    dataset_name, fact_id,
-                )
-                return
-            try:
-                data_id_uuid = (
-                    cognee_data_id if isinstance(cognee_data_id, UUID)
-                    else UUID(str(cognee_data_id))
-                )
-            except (ValueError, TypeError) as exc:
-                # TODO-5-109: stored cognee_data_id not UUID-parseable (legacy
-                # row from pre-5-003 capture coercion, or corrupted value).
-                # Distinguish from a Cognee-side delete failure: no Cognee
-                # call is attempted, nothing to retry at that layer.
-                logger.warning(
-                    "Superseded-cascade skipped: cognee_data_id=%r on fact "
-                    "%s is not UUID-parseable (%s: %s)",
-                    cognee_data_id, fact_id, type(exc).__name__, exc,
-                )
-                return
-            await cognee.datasets.delete_data(
-                dataset_id=datasets[0].id,
-                data_id=data_id_uuid,
-                mode="soft",
-                delete_dataset_if_empty=False,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Superseded-cascade failed (fact_id=%s, data_id=%s): %r",
-                fact_id, cognee_data_id, exc,
-            )
+        from elephantbroker.runtime.memory.cascade_helper import (
+            cascade_cognee_data,
+        )
+        await cascade_cognee_data(
+            cognee_data_id,
+            dataset_name=self._dataset_name,
+            fact_id=fact_id,
+            context="consolidation_canonicalize",
+            log=logger,
+        )

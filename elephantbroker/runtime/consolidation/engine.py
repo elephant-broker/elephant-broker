@@ -97,6 +97,7 @@ class ConsolidationEngine(IConsolidationEngine):
         procedure_audit_store: ProcedureAuditStore | None = None,
         session_goal_audit_store: SessionGoalAuditStore | None = None,
         gateway_id: str = "",
+        dataset_name: str = "elephantbroker",
         **kwargs,
     ) -> None:
         self._trace = trace_ledger
@@ -121,6 +122,7 @@ class ConsolidationEngine(IConsolidationEngine):
         self._proc_audit = procedure_audit_store
         self._goal_audit = session_goal_audit_store
         self._gateway_id = gateway_id
+        self._dataset_name = dataset_name
         self._log = GatewayLoggerAdapter(
             logging.getLogger("elephantbroker.runtime.consolidation.engine"),
             {"gateway_id": gateway_id},
@@ -154,6 +156,7 @@ class ConsolidationEngine(IConsolidationEngine):
             if self._graph and self._vector:
                 stages[2] = CanonicalizationStage(
                     self._graph, self._vector, self._llm, self._embeddings, consolidation_cfg,
+                    dataset_name=self._dataset_name,
                     trace_ledger=self._trace, metrics=self._metrics,
                 )
         except Exception:

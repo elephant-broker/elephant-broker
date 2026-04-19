@@ -524,6 +524,7 @@ class RuntimeContainer:
                 procedure_audit_store=getattr(c, "procedure_audit_store", None),
                 session_goal_audit_store=getattr(c, "session_goal_audit_store", None),
                 gateway_id=gw_id,
+                dataset_name=dataset_name,
             )
 
         # --- Phase 4: LLM client + ingest pipelines ---

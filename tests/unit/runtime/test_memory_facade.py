@@ -1934,15 +1934,15 @@ class TestCascadeCogneeDataGuards:
         facade = self._make()
         fake_user = type("U", (), {"id": uuid.uuid4()})()
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[]),
         )
         mock_cognee.datasets.delete_data = AsyncMock()
-        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr("elephantbroker.runtime.memory.cascade_helper.cognee", mock_cognee)
 
         status = await facade._cascade_cognee_data(
             uuid.uuid4(), fact_id=uuid.uuid4(), context="test",
@@ -1962,15 +1962,15 @@ class TestCascadeCogneeDataGuards:
         fake_user = type("U", (), {"id": uuid.uuid4()})()
         fake_ds = type("D", (), {"id": uuid.uuid4()})()
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[fake_ds]),
         )
         mock_cognee.datasets.delete_data = AsyncMock()
-        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr("elephantbroker.runtime.memory.cascade_helper.cognee", mock_cognee)
 
         status = await facade._cascade_cognee_data(
             "this-is-not-a-uuid", fact_id=uuid.uuid4(), context="test",
@@ -1988,15 +1988,15 @@ class TestCascadeCogneeDataGuards:
         fake_user = type("U", (), {"id": uuid.uuid4()})()
         fake_ds = type("D", (), {"id": uuid.uuid4()})()
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[fake_ds]),
         )
         mock_cognee.datasets.delete_data = AsyncMock(return_value={"deleted": True})
-        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr("elephantbroker.runtime.memory.cascade_helper.cognee", mock_cognee)
 
         data_id = uuid.uuid4()
         status_from_uuid = await facade._cascade_cognee_data(
@@ -2045,11 +2045,11 @@ class TestCascadeCogneeDataGuards:
         })()
 
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[fake_ds]),
         )
         # Inner Qdrant delete raises the exact shape we see in prod.
@@ -2060,7 +2060,7 @@ class TestCascadeCogneeDataGuards:
             headers=Headers({}),
         )
         mock_cognee.datasets.delete_data = AsyncMock(side_effect=qdrant_404)
-        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr("elephantbroker.runtime.memory.cascade_helper.cognee", mock_cognee)
 
         # Recovery imports: get_dataset_data returns the Data row for our
         # data_id; _delete_data_row is the inner Cognee method that Cognee's
@@ -2068,11 +2068,11 @@ class TestCascadeCogneeDataGuards:
         get_dataset_data_mock = AsyncMock(return_value=[fake_data_row])
         delete_data_row_mock = AsyncMock(return_value=None)
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_dataset_data",
+            "elephantbroker.runtime.memory.cascade_helper.get_dataset_data",
             get_dataset_data_mock,
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade._delete_data_row",
+            "elephantbroker.runtime.memory.cascade_helper._delete_data_row",
             delete_data_row_mock,
         )
 
@@ -2102,11 +2102,11 @@ class TestCascadeCogneeDataGuards:
         fake_user = type("U", (), {"id": uuid.uuid4()})()
         fake_ds = type("D", (), {"id": uuid.uuid4()})()
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[fake_ds]),
         )
         qdrant_503 = UnexpectedResponse(
@@ -2116,17 +2116,17 @@ class TestCascadeCogneeDataGuards:
             headers=Headers({}),
         )
         mock_cognee.datasets.delete_data = AsyncMock(side_effect=qdrant_503)
-        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr("elephantbroker.runtime.memory.cascade_helper.cognee", mock_cognee)
 
         # Recovery helpers should NOT be called on non-404.
         get_dataset_data_mock = AsyncMock()
         delete_data_row_mock = AsyncMock()
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_dataset_data",
+            "elephantbroker.runtime.memory.cascade_helper.get_dataset_data",
             get_dataset_data_mock,
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade._delete_data_row",
+            "elephantbroker.runtime.memory.cascade_helper._delete_data_row",
             delete_data_row_mock,
         )
 
@@ -2156,11 +2156,11 @@ class TestCascadeCogneeDataGuards:
         fake_data_row = type("Data", (), {"id": data_id, "__tablename__": "data"})()
 
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_default_user",
+            "elephantbroker.runtime.memory.cascade_helper.get_default_user",
             AsyncMock(return_value=fake_user),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            "elephantbroker.runtime.memory.cascade_helper.get_datasets_by_name",
             AsyncMock(return_value=[fake_ds]),
         )
         qdrant_404 = UnexpectedResponse(
@@ -2170,17 +2170,17 @@ class TestCascadeCogneeDataGuards:
             headers=Headers({}),
         )
         mock_cognee.datasets.delete_data = AsyncMock(side_effect=qdrant_404)
-        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr("elephantbroker.runtime.memory.cascade_helper.cognee", mock_cognee)
 
         # get_dataset_data succeeds, but _delete_data_row blows up —
         # simulates a relational-db failure or Cognee internal drift.
         inner_exc = RuntimeError("relational engine unavailable")
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade.get_dataset_data",
+            "elephantbroker.runtime.memory.cascade_helper.get_dataset_data",
             AsyncMock(return_value=[fake_data_row]),
         )
         monkeypatch.setattr(
-            "elephantbroker.runtime.memory.facade._delete_data_row",
+            "elephantbroker.runtime.memory.cascade_helper._delete_data_row",
             AsyncMock(side_effect=inner_exc),
         )
 
