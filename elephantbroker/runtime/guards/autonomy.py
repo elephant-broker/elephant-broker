@@ -57,7 +57,7 @@ _KEYWORD_DOMAINS: dict[str, list[str]] = {
     "communication": ["email", "notify", "announce", "slack"],
     "code_change": [
         "deploy", "push", "merge", "release", "rollback", "commit",
-        "refactor", "rewrite", "modify", "edit", "middleware", "endpoint",
+        "refactor", "rewrite", "edit", "middleware", "endpoint",
         "migration", "schema change", "production code",
     ],
     "scope_change": ["scope", "requirements", "deadline", "priority", "redefine"],

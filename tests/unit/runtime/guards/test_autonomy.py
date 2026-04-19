@@ -268,3 +268,34 @@ class TestAutonomyClassifier:
             assert domain == "uncategorized", (
                 f"'{word}' should not trigger any domain, got '{domain}'"
             )
+
+    def test_no_keyword_overlap_between_domains(self):
+        """TODO 5-106: no keyword appears in more than one _KEYWORD_DOMAINS list.
+
+        Classifier iterates dict insertion order and returns first-match-wins.
+        Duplicate keywords make classification nondeterministic with respect to
+        the contributing domain: whichever domain was declared first wins silently.
+        This test pins the dedup invariant so future vocab expansion can't
+        re-introduce the 'modify' ambiguity (was code_change + record_mutation).
+        """
+        from elephantbroker.runtime.guards.autonomy import _KEYWORD_DOMAINS
+
+        seen: dict[str, str] = {}
+        collisions: list[str] = []
+        for domain, keywords in _KEYWORD_DOMAINS.items():
+            for kw in keywords:
+                if kw in seen:
+                    collisions.append(f"'{kw}' in both '{seen[kw]}' and '{domain}'")
+                else:
+                    seen[kw] = domain
+        assert collisions == [], f"Keyword overlap detected: {collisions}"
+
+    def test_modify_classifies_to_record_mutation_not_code_change(self):
+        """TODO 5-106: 'modify' belongs exclusively to record_mutation."""
+        classifier = AutonomyClassifier()
+        action = GuardCheckInput(
+            action_type=GuardActionType.MESSAGE_SEND,
+            action_content="please modify the user record",
+        )
+        assert classifier.classify_domain(action) == "record_mutation"
+        assert classifier._last_tier == 4

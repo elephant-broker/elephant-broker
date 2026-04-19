@@ -324,3 +324,53 @@ class TestStaticRuleRegistry:
         hits = [m for m in matches if m.rule.id == "builtin_prod_deploy_natural"]
         assert len(hits) >= 1
         assert hits[0].rule.outcome == GuardOutcome.REQUIRE_APPROVAL
+
+    # --- TODO 5-209: word-boundary anchors on TD-56 NL patterns ---
+
+    def test_refactor_sensitive_no_false_positive_on_author(self):
+        """TODO 5-209: 'author' must not trigger the refactor-auth rule."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("refactor the author biography page"))
+        hits = [m for m in matches if m.rule.id == "builtin_refactor_sensitive_subsystem"]
+        assert hits == []
+
+    def test_refactor_sensitive_still_matches_authentication(self):
+        """Word-boundary fix must not regress: 'authentication' still hits."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("refactor the authentication flow"))
+        hits = [m for m in matches if m.rule.id == "builtin_refactor_sensitive_subsystem"]
+        assert len(hits) >= 1
+
+    def test_prod_deploy_no_false_positive_on_relationship(self):
+        """TODO 5-209: 'relationship' must not trigger 'ship' alternative."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("relationship to production team"))
+        hits = [m for m in matches if m.rule.id == "builtin_prod_deploy_natural"]
+        assert hits == []
+
+    def test_prod_deploy_no_false_positive_on_alive(self):
+        """TODO 5-209: 'alive' must not trigger 'live' alternative."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("deploy keeps them alive in the cache"))
+        hits = [m for m in matches if m.rule.id == "builtin_prod_deploy_natural"]
+        assert hits == []
+
+    def test_credit_card_no_false_positive_on_reorder(self):
+        """TODO 5-209: 'reorder' must not trigger 'order' alternative."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("reorder the list of my credit card entries"))
+        hits = [m for m in matches if m.rule.id == "builtin_credit_card_purchase"]
+        assert hits == []
+
+    def test_credit_card_still_matches_buy_with_my_card(self):
+        """Word-boundary fix must not regress: positive case still matches."""
+        reg = StaticRuleRegistry()
+        reg.load_rules()
+        matches = reg.match(_action("buy this macbook with my credit card"))
+        hits = [m for m in matches if m.rule.id == "builtin_credit_card_purchase"]
+        assert len(hits) >= 1
