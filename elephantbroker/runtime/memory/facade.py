@@ -610,6 +610,14 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         See local/TECHNICAL-DEBT.md §"Load-bearing dependency pins" for the
         full impact surface + bump protocol.
 
+        BULK-DELETE CAVEAT (TODO-5-312): This cascade is per-fact by design;
+        `get_default_user` + `get_datasets_by_name` are re-fetched on every
+        call. No bulk-delete caller exists today. When one is added (e.g. a
+        GDPR bulk-purge endpoint), implement a batch variant that caches the
+        two lookups once per batch rather than looping this method N times.
+        See local/TECHNICAL-DEBT.md §TODO-5-312 for the full contract the
+        bulk path must preserve.
+
         Removes Cognee-owned chunks/documents/summaries in Neo4j, chunk
         points across Qdrant collections, SQLite rows, and the
         .data_storage file. Entities are preserved per operator decision.
