@@ -75,7 +75,7 @@ class DomainDiscoveryTask:
             return []
 
         # 1. Scan guard_history keys for this gateway (BS-9b)
-        pattern = f"eb:{gateway_id}:guard_history:*"
+        pattern = self._keys.guard_history_scan_pattern()
         uncategorized_actions: dict[str, int] = {}
 
         try:

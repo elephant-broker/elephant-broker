@@ -40,6 +40,17 @@ def test_ws_snapshot_scan_pattern_different_gateways_different_patterns():
     assert keys_a.ws_snapshot_scan_pattern("sid") != keys_b.ws_snapshot_scan_pattern("sid")
 
 
+def test_guard_history_scan_pattern_includes_gateway_and_glob():
+    keys = RedisKeyBuilder("gw-prod")
+    assert keys.guard_history_scan_pattern() == "eb:gw-prod:guard_history:*"
+
+
+def test_guard_history_scan_pattern_different_gateways_different_patterns():
+    keys_a = RedisKeyBuilder("gw-a")
+    keys_b = RedisKeyBuilder("gw-b")
+    assert keys_a.guard_history_scan_pattern() != keys_b.guard_history_scan_pattern()
+
+
 def test_compact_state_key_includes_gateway():
     keys = RedisKeyBuilder("gw-prod")
     result = keys.compact_state("sk", "sid")

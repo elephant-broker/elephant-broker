@@ -78,6 +78,14 @@ class RedisKeyBuilder:
     def guard_history(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:guard_history:{session_key}:{session_id}"
 
+    def guard_history_scan_pattern(self) -> str:
+        """Glob pattern for scanning all guard_history keys in this gateway.
+
+        Used by DomainDiscoveryTask to aggregate uncategorized action patterns
+        across every (session_key, session_id) pair.
+        """
+        return f"{self._prefix}:guard_history:*"
+
     def approval(self, agent_id: str, request_id: str) -> str:
         return f"{self._prefix}:{agent_id}:approval:{request_id}"
 
