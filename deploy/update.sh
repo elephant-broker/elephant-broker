@@ -18,19 +18,23 @@
 # Default behavior (no --upgrade flag):
 #   1. git pull --ff-only origin <current-branch>
 #   2. uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-#   3. verify EB_HITL_CALLBACK_SECRET is populated in env + hitl.env
+#   3. rebuild TypeScript plugins (openclaw-plugins/*) — runs `npm ci`
+#      + `npm run build` per plugin. Skipped with warning if npm is
+#      not on PATH (dedicated DB-VM deployments don't need plugins
+#      rebuilt here; co-located deployments do).
+#   4. verify EB_HITL_CALLBACK_SECRET is populated in env + hitl.env
 #      (Bucket C-R2, TODO-3-623 — detects upgrades from a pre-F11 install
 #      that never got the auto-gen, warn with the fix command)
-#   4. config validate against the runtime schema (matches install.sh C4
+#   5. config validate against the runtime schema (matches install.sh C4
 #      — Bucket C-R2, TODO-3-621; hard-dies on failure so a broken
 #      upgrade never reaches `systemctl restart`)
-#   5. re-chown ONLY the Cognee writable subdirs (NOT a recursive $PREFIX
+#   6. re-chown ONLY the Cognee writable subdirs (NOT a recursive $PREFIX
 #      chown — see C3/TODO-3-010); $PREFIX itself stays root-owned
-#   6. re-install systemd unit files from $PREFIX/deploy/systemd/ (Bucket
+#   7. re-install systemd unit files from $PREFIX/deploy/systemd/ (Bucket
 #      C-R2, TODO-3-622 — ensures unit-file edits in the repo actually
 #      land on target hosts; skipped if no unit file is currently
 #      registered, mirroring the `--no-systemd` install path)
-#   7. restart services
+#   8. restart services
 #
 # With --upgrade:
 #   - git pull
@@ -87,18 +91,20 @@ Flags:
 Default behavior (no --upgrade):
   1. git pull --ff-only origin <current-branch>
   2. uv sync --frozen --no-dev (installs EXACTLY what uv.lock specifies)
-  3. verify EB_HITL_CALLBACK_SECRET is populated in env + hitl.env
-  4. config validate against the runtime schema (hard-dies on failure)
-  5. chown ONLY the Cognee writable subdirs (.cognee_system, .data_storage,
+  3. rebuild TypeScript plugins (npm ci + npm run build per plugin dir);
+     skipped with warning if npm is not on PATH
+  4. verify EB_HITL_CALLBACK_SECRET is populated in env + hitl.env
+  5. config validate against the runtime schema (hard-dies on failure)
+  6. chown ONLY the Cognee writable subdirs (.cognee_system, .data_storage,
      .anon_id) to elephantbroker:elephantbroker — $PREFIX itself stays
      root-owned for defense in depth (see install.sh step 6 + C3 comment)
-  6. re-install systemd unit files from $PREFIX/deploy/systemd/
-  7. systemctl restart elephantbroker elephantbroker-hitl
+  7. re-install systemd unit files from $PREFIX/deploy/systemd/
+  8. systemctl restart elephantbroker elephantbroker-hitl
 
 With --upgrade:
   1. git pull --ff-only origin <current-branch>
   2. uv lock --upgrade (regenerate the lockfile) + uv sync --no-dev
-  3-7. Same as default behavior above
+  3-8. Same as default behavior above
 
 The script refuses to run on a dirty git tree.
 See deploy/UPDATING-DEPS.md for the full dep upgrade procedure.
@@ -184,7 +190,7 @@ if [[ -z "${EB_UPDATE_REEXECED:-}" ]]; then
 fi
 
 # =============================================================================
-log "Step 2/7: uv sync"
+log "Step 2/8: uv sync"
 # =============================================================================
 # --all-packages is REQUIRED because hitl-middleware is a workspace member but
 # not a dependency of the root elephantbroker project; without this flag
@@ -210,6 +216,56 @@ fi
 # `--all-packages` the workspace member is silently skipped and the HITL
 # binary is never installed; see the inline comment on the `uv sync`
 # invocations above for the full regression history.
+
+# =============================================================================
+log "Step 3/8: rebuild TypeScript plugins"
+# =============================================================================
+# After git pull, any TS plugin source changes (openclaw-plugins/*/src/*.ts)
+# need their bundled dist/ rebuilt — OpenClaw loads from dist/index.js per
+# each plugin's package.json `main` + `openclaw.extensions`. Without this
+# step, operators have to remember to cd into each plugin dir and run
+# `npm ci && npm run build` manually after every pull. Surfaced during
+# TD-60 rollout (2026-04-19): the memory plugin envelope-strip fix was in
+# src/ but dist/ was stale until a manual rebuild — the fix appeared to
+# not land.
+#
+# dist/ is in .gitignore (per plugin .gitignore), so a fresh clone never
+# has it. npm ci builds deterministically from package-lock.json.
+#
+# This step is best-effort: if npm is not on PATH (dedicated DB-VM with
+# no Node toolchain — OpenClaw runs on a separate host), warn and skip
+# rather than fail the update. Co-located deployments (where the EB
+# runtime and the OpenClaw gateway share one host) need the rebuild to
+# land here; dedicated DB-VM deployments build plugins on the gateway
+# host via its own update path.
+PLUGINS_DIR="$PREFIX/openclaw-plugins"
+if ! command -v npm &>/dev/null; then
+    warn "  npm not on PATH — skipping plugin rebuild"
+    warn "  (expected on dedicated DB-VM deployments; plugins built on gateway host)"
+elif [[ ! -d "$PLUGINS_DIR" ]]; then
+    warn "  $PLUGINS_DIR missing — skipping plugin rebuild"
+else
+    for plugin in "$PLUGINS_DIR"/elephantbroker-*; do
+        [[ -d "$plugin" ]] || continue
+        [[ -f "$plugin/package.json" ]] || continue
+        plugin_name=$(basename "$plugin")
+        log "  building $plugin_name"
+        # Run as non-root so node_modules ownership matches source tree.
+        # `sudo -u "$SERVICE_USER"` fails if the user can't read the dir;
+        # fall back to a plain invocation if so. We never need root here —
+        # npm just writes to node_modules/ and dist/, both owned by the
+        # tree's existing owner post-git-pull.
+        if ! (cd "$plugin" && npm ci --silent 2>&1 | tail -5); then
+            warn "    npm ci failed in $plugin_name — skipping build"
+            continue
+        fi
+        if ! (cd "$plugin" && npm run build --silent 2>&1 | tail -5); then
+            warn "    npm run build failed in $plugin_name — dist/ may be stale"
+            continue
+        fi
+        log "    ✓ $plugin_name/dist/index.js rebuilt"
+    done
+fi
 
 # Cognee writable directories: re-create in case a fresh sync wiped them.
 #
@@ -240,7 +296,7 @@ else
 fi
 
 # =============================================================================
-log "Step 3/7: verify EB_HITL_CALLBACK_SECRET is populated"
+log "Step 4/8: verify EB_HITL_CALLBACK_SECRET is populated"
 # =============================================================================
 # TODO-3-623 (Bucket C-R2): on update.sh we do NOT auto-generate the HITL
 # secret (install.sh F11 owns that — auto-gen on fresh install only, to
@@ -271,7 +327,7 @@ done
 log "  EB_HITL_CALLBACK_SECRET presence check complete"
 
 # =============================================================================
-log "Step 4/7: validate $CONFIG_DIR/default.yaml against the runtime schema"
+log "Step 5/8: validate $CONFIG_DIR/default.yaml against the runtime schema"
 # =============================================================================
 # TODO-3-621 (Bucket C-R2): mirror install.sh C4 (TODO-3-013, TODO-3-222)
 # — validate the on-disk config BEFORE restarting services. This calls the
@@ -338,7 +394,7 @@ else
 fi
 
 # =============================================================================
-log "Step 5/7: re-apply ownership of writable subdirs only"
+log "Step 6/8: re-apply ownership of writable subdirs only"
 # =============================================================================
 # C3 (TODO-3-010): the previous version did `chown -R $SERVICE_USER $PREFIX`
 # which gave the runtime user write access to its own source code and venv
@@ -365,7 +421,7 @@ else
 fi
 
 # =============================================================================
-log "Step 6/7: re-install systemd unit files"
+log "Step 7/8: re-install systemd unit files"
 # =============================================================================
 # TODO-3-622 (Bucket C-R2): unit-file edits in $PREFIX/deploy/systemd/ are
 # pulled by `git pull` in step 1 but never land on /etc/systemd/system/
@@ -412,7 +468,7 @@ if [[ "$SYSTEMD_TOUCHED" -eq 1 ]]; then
 fi
 
 # =============================================================================
-log "Step 7/7: restart services"
+log "Step 8/8: restart services"
 # =============================================================================
 if [[ "$RESTART" -eq 0 ]]; then
     log "  --no-restart flag set — skipping (run 'systemctl restart elephantbroker' manually)"
