@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
     from elephantbroker.runtime.adapters.llm.client import LLMClient
     from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+    # TODO-5-410: Literal alias imported under TYPE_CHECKING so static
+    # checkers resolve the return-type annotation on the thin wrapper
+    # below without adding a runtime import dependency — matches the
+    # existing function-local `cascade_cognee_data` import pattern.
+    from elephantbroker.runtime.memory.cascade_helper import CascadeStatus
     from elephantbroker.runtime.metrics import MetricsContext
     from elephantbroker.schemas.consolidation import (
         ConsolidationConfig,
@@ -421,7 +426,7 @@ class CanonicalizationStage:
 
     async def _cascade_superseded_data_id(
         self, cognee_data_id, *, fact_id: uuid.UUID,
-    ) -> None:
+    ) -> CascadeStatus:
         """Thin wrapper over `memory.cascade_helper.cascade_cognee_data`.
 
         TODO-5-314: shared with the memory facade's delete/update cascade.
@@ -434,11 +439,18 @@ class CanonicalizationStage:
         association orphaned. Best-effort: the helper returns a status
         string and does not raise, so one dead document does not block
         the remaining cascades in the enclosing loop.
+
+        TODO-5-410: return-type narrowed from `None` to the `CascadeStatus`
+        Literal alias — the one caller currently discards the value, but
+        propagating the typed status keeps the wrapper truthful and
+        available to a future observability extension (e.g. emitting a
+        DEGRADED_OPERATION trace here when status == "failed", mirroring
+        the facade.delete / facade.update pattern).
         """
         from elephantbroker.runtime.memory.cascade_helper import (
             cascade_cognee_data,
         )
-        await cascade_cognee_data(
+        return await cascade_cognee_data(
             cognee_data_id,
             dataset_name=self._dataset_name,
             fact_id=fact_id,

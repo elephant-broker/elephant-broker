@@ -16,10 +16,10 @@ from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
-from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
 from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
+from elephantbroker.runtime.interfaces.scrub_buffer import IScrubBuffer
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
-from elephantbroker.runtime.memory.cascade_helper import cascade_cognee_data
+from elephantbroker.runtime.memory.cascade_helper import CascadeStatus, cascade_cognee_data
 from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.runtime.utils.tokens import count_tokens
 from elephantbroker.schemas.base import Scope
@@ -56,7 +56,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         dataset_name: str = "elephantbroker",
         gateway_id: str = "",
         metrics=None,
-        ingest_buffer: IIngestBuffer | None = None,
+        ingest_buffer: IScrubBuffer | None = None,
     ) -> None:
         self._graph = graph
         self._vector = vector
@@ -697,13 +697,18 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
     async def _cascade_cognee_data(
         self, cognee_data_id, *, fact_id: uuid.UUID, context: str,
-    ) -> str:
+    ) -> CascadeStatus:
         """Thin wrapper over `memory.cascade_helper.cascade_cognee_data`.
 
         TODO-5-314: shared with canonicalize's superseded-doc cleanup. See
         `elephantbroker/runtime/memory/cascade_helper.py` for the pin-
         invariant docstring (TODO-5-006), status-code contract, and
         TD-Cognee-Qdrant-404 recovery rationale.
+
+        TODO-5-410: return-type narrowed from bare `str` to the
+        `CascadeStatus` Literal alias so mypy/pyright catch typo'd status
+        comparisons (`== "okay"`) at the call sites that consume the
+        return value (`facade.update`, `facade.delete`).
         """
         return await cascade_cognee_data(
             cognee_data_id,
