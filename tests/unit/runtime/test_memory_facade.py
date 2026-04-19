@@ -2008,3 +2008,190 @@ class TestCascadeCogneeDataGuards:
         assert status_from_uuid == "ok"
         assert status_from_str == "ok"
         assert mock_cognee.datasets.delete_data.await_count == 2
+
+    # --- TD-Cognee-Qdrant-404 (Cluster Cfx) ---
+    # Cognee 0.5.3's delete_from_graph_and_vector calls
+    # vector_engine.delete_data_points without a has_collection guard.
+    # When a Data row is added but never cognify()'d, the derived Qdrant
+    # collection doesn't exist → 404 → UnexpectedResponse → outer
+    # delete_data aborts before removing the Data ↔ Dataset association.
+    # _cascade_cognee_data now classifies that specific shape as benign
+    # and manually completes the metadata removal, returning the new
+    # "ok_idempotent" cascade_status. Non-404 UnexpectedResponse and any
+    # raise from the recovery path fall through to "failed".
+    # See local/TECHNICAL-DEBT.md §TD-Cognee-Qdrant-404 for removal
+    # criteria once the upstream fix ships.
+
+    async def test_cascade_recovers_from_qdrant_404_on_delete(
+        self, monkeypatch, mock_cognee,
+    ):
+        """Qdrant 404 from inside cognee.datasets.delete_data → cascade
+        manually fetches the Data row via get_dataset_data, completes the
+        Data ↔ Dataset unbind via the inner delete_data method, and
+        returns 'ok_idempotent' (NOT 'failed'). This is the TD-Cognee-
+        Qdrant-404 upstream-bug workaround that unblocks the TD-50
+        integration test."""
+        from qdrant_client.http.exceptions import UnexpectedResponse
+        from httpx import Headers
+
+        facade = self._make()
+        fake_user = type("U", (), {"id": uuid.uuid4()})()
+        fake_ds_id = uuid.uuid4()
+        fake_ds = type("D", (), {"id": fake_ds_id})()
+        data_id = uuid.uuid4()
+        fake_data_row = type("Data", (), {
+            "id": data_id,
+            "__tablename__": "data",
+        })()
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            AsyncMock(return_value=[fake_ds]),
+        )
+        # Inner Qdrant delete raises the exact shape we see in prod.
+        qdrant_404 = UnexpectedResponse(
+            status_code=404,
+            reason_phrase="Not Found",
+            content=b'{"status":{"error":"Collection not found"}}',
+            headers=Headers({}),
+        )
+        mock_cognee.datasets.delete_data = AsyncMock(side_effect=qdrant_404)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        # Recovery imports: get_dataset_data returns the Data row for our
+        # data_id; _delete_data_row is the inner Cognee method that Cognee's
+        # outer delete_data would have called on its last line.
+        get_dataset_data_mock = AsyncMock(return_value=[fake_data_row])
+        delete_data_row_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_dataset_data",
+            get_dataset_data_mock,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade._delete_data_row",
+            delete_data_row_mock,
+        )
+
+        status = await facade._cascade_cognee_data(
+            data_id, fact_id=uuid.uuid4(), context="update_text_change",
+        )
+
+        assert status == "ok_idempotent", (
+            "TD-Cognee-Qdrant-404: 404 from inner Qdrant delete must be "
+            "treated as benign-idempotent, not 'failed'."
+        )
+        # Recovery path actually executed the metadata-unbind.
+        get_dataset_data_mock.assert_awaited_once_with(fake_ds_id)
+        delete_data_row_mock.assert_awaited_once_with(fake_data_row, fake_ds_id)
+
+    async def test_cascade_returns_failed_when_qdrant_non_404(
+        self, monkeypatch, mock_cognee,
+    ):
+        """Non-404 UnexpectedResponse (e.g. Qdrant 5xx) is NOT benign —
+        the recovery branch is skipped and the outer broad except reports
+        'failed'. Prevents the workaround from masking genuine Qdrant
+        failures."""
+        from qdrant_client.http.exceptions import UnexpectedResponse
+        from httpx import Headers
+
+        facade = self._make()
+        fake_user = type("U", (), {"id": uuid.uuid4()})()
+        fake_ds = type("D", (), {"id": uuid.uuid4()})()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            AsyncMock(return_value=[fake_ds]),
+        )
+        qdrant_503 = UnexpectedResponse(
+            status_code=503,
+            reason_phrase="Service Unavailable",
+            content=b'{"error":"qdrant down"}',
+            headers=Headers({}),
+        )
+        mock_cognee.datasets.delete_data = AsyncMock(side_effect=qdrant_503)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        # Recovery helpers should NOT be called on non-404.
+        get_dataset_data_mock = AsyncMock()
+        delete_data_row_mock = AsyncMock()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_dataset_data",
+            get_dataset_data_mock,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade._delete_data_row",
+            delete_data_row_mock,
+        )
+
+        status = await facade._cascade_cognee_data(
+            uuid.uuid4(), fact_id=uuid.uuid4(), context="test",
+        )
+        assert status == "failed"
+        get_dataset_data_mock.assert_not_awaited()
+        delete_data_row_mock.assert_not_awaited()
+
+    async def test_cascade_returns_failed_when_recovery_path_also_raises(
+        self, monkeypatch, mock_cognee, caplog,
+    ):
+        """Negative companion: Qdrant 404 fires the recovery branch, but
+        the manual metadata-unbind itself raises (e.g. relational DB down,
+        Cognee internal signature drift). Cascade must surface 'failed'
+        AND log both the outer UnexpectedResponse and the inner exception
+        so post-mortem has the full picture."""
+        import logging
+        from qdrant_client.http.exceptions import UnexpectedResponse
+        from httpx import Headers
+
+        facade = self._make()
+        fake_user = type("U", (), {"id": uuid.uuid4()})()
+        fake_ds = type("D", (), {"id": uuid.uuid4()})()
+        data_id = uuid.uuid4()
+        fake_data_row = type("Data", (), {"id": data_id, "__tablename__": "data"})()
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_default_user",
+            AsyncMock(return_value=fake_user),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_datasets_by_name",
+            AsyncMock(return_value=[fake_ds]),
+        )
+        qdrant_404 = UnexpectedResponse(
+            status_code=404,
+            reason_phrase="Not Found",
+            content=b"",
+            headers=Headers({}),
+        )
+        mock_cognee.datasets.delete_data = AsyncMock(side_effect=qdrant_404)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        # get_dataset_data succeeds, but _delete_data_row blows up —
+        # simulates a relational-db failure or Cognee internal drift.
+        inner_exc = RuntimeError("relational engine unavailable")
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.get_dataset_data",
+            AsyncMock(return_value=[fake_data_row]),
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade._delete_data_row",
+            AsyncMock(side_effect=inner_exc),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.memory.facade"):
+            status = await facade._cascade_cognee_data(
+                data_id, fact_id=uuid.uuid4(), context="update_text_change",
+            )
+
+        assert status == "failed"
+        # Log must mention both the outer UnexpectedResponse and the inner
+        # RuntimeError so an operator reading journald sees the full chain.
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "recovery" in joined.lower()
+        assert "relational engine unavailable" in joined

@@ -8,10 +8,15 @@ import uuid
 from datetime import UTC, datetime
 
 import cognee
-from cognee.modules.data.methods import get_datasets_by_name
+from cognee.modules.data.methods import (
+    delete_data as _delete_data_row,
+    get_dataset_data,
+    get_datasets_by_name,
+)
 from cognee.modules.search.types import SearchType
 from cognee.modules.users.methods import get_default_user
 from cognee.tasks.storage import add_data_points
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from elephantbroker.runtime.adapters.cognee.datapoints import FactDataPoint
 from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
@@ -625,11 +630,18 @@ class MemoryStoreFacade(IMemoryStoreFacade):
           - `cognee.modules.users.methods.get_default_user`
           - `cognee.modules.data.methods.get_datasets_by_name`
           - `cognee.datasets.delete_data(mode="soft", delete_dataset_if_empty=False)`
+          - `cognee.modules.data.methods.get_dataset_data` (TD-Cognee-Qdrant-404
+            recovery path — re-fetches Data rows to complete metadata cleanup
+            when the Qdrant step throws UnexpectedResponse mid-cascade)
+          - `cognee.modules.data.methods.delete_data` (same recovery path —
+            removes the Data ↔ Dataset association that Cognee's outer
+            delete_data would have finalized on its last line)
         The `cognee==0.5.3` pin in pyproject.toml is load-bearing — bumping
-        Cognee without re-verifying each of the three call sites (signature,
-        kwargs, return shape) will silently break the TD-50 cascade path.
+        Cognee without re-verifying each call site (signature, kwargs, return
+        shape) will silently break the TD-50 cascade path.
         See local/TECHNICAL-DEBT.md §"Load-bearing dependency pins" for the
-        full impact surface + bump protocol.
+        full impact surface + bump protocol, and §"TD-Cognee-Qdrant-404"
+        for the upstream bug that necessitates the recovery branch.
 
         BULK-DELETE CAVEAT (TODO-5-312): This cascade is per-fact by design;
         `get_default_user` + `get_datasets_by_name` are re-fetched on every
@@ -648,6 +660,17 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         Returns a status string so callers can include the outcome in
         downstream audit events (GDPR_DELETE cascade_status):
           "ok"                   — Cognee cleanup completed
+          "ok_idempotent"        — TD-Cognee-Qdrant-404 recovery: the inner
+                                   Qdrant delete raised UnexpectedResponse
+                                   404 (collection/point not present — data
+                                   was added but never cognify()'d, so the
+                                   derived vector collection does not
+                                   exist). We manually complete the dataset
+                                   metadata removal that Cognee's outer
+                                   delete_data would have finalized after
+                                   the Qdrant step. Audit-distinguishable
+                                   from "ok" so operators can tell a clean
+                                   delete from an upstream-bug workaround.
           "skipped_no_dataset"   — dataset lookup returned nothing (the
                                    EB-side delete still proceeds; there
                                    is nothing Cognee-side left to clean).
@@ -688,12 +711,54 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     context, cognee_data_id, fact_id, type(exc).__name__, exc,
                 )
                 return "skipped_bad_data_id"
-            result = await cognee.datasets.delete_data(
-                dataset_id=datasets[0].id,
-                data_id=data_id_uuid,
-                mode="soft",
-                delete_dataset_if_empty=False,
-            )
+            try:
+                result = await cognee.datasets.delete_data(
+                    dataset_id=datasets[0].id,
+                    data_id=data_id_uuid,
+                    mode="soft",
+                    delete_dataset_if_empty=False,
+                )
+            except UnexpectedResponse as exc:
+                # TD-Cognee-Qdrant-404 upstream-bug workaround:
+                # Cognee 0.5.3's delete_data → delete_data_nodes_and_edges
+                # → delete_from_graph_and_vector calls
+                # QdrantAdapter.delete_data_points without a has_collection
+                # guard. When a Data row exists (cognee.add()) but was never
+                # cognify()'d, the derived vector collection doesn't exist →
+                # Qdrant returns 404 → UnexpectedResponse propagates out,
+                # aborting Cognee's outer delete_data before its last line
+                # (`await delete_data(data, dataset_id)`) removes the
+                # Data ↔ Dataset association. Left as-is, the OLD data_id
+                # stays in the dataset and subsequent reads still see it.
+                # Recovery: on 404 we treat the vector side as already-clean
+                # (idempotent) and complete the metadata removal manually.
+                # Non-404 responses (5xx, auth, malformed) fall through to
+                # the broad except and report "failed" — we don't silently
+                # swallow a genuinely broken Cognee.
+                if exc.status_code == 404:
+                    try:
+                        rows = [
+                            d for d in await get_dataset_data(datasets[0].id)
+                            if d.id == data_id_uuid
+                        ]
+                        if rows:
+                            await _delete_data_row(rows[0], datasets[0].id)
+                        self._log.info(
+                            "TD-50 cascade ok_idempotent (%s): fact_id=%s "
+                            "data_id=%s — Qdrant 404 on vector cleanup, "
+                            "metadata removed manually (%r)",
+                            context, fact_id, cognee_data_id, exc,
+                        )
+                        return "ok_idempotent"
+                    except Exception as inner:
+                        self._log.warning(
+                            "TD-50 cascade failed after UnexpectedResponse "
+                            "recovery (%s, fact_id=%s, data_id=%s): "
+                            "outer=%r / inner=%r",
+                            context, fact_id, cognee_data_id, exc, inner,
+                        )
+                        return "failed"
+                raise
             self._log.info(
                 "TD-50 cascade complete (%s): fact_id=%s data_id=%s cognee_result=%r",
                 context, fact_id, cognee_data_id, result,
