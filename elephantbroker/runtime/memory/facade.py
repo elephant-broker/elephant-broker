@@ -22,7 +22,10 @@ from elephantbroker.runtime.observability import traced
 from elephantbroker.runtime.utils.tokens import count_tokens
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
-from elephantbroker.runtime.metrics import MetricsContext, inc_dedup, inc_edge, inc_gdpr_delete, inc_store
+from elephantbroker.runtime.metrics import (
+    MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
+    inc_gdpr_delete, inc_store,
+)
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 logger = logging.getLogger("elephantbroker.memory.facade")
@@ -116,9 +119,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         try:
             fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
         except (AttributeError, IndexError, KeyError, TypeError) as exc:
-            logger.warning(
-                "Could not capture cognee_data_id for fact %s (delete cascade will skip cognee cleanup): %s",
-                fact.id, exc,
+            await self._emit_capture_failure(
+                operation="store", fact_id=fact.id, exc=exc,
+                session_key=fact.session_key, session_id=fact.session_id,
             )
 
         dp = FactDataPoint.from_schema(fact)
@@ -372,9 +375,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             try:
                 fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
             except (AttributeError, IndexError, KeyError, TypeError) as exc:
-                logger.warning(
-                    "Could not capture new cognee_data_id for fact %s on text update (cognee-side artifacts may orphan): %s",
-                    fact.id, exc,
+                await self._emit_capture_failure(
+                    operation="update", fact_id=fact.id, exc=exc,
+                    session_key=fact.session_key, session_id=fact.session_id,
                 )
                 fact.cognee_data_id = None
 
@@ -402,6 +405,45 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         )
         logger.info("Updated fact %s: %s", fact_id, list(updates.keys()))
         return fact
+
+    async def _emit_capture_failure(
+        self, *, operation: str, fact_id: uuid.UUID, exc: Exception,
+        session_key: str | None = None, session_id: uuid.UUID | None = None,
+    ) -> None:
+        """Observability for TD-50 silent-failure path.
+
+        Fires when cognee.add() returns a shape we cannot extract a data_id
+        from. The fact is still persisted with cognee_data_id=None, but the
+        delete cascade will not be able to reach the Cognee-owned document —
+        which is exactly the class of orphan TD-50 exists to prevent. We
+        emit a metric + DEGRADED_OPERATION trace so the silent degradation
+        is visible to the observability stack; the existing WARNING log is
+        retained for operator eyeballs.
+        """
+        if self._metrics:
+            self._metrics.inc_cognee_capture_failure(operation)
+        else:
+            inc_cognee_capture_failure(operation, gateway_id=self._gateway_id)
+        logger.warning(
+            "Could not capture cognee_data_id for fact %s on %s "
+            "(delete cascade will skip cognee cleanup): %s",
+            fact_id, operation, exc,
+        )
+        await self._trace.append_event(
+            TraceEvent(
+                event_type=TraceEventType.DEGRADED_OPERATION,
+                session_key=session_key,
+                session_id=session_id,
+                payload={
+                    "component": "memory_facade",
+                    "operation": operation,
+                    "failure": "cognee_data_id_capture",
+                    "fact_id": str(fact_id),
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc),
+                },
+            )
+        )
 
     async def _cascade_cognee_data(
         self, cognee_data_id, *, fact_id: uuid.UUID, context: str,

@@ -32,6 +32,11 @@ try:
     eb_gdpr_deletes_total = Counter("eb_gdpr_deletes_total", "GDPR deletions", ["gateway_id"])
     eb_backend_health = Gauge("eb_backend_health", "Backend health 1=ok 0=down", ["gateway_id", "component"])
     eb_degraded_operations_total = Counter("eb_degraded_operations_total", "Degraded ops", ["gateway_id", "component", "operation"])
+    eb_cognee_data_id_capture_failures_total = Counter(
+        "eb_cognee_data_id_capture_failures_total",
+        "Times cognee.add() returned a shape the facade could not extract a data_id from — the fact is stored with cognee_data_id=None and the TD-50 delete cascade will skip Cognee cleanup",
+        ["gateway_id", "operation"],
+    )
 
     # Phase 5 metrics
     eb_working_set_builds_total = Counter("eb_working_set_builds_total", "Working set builds", ["gateway_id", "profile_name", "status"])
@@ -233,6 +238,13 @@ def inc_ingest_gate_skip(reason: str, gateway_id: str = "") -> None:
         eb_ingest_gate_skips_total.labels(gateway_id=gateway_id, reason=reason).inc()
 
 
+def inc_cognee_capture_failure(operation: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_cognee_data_id_capture_failures_total.labels(
+            gateway_id=gateway_id, operation=operation,
+        ).inc()
+
+
 # --- Phase 5 safe helpers ---
 
 def inc_working_set_build(profile_name: str, status: str = "ok", gateway_id: str = "") -> None:
@@ -313,6 +325,9 @@ class MetricsContext:
 
     def inc_ingest_gate_skip(self, reason: str) -> None:
         inc_ingest_gate_skip(reason, gateway_id=self._gw)
+
+    def inc_cognee_capture_failure(self, operation: str) -> None:
+        inc_cognee_capture_failure(operation, gateway_id=self._gw)
 
     def inc_working_set_build(self, profile_name: str, status: str = "ok") -> None:
         inc_working_set_build(profile_name, status, gateway_id=self._gw)

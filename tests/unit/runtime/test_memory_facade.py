@@ -825,3 +825,171 @@ class TestMemoryStoreFacadePhase4:
         assert len(events) == 1
         assert events[0].payload["fact_id"] == str(fact.id)
         assert events[0].payload["owner_gateway"] == "other-gw"
+
+
+class TestCogneeDataIdCaptureObservability:
+    """TD-50 capture-failure observability (PR #5 TODO 5-301).
+
+    When cognee.add() returns a shape the facade cannot extract a data_id
+    from, the fact is persisted with cognee_data_id=None and the delete
+    cascade will miss the Cognee-side artifacts. The previous code only
+    logged a warning — no metric, no trace event, effectively silent.
+    These tests pin the three observability surfaces:
+      1. `eb_cognee_data_id_capture_failures_total` counter increments
+         (via MetricsContext.inc_cognee_capture_failure).
+      2. DEGRADED_OPERATION trace event with component=memory_facade,
+         operation=store|update, failure=cognee_data_id_capture.
+      3. Existing WARNING log is preserved.
+    The capture-success path must NOT emit any of the three.
+    """
+
+    def _make(self):
+        graph = AsyncMock()
+        vector = AsyncMock()
+        embeddings = AsyncMock()
+        embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+        ledger = TraceLedger()
+        return MemoryStoreFacade(graph, vector, embeddings, ledger, dataset_name="test_ds"), graph, vector, embeddings, ledger
+
+    def _fact_props(self, fact, **overrides):
+        base = {
+            "eb_id": str(fact.id), "text": fact.text, "category": "general",
+            "scope": "session", "confidence": 1.0, "memory_class": "episodic",
+            "eb_created_at": 0, "eb_updated_at": 0, "use_count": 0,
+            "successful_use_count": 0, "provenance_refs": [], "target_actor_ids": [],
+            "goal_ids": [],
+        }
+        base.update(overrides)
+        return base
+
+    async def test_store_capture_failure_emits_metric_and_trace(
+        self, monkeypatch, mock_add_data_points, mock_cognee, caplog,
+    ):
+        """cognee.add() returns None → metric + DEGRADED_OPERATION trace +
+        WARNING log; fact persisted with cognee_data_id=None so the rest of
+        the store flow still completes."""
+        from unittest.mock import MagicMock
+        facade, _, _, _, ledger = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        # Malformed cognee return — missing data_ingestion_info entirely.
+        mock_cognee.add = AsyncMock(return_value=None)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        fact = make_fact_assertion()
+        with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
+            result = await facade.store(fact)
+
+        # Behaviour: fact is still stored, cognee_data_id is None.
+        assert result.id == fact.id
+        assert result.cognee_data_id is None
+        assert len(mock_add_data_points.calls) == 1
+
+        # Metric emitted with operation=store.
+        metrics.inc_cognee_capture_failure.assert_called_once_with("store")
+
+        # Trace event emitted with expected payload.
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["component"] == "memory_facade"
+        assert payload["operation"] == "store"
+        assert payload["failure"] == "cognee_data_id_capture"
+        assert payload["fact_id"] == str(fact.id)
+        assert payload["exception_type"] in {"AttributeError", "TypeError"}
+
+        # Log line preserved.
+        assert any(
+            "cognee_data_id" in rec.message and str(fact.id) in rec.message
+            for rec in caplog.records
+        ), "capture failure must still emit a WARNING log"
+
+    async def test_update_capture_failure_emits_metric_and_trace(
+        self, monkeypatch, mock_add_data_points, mock_cognee, caplog,
+    ):
+        """update(text=...) re-ingest where cognee.add() returns malformed
+        shape → metric(op=update) + DEGRADED_OPERATION(operation=update);
+        fact.cognee_data_id reset to None. The OLD doc is still cascaded
+        because the old text is stale regardless — the orphan we cannot
+        reach is the NEW (never-captured) doc, not the OLD one."""
+        from unittest.mock import MagicMock
+        facade, graph, _, _, ledger = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+
+        existing_data_id = uuid.uuid4()
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(existing_data_id),
+        ))
+        # Malformed return on the update re-ingest path.
+        mock_cognee.add = AsyncMock(return_value=None)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        cascade_spy = AsyncMock()
+        monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
+
+        with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
+            result = await facade.update(fact.id, {"text": "rewritten text"})
+
+        # Behaviour: update proceeds, cognee_data_id reset to None.
+        assert result.cognee_data_id is None
+        # OLD data_id is still cascaded (old text is stale regardless of
+        # whether we captured a new data_id).
+        cascade_spy.assert_called_once()
+        assert cascade_spy.call_args[0][0] == existing_data_id
+        assert cascade_spy.call_args.kwargs["context"] == "update_text_change"
+
+        metrics.inc_cognee_capture_failure.assert_called_once_with("update")
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["component"] == "memory_facade"
+        assert payload["operation"] == "update"
+        assert payload["failure"] == "cognee_data_id_capture"
+        assert payload["fact_id"] == str(fact.id)
+
+        assert any(
+            "cognee_data_id" in rec.message and str(fact.id) in rec.message
+            for rec in caplog.records
+        ), "update capture failure must still emit a WARNING log"
+
+    async def test_store_capture_success_emits_no_degraded_op(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Happy path: cognee.add() returns a well-formed result →
+        cognee_data_id captured, metric NOT incremented, no
+        DEGRADED_OPERATION trace event. Pins the absence so a future
+        regression that always fires the metric is caught."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        facade, _, _, _, ledger = self._make()
+        metrics = MagicMock()
+        facade._metrics = metrics
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        returned_data_id = uuid.uuid4()
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": returned_data_id}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        fact = make_fact_assertion()
+        result = await facade.store(fact)
+
+        assert result.cognee_data_id == returned_data_id
+        metrics.inc_cognee_capture_failure.assert_not_called()
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert events == [], "success path must not emit DEGRADED_OPERATION"

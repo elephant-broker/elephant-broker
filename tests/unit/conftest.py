@@ -1,4 +1,6 @@
 """Shared fixtures for unit tests."""
+import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,9 +8,19 @@ import pytest
 
 @pytest.fixture
 def mock_cognee():
-    """Mock cognee module for unit tests."""
+    """Mock cognee module for unit tests.
+
+    ``.add`` returns a shape compatible with the real cognee SDK
+    (``data_ingestion_info=[{"data_id": UUID}]``) so the facade's
+    ``cognee_data_id`` capture path runs the SUCCESS branch by default.
+    Tests that want to exercise the capture-failure branch can override
+    with ``mock_cognee.add = AsyncMock(return_value=None)`` or a
+    malformed object.
+    """
     mock = MagicMock()
-    mock.add = AsyncMock(return_value=None)
+    mock.add = AsyncMock(return_value=SimpleNamespace(
+        data_ingestion_info=[{"data_id": uuid.uuid4()}],
+    ))
     mock.search = AsyncMock(return_value=[])
     return mock
 
