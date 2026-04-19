@@ -99,18 +99,30 @@ class TestMemoryStoreFacadeIntegration:
         # (not just orphan it by losing the pointer), and a subsequent
         # delete() must cascade the NEW doc. After the full flow, the
         # dataset holds neither — confirming no orphan was left behind.
+        #
+        # TODO-5-307: cognee_data_id lives on the graph node only (not on
+        # FactAssertion). Read it back from the graph after each facade op.
+        import uuid as _uuid
+
         from cognee.modules.data.methods import get_dataset_data, get_datasets_by_name
         from cognee.modules.users.methods import get_default_user
 
+        async def _read_cognee_data_id(fact_id) -> _uuid.UUID | None:
+            entity = await memory_facade._graph.get_entity(str(fact_id))
+            if not isinstance(entity, dict):
+                return None
+            raw = entity.get("cognee_data_id")
+            return _uuid.UUID(str(raw)) if raw else None
+
         fact = make_fact_assertion(text="The capital of France is Paris")
-        stored = await memory_facade.store(fact)
-        old_data_id = stored.cognee_data_id
+        await memory_facade.store(fact)
+        old_data_id = await _read_cognee_data_id(fact.id)
         assert old_data_id is not None, "store() must capture cognee_data_id"
 
-        updated = await memory_facade.update(
+        await memory_facade.update(
             fact.id, {"text": "The capital of Germany is Berlin"},
         )
-        new_data_id = updated.cognee_data_id
+        new_data_id = await _read_cognee_data_id(fact.id)
         assert new_data_id is not None, (
             "update(text=...) must capture a new cognee_data_id"
         )

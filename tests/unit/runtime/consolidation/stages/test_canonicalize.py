@@ -378,8 +378,15 @@ class TestCanonicalize:
         assert captured_dps[0].cognee_data_id is None
 
     async def test_canonicalize_enqueues_superseded_cognee_data_ids_for_cascade(self, monkeypatch):
-        """Each pre-existing fact with cognee_data_id has that id passed through to the
-        Cognee delete cascade (so the old documents are not silently orphaned)."""
+        """Each pre-existing fact with a cognee_data_id on its graph node has
+        that id passed through to the Cognee delete cascade (so the old
+        documents are not silently orphaned).
+
+        TODO-5-307: cognee_data_id is no longer on FactAssertion. The stage
+        fetches each superseded member's storage-backend id from the graph
+        node via `graph.get_entity(str(member.id))`. This test mocks that
+        per-member lookup to return the simulated legacy ids.
+        """
         from unittest.mock import MagicMock as _MagicMock
 
         # cognee.add succeeds for canonical (so the new fact is storable and the
@@ -414,20 +421,25 @@ class TestCanonicalize:
         fake_datasets_mod.delete_data = AsyncMock(side_effect=capture_delete)
         monkeypatch.setattr(_cognee, "datasets", fake_datasets_mod, raising=False)
 
-        stage, *_ = _make_stage(llm_text="merged canonical text")
+        stage, graph, *_ = _make_stage(llm_text="merged canonical text")
 
         old_data_id_a = uuid.uuid4()
         old_data_id_b = uuid.uuid4()
         facts = [
-            make_fact_assertion(
-                text="identical", session_key="s1",
-                cognee_data_id=old_data_id_a,
-            ),
-            make_fact_assertion(
-                text="identical", session_key="s2",
-                cognee_data_id=old_data_id_b,
-            ),
+            make_fact_assertion(text="identical", session_key="s1"),
+            make_fact_assertion(text="identical", session_key="s2"),
         ]
+        # Per-member graph lookup returns each fact's storage-backend id.
+        member_ids_by_fact: dict[str, str] = {
+            str(facts[0].id): str(old_data_id_a),
+            str(facts[1].id): str(old_data_id_b),
+        }
+
+        async def _get_entity(node_id: str):
+            return {"cognee_data_id": member_ids_by_fact.get(node_id)}
+
+        graph.get_entity = AsyncMock(side_effect=_get_entity)
+
         cluster = _make_cluster(facts)
         ctx = _make_context()
         await stage.run([cluster], facts, "gw", ctx)

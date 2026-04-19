@@ -122,28 +122,31 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             #       permanently orphan the cognee-owned artifacts on delete
             #       because the cascade call had no data_id to pass.
             cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
-            # TODO-5-003 / TODO-5-211: explicit UUID coercion at capture. The
-            # schema declares `cognee_data_id: uuid.UUID | None`, but Pydantic
-            # v2 does NOT validate on assignment by default, so a malformed
-            # string would be persisted unchallenged and only fail later at
-            # the cascade parse (TODO-5-109). Coercing here + widening the
-            # except tuple to include ValueError routes every shape AND every
-            # non-UUID-parseable value through the existing observability
-            # helper — one metric + DEGRADED_OPERATION trace regardless of
-            # which part of the capture failed.
+            # TODO-5-003 / TODO-5-211: explicit UUID coercion at capture. A
+            # malformed data_id must surface as a capture failure here so it
+            # never reaches the cascade parse (TODO-5-109) as a poisoned row.
+            # The except tuple includes ValueError so every shape AND every
+            # non-UUID-parseable value routes through _emit_capture_failure —
+            # one metric + DEGRADED_OPERATION trace regardless of which part
+            # of the capture failed.
+            # TODO-5-307: the captured id lives as a local string passed to
+            # FactDataPoint.from_schema(cognee_data_id=...) below — not on
+            # FactAssertion, which is pure semantic schema per layer hygiene.
+            captured_data_id: str | None = None
             try:
                 raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-                fact.cognee_data_id = (
+                coerced = (
                     raw_data_id if isinstance(raw_data_id, uuid.UUID)
                     else uuid.UUID(str(raw_data_id))
                 )
+                captured_data_id = str(coerced)
             except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
                 await self._emit_capture_failure(
                     operation="store", fact_id=fact.id, exc=exc,
                     session_key=fact.session_key, session_id=fact.session_id,
                 )
 
-            dp = FactDataPoint.from_schema(fact)
+            dp = FactDataPoint.from_schema(fact, cognee_data_id=captured_data_id)
             await add_data_points([dp])
 
             # Graph edges (best-effort)
@@ -444,7 +447,18 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             props = clean_graph_props(entity)
             dp = FactDataPoint(**props)
             fact = dp.to_schema()
-            old_cognee_data_id = fact.cognee_data_id
+            # TODO-5-307: the existing cognee_data_id lives on the FactDataPoint
+            # (storage layer), not FactAssertion (pure semantic). Read it from
+            # the DP — same shape delete() uses when it reads the graph entity
+            # dict directly. Coerce the stored string to uuid.UUID so the
+            # cascade call site receives the exact type it received pre-refactor.
+            old_cognee_data_id: uuid.UUID | None = None
+            if dp.cognee_data_id:
+                try:
+                    old_cognee_data_id = uuid.UUID(dp.cognee_data_id)
+                except (ValueError, TypeError):
+                    # Legacy corrupted value; TODO-5-109 cascade will skip.
+                    old_cognee_data_id = None
 
             text_changed = "text" in updates
             for key, value in updates.items():
@@ -454,13 +468,17 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     setattr(fact, key, value)
             fact.updated_at = datetime.now(UTC)
 
+            # Default: preserve existing id (metadata-only update must not
+            # null the Cognee-side pointer on MERGE).
+            new_cognee_data_id: uuid.UUID | None = old_cognee_data_id
+
             if text_changed:
                 fact.token_size = count_tokens(fact.text)
                 fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
                 await self._embeddings.embed_text(fact.text)
-                # Re-ingest the new text into Cognee and refresh the fact's
-                # data_id BEFORE persisting. Without this, fact.cognee_data_id
-                # keeps pointing at the pre-update document and the cognee-side
+                # Re-ingest the new text into Cognee and refresh the data_id
+                # BEFORE persisting. Without this, the graph node keeps
+                # pointing at the pre-update document and the cognee-side
                 # artifacts for the NEW text become permanent orphans that
                 # delete() cannot reach — the TD-50 regression in update().
                 cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
@@ -468,7 +486,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 # See the store-path comment for the full rationale.
                 try:
                     raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-                    fact.cognee_data_id = (
+                    new_cognee_data_id = (
                         raw_data_id if isinstance(raw_data_id, uuid.UUID)
                         else uuid.UUID(str(raw_data_id))
                     )
@@ -477,19 +495,22 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                         operation="update", fact_id=fact.id, exc=exc,
                         session_key=fact.session_key, session_id=fact.session_id,
                     )
-                    fact.cognee_data_id = None
+                    new_cognee_data_id = None
 
-            updated_dp = FactDataPoint.from_schema(fact)
+            updated_dp = FactDataPoint.from_schema(
+                fact,
+                cognee_data_id=str(new_cognee_data_id) if new_cognee_data_id else None,
+            )
             await add_data_points([updated_dp])
 
             # Cascade the superseded cognee doc only after the graph node points
             # at the new one — so an observer never sees the fact referencing a
             # half-deleted doc. Metadata-only updates (no text change) never
-            # refresh cognee_data_id and must not cascade.
+            # refresh the data_id and must not cascade.
             if (
                 text_changed
                 and old_cognee_data_id
-                and old_cognee_data_id != fact.cognee_data_id
+                and old_cognee_data_id != new_cognee_data_id
             ):
                 await self._cascade_cognee_data(
                     old_cognee_data_id, fact_id=fact_id, context="update_text_change",

@@ -208,41 +208,65 @@ class CanonicalizationStage:
         except Exception:
             logger.debug("cognee.add failed for canonical — non-fatal", exc_info=True)
 
+        # TODO-5-307: canonical data_id is captured as a local string and
+        # passed to FactDataPoint.from_schema(cognee_data_id=...) below.
+        # FactAssertion no longer carries the storage-backend identifier.
+        canonical_data_id: str | None = None
         if cognee_add_result is not None:
             # TODO-5-003 / TODO-5-211: explicit UUID coercion at capture
             # (ValueError now in the except tuple). Mirrors the two sites
             # in facade.py — see that file's store-path block for the full
-            # rationale. Pydantic v2 does not validate on assignment, so
-            # without explicit coercion a malformed data_id would land on
-            # the graph node and only fail later at cascade parse time.
+            # rationale. A malformed data_id must surface as a capture
+            # failure here so it never reaches cascade parse as a poisoned
+            # row.
             try:
                 raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-                new_fact.cognee_data_id = (
+                coerced = (
                     raw_data_id if isinstance(raw_data_id, uuid.UUID)
                     else uuid.UUID(str(raw_data_id))
                 )
+                canonical_data_id = str(coerced)
             except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
                 await self._emit_capture_failure(fact_id=new_fact.id, exc=exc)
 
         # Store canonical via Cognee-first dual write (BS-10)
-        dp = FactDataPoint.from_schema(new_fact)
+        dp = FactDataPoint.from_schema(new_fact, cognee_data_id=canonical_data_id)
         try:
             await add_data_points([dp])
         except Exception:
             logger.warning("add_data_points failed for canonical %s", new_id, exc_info=True)
             return None
 
-        # Collect the superseded facts' cognee_data_ids BEFORE archival
-        # mutates member state. Each old id points at a Cognee document
-        # that is now dead weight — the canonical's new document
-        # supersedes it. These must be cascaded after the graph nodes
-        # are re-MERGEd as archived, so an observer never sees an
-        # archived fact whose cognee_data_id already points at a
+        # TODO-5-307: fetch each member's current cognee_data_id from the
+        # graph before archival. The in-memory `members` list carries
+        # FactAssertion (pure semantic) which no longer exposes this
+        # storage-backend identifier. Reading from the graph entity dict
+        # is the same shape facade.delete() uses, so the archive MERGE
+        # below can pass the existing data_id through and avoid nulling
+        # the graph property on write-back.
+        member_cognee_data_ids: dict[uuid.UUID, str | None] = {}
+        for member in members:
+            try:
+                member_entity = await self._graph.get_entity(str(member.id))
+                if isinstance(member_entity, dict):
+                    raw = member_entity.get("cognee_data_id")
+                    member_cognee_data_ids[member.id] = str(raw) if raw else None
+                else:
+                    member_cognee_data_ids[member.id] = None
+            except Exception:
+                logger.debug("get_entity failed for member %s", member.id, exc_info=True)
+                member_cognee_data_ids[member.id] = None
+
+        # Collect the superseded facts' cognee_data_ids. Each old id points
+        # at a Cognee document that is now dead weight — the canonical's
+        # new document supersedes it. These must be cascaded after the
+        # graph nodes are re-MERGEd as archived, so an observer never sees
+        # an archived fact whose cognee_data_id already points at a
         # half-deleted document.
         superseded_data_ids: list[tuple[uuid.UUID, object]] = [
-            (member.id, member.cognee_data_id)
-            for member in members
-            if member.cognee_data_id
+            (fid, cdi)
+            for fid, cdi in member_cognee_data_ids.items()
+            if cdi
         ]
 
         # Archive ALL originals (AD-3)
@@ -250,7 +274,9 @@ class CanonicalizationStage:
         for member in members:
             member.archived = True
             member.confidence = 0.0
-            archived_dp = FactDataPoint.from_schema(member)
+            archived_dp = FactDataPoint.from_schema(
+                member, cognee_data_id=member_cognee_data_ids.get(member.id),
+            )
             try:
                 await add_data_points([archived_dp])
                 archived_ids.append(str(member.id))

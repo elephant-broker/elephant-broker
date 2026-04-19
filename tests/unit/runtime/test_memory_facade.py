@@ -1094,8 +1094,11 @@ class TestMemoryStoreFacadePhase4:
     # --- TD-50 regression: cognee_data_id capture + cascade-on-update ---
 
     async def test_store_captures_cognee_data_id(self, monkeypatch, mock_add_data_points, mock_cognee):
-        """store() captures data_id returned by cognee.add() onto fact.cognee_data_id
-        and persists exactly once via a single add_data_points() MERGE."""
+        """store() captures data_id returned by cognee.add() and threads it
+        onto the persisted FactDataPoint via from_schema(cognee_data_id=...),
+        NOT onto FactAssertion (TODO-5-307 — storage-backend identifiers do
+        not leak into the semantic schema). Persists exactly once via a
+        single add_data_points() MERGE."""
         from types import SimpleNamespace
         facade, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
@@ -1106,7 +1109,10 @@ class TestMemoryStoreFacadePhase4:
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
         fact = make_fact_assertion()
         result = await facade.store(fact)
-        assert result.cognee_data_id == returned_data_id
+        # Return value is pure FactAssertion — no storage-backend field.
+        assert not hasattr(result, "cognee_data_id") or getattr(result, "cognee_data_id", None) is None, (
+            "TODO-5-307: FactAssertion must not carry cognee_data_id"
+        )
         # Single MERGE: cognee.add() captured the id BEFORE add_data_points(),
         # so we persist once — no double-MERGE and no cognee_data_id=None window.
         assert len(mock_add_data_points.calls) == 1
@@ -1116,9 +1122,11 @@ class TestMemoryStoreFacadePhase4:
     async def test_update_text_change_refreshes_cognee_data_id_and_cascades_old(
         self, monkeypatch, mock_add_data_points, mock_cognee,
     ):
-        """update() with a new text re-ingests into Cognee, refreshes
-        fact.cognee_data_id to the NEW data_id, then cascades the OLD
-        data_id through the same cascade helper used by delete()."""
+        """update() with a new text re-ingests into Cognee, refreshes the
+        persisted FactDataPoint.cognee_data_id to the NEW data_id, then
+        cascades the OLD data_id through the same cascade helper used by
+        delete(). TODO-5-307: FactAssertion no longer carries
+        cognee_data_id — the value lives on the DataPoint / graph node."""
         from types import SimpleNamespace
         facade, graph, _, _, _ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
@@ -1138,10 +1146,12 @@ class TestMemoryStoreFacadePhase4:
         cascade_spy = AsyncMock()
         monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
 
-        result = await facade.update(fact.id, {"text": "rewritten text"})
+        await facade.update(fact.id, {"text": "rewritten text"})
 
-        # NEW id is on the fact
-        assert result.cognee_data_id == new_data_id
+        # NEW id is on the persisted DataPoint (storage-backend identifier).
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id == str(new_data_id)
         # cognee.add() was called with the new text (re-ingest path)
         mock_cognee.add.assert_called_once()
         assert mock_cognee.add.call_args[0][0] == "rewritten text"
@@ -1157,7 +1167,9 @@ class TestMemoryStoreFacadePhase4:
     ):
         """update() without a text change must NOT re-ingest into Cognee
         and must NOT cascade the existing cognee_data_id — metadata-only
-        edits leave the Cognee-owned document intact."""
+        edits leave the Cognee-owned document intact. TODO-5-307: the
+        existing cognee_data_id is carried forward onto the persisted
+        DataPoint (MERGE preserves the graph property)."""
         facade, graph, _, _, _ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
@@ -1171,10 +1183,12 @@ class TestMemoryStoreFacadePhase4:
         cascade_spy = AsyncMock()
         monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
 
-        result = await facade.update(fact.id, {"confidence": 0.5})
+        await facade.update(fact.id, {"confidence": 0.5})
 
-        # cognee_data_id is untouched
-        assert result.cognee_data_id == existing_data_id
+        # cognee_data_id is untouched on the re-MERGEd DataPoint.
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id == str(existing_data_id)
         # No re-ingest
         mock_cognee.add.assert_not_called()
         # No cascade
@@ -1650,10 +1664,13 @@ class TestCogneeDataIdCaptureObservability:
         with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
             result = await facade.store(fact)
 
-        # Behaviour: fact is still stored, cognee_data_id is None.
+        # Behaviour: fact is still stored, persisted DataPoint has
+        # cognee_data_id=None (storage-backend id could not be captured).
+        # TODO-5-307: FactAssertion no longer carries the field.
         assert result.id == fact.id
-        assert result.cognee_data_id is None
         assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id is None
 
         # Metric emitted with operation=store.
         metrics.inc_cognee_capture_failure.assert_called_once_with("store")
@@ -1682,9 +1699,10 @@ class TestCogneeDataIdCaptureObservability:
     ):
         """update(text=...) re-ingest where cognee.add() returns malformed
         shape → metric(op=update) + DEGRADED_OPERATION(operation=update);
-        fact.cognee_data_id reset to None. The OLD doc is still cascaded
-        because the old text is stale regardless — the orphan we cannot
-        reach is the NEW (never-captured) doc, not the OLD one."""
+        persisted DataPoint.cognee_data_id reset to None. The OLD doc is
+        still cascaded because the old text is stale regardless — the
+        orphan we cannot reach is the NEW (never-captured) doc, not the
+        OLD one. TODO-5-307: storage-backend id no longer on FactAssertion."""
         from unittest.mock import MagicMock
         facade, graph, _, _, ledger = self._make()
         metrics = MagicMock()
@@ -1704,10 +1722,12 @@ class TestCogneeDataIdCaptureObservability:
         monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
 
         with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
-            result = await facade.update(fact.id, {"text": "rewritten text"})
+            await facade.update(fact.id, {"text": "rewritten text"})
 
-        # Behaviour: update proceeds, cognee_data_id reset to None.
-        assert result.cognee_data_id is None
+        # Behaviour: update proceeds, persisted DP.cognee_data_id is None.
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id is None
         # OLD data_id is still cascaded (old text is stale regardless of
         # whether we captured a new data_id).
         cascade_spy.assert_called_once()
@@ -1752,9 +1772,13 @@ class TestCogneeDataIdCaptureObservability:
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
 
         fact = make_fact_assertion()
-        result = await facade.store(fact)
+        await facade.store(fact)
 
-        assert result.cognee_data_id == returned_data_id
+        # TODO-5-307: the captured id lands on the persisted DataPoint,
+        # not on FactAssertion.
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id == str(returned_data_id)
         metrics.inc_cognee_capture_failure.assert_not_called()
 
         from elephantbroker.schemas.trace import TraceEventType, TraceQuery
@@ -1787,8 +1811,11 @@ class TestCogneeDataIdCaptureObservability:
         with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
             result = await facade.store(fact)
 
+        # TODO-5-307: assert against persisted DataPoint, not FactAssertion.
         assert result.id == fact.id
-        assert result.cognee_data_id is None
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id is None
         metrics.inc_cognee_capture_failure.assert_called_once_with("store")
 
         from elephantbroker.schemas.trace import TraceEventType, TraceQuery
@@ -1819,10 +1846,15 @@ class TestCogneeDataIdCaptureObservability:
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
 
         fact = make_fact_assertion()
-        result = await facade.store(fact)
+        await facade.store(fact)
 
-        assert isinstance(result.cognee_data_id, uuid.UUID)
-        assert result.cognee_data_id == canonical_id
+        # TODO-5-307: DataPoint stores cognee_data_id as `str | None`.
+        # Capture coerces to uuid.UUID internally (guaranteeing parseability)
+        # and re-stringifies for persistence. The canonical-id round-trip
+        # proves the coercion happened (a bad string would not survive it).
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id == str(canonical_id)
         metrics.inc_cognee_capture_failure.assert_not_called()
 
     async def test_update_capture_failure_on_non_uuid_data_id(
@@ -1830,8 +1862,9 @@ class TestCogneeDataIdCaptureObservability:
     ):
         """TODO-5-003 / TODO-5-211: update(text=...) re-ingest returns a
         non-UUID-parseable data_id → ValueError routed through
-        _emit_capture_failure, fact.cognee_data_id reset to None, old
-        doc still cascades (old text is stale regardless)."""
+        _emit_capture_failure, persisted DataPoint.cognee_data_id reset
+        to None, old doc still cascades (old text is stale regardless).
+        TODO-5-307: storage-backend id no longer on FactAssertion."""
         from types import SimpleNamespace
         from unittest.mock import MagicMock
         facade, graph, _, _, ledger = self._make()
@@ -1852,9 +1885,11 @@ class TestCogneeDataIdCaptureObservability:
         monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
 
         with caplog.at_level("WARNING", logger="elephantbroker.memory.facade"):
-            result = await facade.update(fact.id, {"text": "rewritten text"})
+            await facade.update(fact.id, {"text": "rewritten text"})
 
-        assert result.cognee_data_id is None
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id is None
         cascade_spy.assert_called_once()
         metrics.inc_cognee_capture_failure.assert_called_once_with("update")
 
