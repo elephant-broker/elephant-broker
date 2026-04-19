@@ -599,6 +599,17 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     ) -> str:
         """Run the Cognee-side cleanup for a single data_id.
 
+        PIN INVARIANT (TODO-5-006): This cascade calls Cognee internal paths
+        that are NOT part of Cognee's public API stability contract:
+          - `cognee.modules.users.methods.get_default_user`
+          - `cognee.modules.data.methods.get_datasets_by_name`
+          - `cognee.datasets.delete_data(mode="soft", delete_dataset_if_empty=False)`
+        The `cognee==0.5.3` pin in pyproject.toml is load-bearing — bumping
+        Cognee without re-verifying each of the three call sites (signature,
+        kwargs, return shape) will silently break the TD-50 cascade path.
+        See local/TECHNICAL-DEBT.md §"Load-bearing dependency pins" for the
+        full impact surface + bump protocol.
+
         Removes Cognee-owned chunks/documents/summaries in Neo4j, chunk
         points across Qdrant collections, SQLite rows, and the
         .data_storage file. Entities are preserved per operator decision.

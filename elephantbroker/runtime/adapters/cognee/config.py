@@ -1,9 +1,43 @@
 """Map ElephantBroker config to Cognee SDK settings."""
 from __future__ import annotations
 
+import logging
 import os
+from importlib import metadata as _importlib_metadata
 
 from elephantbroker.schemas.config import CogneeConfig, LLMConfig
+
+# TODO-5-006: Cognee version pin is load-bearing.
+# The TD-50 cascade in MemoryStoreFacade._cascade_cognee_data calls Cognee
+# internal paths (cognee.modules.users.methods, cognee.modules.data.methods,
+# cognee.datasets.delete_data) whose signatures are NOT stabilized across
+# Cognee minor versions. Bumping this requires re-verifying each call site.
+# See local/TECHNICAL-DEBT.md §"Load-bearing dependency pins".
+_SUPPORTED_COGNEE_VERSION = "0.5.3"
+
+_log = logging.getLogger("elephantbroker.adapters.cognee.config")
+
+
+def _verify_cognee_pin() -> None:
+    """Warn if installed Cognee version differs from the verified pin.
+
+    Not an assertion: a mismatch should surface loudly on boot but not block
+    startup in case an operator is deliberately testing a new version.
+    """
+    try:
+        installed = _importlib_metadata.version("cognee")
+    except _importlib_metadata.PackageNotFoundError:
+        _log.warning("Cognee package metadata not found — cannot verify version pin")
+        return
+    if installed != _SUPPORTED_COGNEE_VERSION:
+        _log.warning(
+            "Cognee version %s differs from the verified pin %s — "
+            "TD-50 cascade paths (MemoryStoreFacade._cascade_cognee_data) use "
+            "Cognee internal APIs and MUST be re-verified before running on an "
+            "unpinned version. See local/TECHNICAL-DEBT.md §Load-bearing "
+            "dependency pins.",
+            installed, _SUPPORTED_COGNEE_VERSION,
+        )
 
 
 async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = None) -> None:
@@ -12,6 +46,7 @@ async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = 
     Graph: Neo4j (not the default Kuzu).
     Vector: Qdrant via cognee-community-vector-adapter-qdrant (not the default LanceDB).
     """
+    _verify_cognee_pin()
     import cognee
     from cognee.infrastructure.databases.vector.embeddings.config import get_embedding_config
 
