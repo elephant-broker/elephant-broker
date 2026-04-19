@@ -42,6 +42,11 @@ try:
         "recent_facts GDPR buffer scrub outcomes on delete (TF-ER-003 Tier A). status=scrubbed when the deleted fact was removed from the extraction-context window, noop when the fact was not present, failure when Redis raised.",
         ["gateway_id", "status"],
     )
+    eb_fact_delete_cascade_failures_total = Counter(
+        "eb_fact_delete_cascade_failures_total",
+        "TD-50 delete cascade step failures in facade.delete(). step=graph|vector|cognee_data identifies which layer threw. The EB-layer delete continues on each failure (best-effort cascade) so a step-level counter increment is compatible with an eventually-emitted GDPR_DELETE trace whose cascade_status marks that step as failed.",
+        ["gateway_id", "step"],
+    )
 
     # Phase 5 metrics
     eb_working_set_builds_total = Counter("eb_working_set_builds_total", "Working set builds", ["gateway_id", "profile_name", "status"])
@@ -257,6 +262,13 @@ def inc_recent_facts_scrubbed(status: str, gateway_id: str = "") -> None:
         ).inc()
 
 
+def inc_fact_delete_cascade_failure(step: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_fact_delete_cascade_failures_total.labels(
+            gateway_id=gateway_id, step=step,
+        ).inc()
+
+
 # --- Phase 5 safe helpers ---
 
 def inc_working_set_build(profile_name: str, status: str = "ok", gateway_id: str = "") -> None:
@@ -343,6 +355,9 @@ class MetricsContext:
 
     def inc_recent_facts_scrubbed(self, status: str) -> None:
         inc_recent_facts_scrubbed(status, gateway_id=self._gw)
+
+    def inc_fact_delete_cascade_failure(self, step: str) -> None:
+        inc_fact_delete_cascade_failure(step, gateway_id=self._gw)
 
     def inc_working_set_build(self, profile_name: str, status: str = "ok") -> None:
         inc_working_set_build(profile_name, status, gateway_id=self._gw)

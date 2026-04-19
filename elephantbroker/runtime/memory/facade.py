@@ -24,7 +24,8 @@ from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 from elephantbroker.runtime.metrics import (
     MetricsContext, inc_cognee_capture_failure, inc_dedup, inc_edge,
-    inc_gdpr_delete, inc_recent_facts_scrubbed, inc_store,
+    inc_fact_delete_cascade_failure, inc_gdpr_delete,
+    inc_recent_facts_scrubbed, inc_store,
 )
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
@@ -406,6 +407,42 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         logger.info("Updated fact %s: %s", fact_id, list(updates.keys()))
         return fact
 
+    async def _emit_cascade_failure(
+        self, *, step: str, fact_id: uuid.UUID, exc: Exception,
+        session_key: str | None = None, session_id: uuid.UUID | None = None,
+    ) -> None:
+        """Observability for a failed TD-50 delete cascade step.
+
+        Fires when one of the three delete cascade layers (graph, vector,
+        cognee_data) raises. The EB-layer delete continues on each failure
+        so the eventual GDPR_DELETE trace is emitted even on partial
+        cascade failure — but we still need a per-step signal so dashboards
+        can distinguish "delete succeeded cleanly" from "delete acknowledged
+        but one layer is lagging". Emits a metric + DEGRADED_OPERATION trace
+        identifying which step failed + the fact id; existing WARNING logs
+        at the call site are preserved.
+        """
+        if self._metrics:
+            self._metrics.inc_fact_delete_cascade_failure(step)
+        else:
+            inc_fact_delete_cascade_failure(step, gateway_id=self._gateway_id)
+        await self._trace.append_event(
+            TraceEvent(
+                event_type=TraceEventType.DEGRADED_OPERATION,
+                session_key=session_key,
+                session_id=session_id,
+                payload={
+                    "component": "memory_facade",
+                    "operation": "delete",
+                    "failure": "cascade_step",
+                    "step": step,
+                    "fact_id": str(fact_id),
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc),
+                },
+            )
+        )
+
     async def _emit_capture_failure(
         self, *, operation: str, fact_id: uuid.UUID, exc: Exception,
         session_key: str | None = None, session_id: uuid.UUID | None = None,
@@ -447,7 +484,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
     async def _cascade_cognee_data(
         self, cognee_data_id, *, fact_id: uuid.UUID, context: str,
-    ) -> None:
+    ) -> str:
         """Run the Cognee-side cleanup for a single data_id.
 
         Removes Cognee-owned chunks/documents/summaries in Neo4j, chunk
@@ -455,6 +492,16 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         .data_storage file. Entities are preserved per operator decision.
         Used by delete() (full removal) and update() (superseded-doc
         cleanup on text change).
+
+        Returns a status string so callers can include the outcome in
+        downstream audit events (GDPR_DELETE cascade_status):
+          "ok"                  — Cognee cleanup completed
+          "skipped_no_dataset"  — dataset lookup returned nothing (the
+                                  EB-side delete still proceeds; there
+                                  is nothing Cognee-side left to clean)
+          "failed"              — Cognee raised; partial cleanup, the
+                                  step is reported via DEGRADED_OPERATION
+                                  trace + metric by the caller
         """
         try:
             from uuid import UUID
@@ -467,7 +514,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     "TD-50 cascade skipped (%s): dataset %s not found for fact %s",
                     context, self._dataset_name, fact_id,
                 )
-                return
+                return "skipped_no_dataset"
             data_id_uuid = UUID(str(cognee_data_id))
             result = await cognee.datasets.delete_data(
                 dataset_id=datasets[0].id,
@@ -479,11 +526,13 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 "TD-50 cascade complete (%s): fact_id=%s data_id=%s cognee_result=%r",
                 context, fact_id, cognee_data_id, result,
             )
+            return "ok"
         except Exception as exc:
             logger.warning(
                 "TD-50 cascade failed (%s, fact_id=%s, data_id=%s): %r",
                 context, fact_id, cognee_data_id, exc,
             )
+            return "failed"
 
     @traced
     async def delete(self, fact_id: uuid.UUID, *, caller_gateway_id: str = "") -> None:
@@ -503,56 +552,118 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             ))
             raise PermissionError(f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}")
 
-        # Remove from Neo4j (DETACH DELETE removes node + all edges)
-        await self._graph.delete_entity(str(fact_id))
+        # Extract session fields for enriched trace payloads + TraceEvent
+        # routing. Stored session_id is a string on the graph node; parse to
+        # UUID for the TraceEvent field (payload keeps the raw string).
+        session_key_val: str | None = entity.get("session_key") or None
+        session_id_raw = entity.get("session_id")
+        session_id_val: uuid.UUID | None = None
+        if session_id_raw:
+            try:
+                session_id_val = uuid.UUID(str(session_id_raw))
+            except (ValueError, TypeError):
+                session_id_val = None
 
-        # Remove from Qdrant (best-effort)
+        # Three-step cascade. Each step runs independently — a failure in
+        # any one layer must not short-circuit the remaining layers (TD-50
+        # + 5-607). Per-step failures emit DEGRADED_OPERATION + metric via
+        # _emit_cascade_failure; the aggregate cascade_status is stamped
+        # onto GDPR_DELETE so auditors can tell clean-delete from
+        # partial-failure without cross-referencing the degraded-ops stream.
+
+        # Step 1 — Neo4j (DETACH DELETE removes node + all edges)
+        try:
+            await self._graph.delete_entity(str(fact_id))
+            graph_status = "ok"
+        except Exception as exc:
+            logger.warning("Neo4j delete failed for fact %s: %s", fact_id, exc)
+            graph_status = "failed"
+            await self._emit_cascade_failure(
+                step="graph", fact_id=fact_id, exc=exc,
+                session_key=session_key_val, session_id=session_id_val,
+            )
+
+        # Step 2 — Qdrant (best-effort)
         try:
             await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
+            vector_status = "ok"
         except Exception as exc:
             logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
+            vector_status = "failed"
+            await self._emit_cascade_failure(
+                step="vector", fact_id=fact_id, exc=exc,
+                session_key=session_key_val, session_id=session_id_val,
+            )
 
-        # Cascade Cognee-owned artifacts (TD-50). cognee.datasets.delete_data
-        # removes chunks/documents/summaries in Neo4j, chunk points across
-        # Qdrant collections, SQLite rows, and the .data_storage file. Graph
-        # + vector are already gone above; failure here is logged but does
-        # not roll back the EB-layer delete (partial cleanup beats rollback).
+        # Step 3 — Cascade Cognee-owned artifacts (TD-50). cognee.datasets.
+        # delete_data removes chunks/documents/summaries in Neo4j, chunk
+        # points across Qdrant collections, SQLite rows, and the
+        # .data_storage file. _cascade_cognee_data captures its own
+        # exceptions and returns a status string; we re-emit DEGRADED_OP at
+        # this call site so the per-step metric carries step=cognee_data.
         cognee_data_id = entity.get("cognee_data_id") if isinstance(entity, dict) else None
         if cognee_data_id:
-            await self._cascade_cognee_data(
+            cognee_data_status = await self._cascade_cognee_data(
                 cognee_data_id, fact_id=fact_id, context="delete",
             )
+            if cognee_data_status == "failed":
+                await self._emit_cascade_failure(
+                    step="cognee_data", fact_id=fact_id,
+                    exc=RuntimeError(
+                        f"cognee.datasets.delete_data failed for data_id={cognee_data_id}"
+                    ),
+                    session_key=session_key_val, session_id=session_id_val,
+                )
         else:
             logger.info(
                 "TD-50 cascade skipped: fact %s has no cognee_data_id (pre-TD-50 fact)",
                 fact_id,
             )
+            cognee_data_status = "skipped_no_data_id"
 
         # Scrub from recent_facts extraction-context window (prevents LLM
         # re-extraction of deleted fact — see Phase 4 TD #2). Outcome is
         # reported via eb_recent_facts_scrubbed_total (status=scrubbed|noop|
         # failure) so dashboards can alert on scrub regressions — the merge
         # report's TF-ER-003 flow-result claim depends on this metric.
-        if self._ingest_buffer is not None:
-            session_key = entity.get("session_key")
-            if session_key:
-                try:
-                    removed = await self._ingest_buffer.scrub_fact_from_recent(
-                        session_key, str(fact_id),
-                    )
-                    scrub_status = "scrubbed" if removed else "noop"
-                except Exception as exc:
-                    logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
-                    scrub_status = "failure"
-                if self._metrics:
-                    self._metrics.inc_recent_facts_scrubbed(scrub_status)
-                else:
-                    inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
+        if self._ingest_buffer is not None and session_key_val:
+            try:
+                removed = await self._ingest_buffer.scrub_fact_from_recent(
+                    session_key_val, str(fact_id),
+                )
+                scrub_status = "scrubbed" if removed else "noop"
+            except Exception as exc:
+                logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
+                scrub_status = "failure"
+            if self._metrics:
+                self._metrics.inc_recent_facts_scrubbed(scrub_status)
+            else:
+                inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
 
+        # GDPR_DELETE audit event — emitted on every delete that reached
+        # this point, INCLUDING partial-cascade failures. cascade_status
+        # records the per-step outcome so downstream auditors can reason
+        # about the completeness of the delete without stitching together
+        # the degraded-operation stream. session_key/session_id are
+        # promoted to first-class TraceEvent fields so SessionTimeline and
+        # the /trace search surface can filter by the originating session
+        # (the merge report's GDPR flow claim depends on this — without
+        # the session fields a /trace?session_key=... query would miss
+        # delete events).
         await self._trace.append_event(
             TraceEvent(
                 event_type=TraceEventType.GDPR_DELETE,
-                payload={"fact_id": str(fact_id)},
+                session_key=session_key_val,
+                session_id=session_id_val,
+                payload={
+                    "fact_id": str(fact_id),
+                    "session_key": session_key_val,
+                    "cascade_status": {
+                        "graph": graph_status,
+                        "vector": vector_status,
+                        "cognee_data": cognee_data_status,
+                    },
+                },
             )
         )
         if self._metrics:

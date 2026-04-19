@@ -761,6 +761,244 @@ class TestMemoryStoreFacadePhase4:
         ), "failure branch must still emit the WARNING log"
         graph.delete_entity.assert_called_once()
 
+    # --- Cascade observability + GDPR_DELETE payload (PR #5 TODOs 5-502,
+    # 5-503, 5-607). The three cascade steps (graph / vector / cognee_data)
+    # must each run independently — a failure in one must NOT short-circuit
+    # the rest — and every step-failure must emit a DEGRADED_OPERATION trace
+    # plus an eb_fact_delete_cascade_failures_total increment. The GDPR_DELETE
+    # event is emitted on every delete (including partial-failure) and
+    # carries the per-step cascade_status dict + session_key so auditors can
+    # tell clean-delete from degraded-delete without joining against the
+    # degraded-ops stream.
+    # ---
+
+    async def test_delete_cascade_all_success_emits_clean_gdpr_delete(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """All three cascade steps succeed → GDPR_DELETE cascade_status is
+        all-ok, session_key promoted to TraceEvent field + payload, no
+        DEGRADED_OPERATION events emitted, cascade-failure metric untouched."""
+        from unittest.mock import AsyncMock, MagicMock
+        facade, graph, vector, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        sid = uuid.uuid4()
+        fact = make_fact_assertion(session_key="sk:test", session_id=sid)
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, session_key="sk:test", session_id=str(sid),
+            cognee_data_id=str(uuid.uuid4()),
+        ))
+        monkeypatch.setattr(facade, "_cascade_cognee_data", AsyncMock(return_value="ok"))
+
+        await facade.delete(fact.id)
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert degraded == [], "clean cascade must not emit DEGRADED_OPERATION"
+        metrics.inc_fact_delete_cascade_failure.assert_not_called()
+
+        gdpr = await ledger.query_trace(TraceQuery(event_types=[TraceEventType.GDPR_DELETE]))
+        assert len(gdpr) == 1
+        event = gdpr[0]
+        assert event.payload["cascade_status"] == {
+            "graph": "ok", "vector": "ok", "cognee_data": "ok",
+        }
+        assert event.payload["session_key"] == "sk:test"
+        assert event.payload["fact_id"] == str(fact.id)
+        # TraceEvent first-class fields (so /trace?session_key= filters hit)
+        assert event.session_key == "sk:test"
+        assert event.session_id == sid
+
+    async def test_delete_cascade_graph_failure_continues_vector_and_cognee(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Graph DETACH DELETE raises → steps 2+3 still run (5-607), per-step
+        DEGRADED_OPERATION + metric(step=graph), and GDPR_DELETE is emitted
+        with cascade_status graph=failed, vector=ok, cognee_data=ok."""
+        from unittest.mock import AsyncMock, MagicMock
+        facade, graph, vector, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, session_key="sk:test", cognee_data_id=str(uuid.uuid4()),
+        ))
+        graph.delete_entity = AsyncMock(side_effect=RuntimeError("neo4j down"))
+        cascade_spy = AsyncMock(return_value="ok")
+        monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
+
+        await facade.delete(fact.id)  # must not raise
+
+        # Steps 2 + 3 still attempted (core 5-607 assertion).
+        vector.delete_embedding.assert_called_once_with("FactDataPoint_text", str(fact.id))
+        cascade_spy.assert_called_once()
+
+        # Metric fired once with step=graph.
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with("graph")
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(degraded) == 1
+        assert degraded[0].payload["step"] == "graph"
+        assert degraded[0].payload["component"] == "memory_facade"
+        assert degraded[0].payload["operation"] == "delete"
+        assert degraded[0].payload["fact_id"] == str(fact.id)
+
+        gdpr = await ledger.query_trace(TraceQuery(event_types=[TraceEventType.GDPR_DELETE]))
+        assert len(gdpr) == 1
+        assert gdpr[0].payload["cascade_status"] == {
+            "graph": "failed", "vector": "ok", "cognee_data": "ok",
+        }
+
+    async def test_delete_cascade_vector_failure_alone(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Vector delete raises (Qdrant down), graph + cognee succeed →
+        DEGRADED_OPERATION(step=vector) + metric(step=vector), GDPR_DELETE
+        reflects vector=failed and graph/cognee=ok."""
+        from unittest.mock import AsyncMock, MagicMock
+        facade, graph, vector, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, session_key="sk:test", cognee_data_id=str(uuid.uuid4()),
+        ))
+        vector.delete_embedding = AsyncMock(side_effect=RuntimeError("qdrant down"))
+        monkeypatch.setattr(facade, "_cascade_cognee_data", AsyncMock(return_value="ok"))
+
+        await facade.delete(fact.id)
+
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with("vector")
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(degraded) == 1
+        assert degraded[0].payload["step"] == "vector"
+        gdpr = await ledger.query_trace(TraceQuery(event_types=[TraceEventType.GDPR_DELETE]))
+        assert gdpr[0].payload["cascade_status"] == {
+            "graph": "ok", "vector": "failed", "cognee_data": "ok",
+        }
+
+    async def test_delete_cascade_cognee_failure_alone(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """_cascade_cognee_data returns 'failed' → re-emitted at the call
+        site as DEGRADED_OPERATION(step=cognee_data) + metric; GDPR_DELETE
+        reflects cognee_data=failed. Pins the 'helper returns status →
+        facade emits observability' contract so a future refactor cannot
+        silently drop the cognee-step signal."""
+        from unittest.mock import AsyncMock, MagicMock
+        facade, graph, vector, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, session_key="sk:test", cognee_data_id=str(uuid.uuid4()),
+        ))
+        monkeypatch.setattr(facade, "_cascade_cognee_data", AsyncMock(return_value="failed"))
+
+        await facade.delete(fact.id)
+
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with("cognee_data")
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(degraded) == 1
+        assert degraded[0].payload["step"] == "cognee_data"
+        gdpr = await ledger.query_trace(TraceQuery(event_types=[TraceEventType.GDPR_DELETE]))
+        assert gdpr[0].payload["cascade_status"] == {
+            "graph": "ok", "vector": "ok", "cognee_data": "failed",
+        }
+
+    async def test_delete_cascade_multi_step_failure_emits_each_step(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Graph + vector both fail; cognee_data succeeds → two
+        DEGRADED_OPERATION events (one per failed step), two metric
+        increments, GDPR_DELETE still emitted with cascade_status reflecting
+        BOTH failures. Pins the independence of per-step observability:
+        even when multiple layers are down the operator sees each signal
+        separately in the degraded-ops stream."""
+        from unittest.mock import AsyncMock, MagicMock
+        facade, graph, vector, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion(session_key="sk:test")
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, session_key="sk:test", cognee_data_id=str(uuid.uuid4()),
+        ))
+        graph.delete_entity = AsyncMock(side_effect=RuntimeError("neo4j down"))
+        vector.delete_embedding = AsyncMock(side_effect=RuntimeError("qdrant down"))
+        monkeypatch.setattr(facade, "_cascade_cognee_data", AsyncMock(return_value="ok"))
+
+        await facade.delete(fact.id)
+
+        # Two metric increments, both step labels distinct.
+        assert metrics.inc_fact_delete_cascade_failure.call_count == 2
+        called_steps = {c.args[0] for c in metrics.inc_fact_delete_cascade_failure.call_args_list}
+        assert called_steps == {"graph", "vector"}
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        degraded = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        assert len(degraded) == 2
+        assert {e.payload["step"] for e in degraded} == {"graph", "vector"}
+
+        gdpr = await ledger.query_trace(TraceQuery(event_types=[TraceEventType.GDPR_DELETE]))
+        assert len(gdpr) == 1
+        assert gdpr[0].payload["cascade_status"] == {
+            "graph": "failed", "vector": "failed", "cognee_data": "ok",
+        }
+
+    async def test_delete_gdpr_payload_includes_session_key_on_traceevent_fields(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """GDPR_DELETE TraceEvent carries session_key + session_id as
+        first-class fields (not only inside payload) so /trace?session_key=
+        filters hit delete events. Without this, a compliance auditor
+        querying by session would miss GDPR removals against that session."""
+        from unittest.mock import AsyncMock
+        facade, graph, _, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        sid = uuid.uuid4()
+        fact = make_fact_assertion(session_key="sk:compliance", session_id=sid)
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, session_key="sk:compliance", session_id=str(sid),
+        ))
+
+        await facade.delete(fact.id)
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        gdpr = await ledger.query_trace(TraceQuery(event_types=[TraceEventType.GDPR_DELETE]))
+        assert len(gdpr) == 1
+        event = gdpr[0]
+        # TraceEvent first-class fields populated.
+        assert event.session_key == "sk:compliance"
+        assert event.session_id == sid
+        # Payload mirrors for consumers that only read payload.
+        assert event.payload["session_key"] == "sk:compliance"
+        assert event.payload["fact_id"] == str(fact.id)
+        # Query by session_key must surface this event.
+        by_session = await ledger.query_trace(TraceQuery(
+            event_types=[TraceEventType.GDPR_DELETE],
+            session_key="sk:compliance",
+        ))
+        assert len(by_session) == 1
+        assert by_session[0].id == event.id
+
     # --- TD-50 regression: cognee_data_id capture + cascade-on-update ---
 
     async def test_store_captures_cognee_data_id(self, monkeypatch, mock_add_data_points, mock_cognee):
