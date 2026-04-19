@@ -104,24 +104,25 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             except Exception as exc:
                 logger.warning("Dedup check failed, proceeding with store: %s", exc)
 
-        # Store via Cognee
-        dp = FactDataPoint.from_schema(fact)
-        await add_data_points([dp])
+        # Store via Cognee. Call cognee.add() first to capture the data_id,
+        # then persist the FactDataPoint with the captured id in a single
+        # add_data_points() MERGE. Rationale:
+        #   (a) avoids a double MERGE on the store hot path, and
+        #   (b) eliminates the partial-failure window where the graph node
+        #       existed with cognee_data_id=None — such a fact would
+        #       permanently orphan the cognee-owned artifacts on delete
+        #       because the cascade call had no data_id to pass.
         cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
-
-        # Capture cognee data_id for future delete cascade (TD-50).
-        # Probe B10 confirmed: cognee_add_result.data_ingestion_info[0]['data_id']
-        # yields a UUID. Persist onto FactDataPoint so delete() can cascade.
         try:
-            captured_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-            fact.cognee_data_id = captured_data_id
-            dp.cognee_data_id = str(captured_data_id)
-            await add_data_points([dp])
+            fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
         except (AttributeError, IndexError, KeyError, TypeError) as exc:
             logger.warning(
                 "Could not capture cognee_data_id for fact %s (delete cascade will skip cognee cleanup): %s",
                 fact.id, exc,
             )
+
+        dp = FactDataPoint.from_schema(fact)
+        await add_data_points([dp])
 
         # Graph edges (best-effort)
         edges_created = 0
@@ -348,8 +349,8 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
         fact = dp.to_schema()
+        old_cognee_data_id = fact.cognee_data_id
 
-        # Apply updates
         text_changed = "text" in updates
         for key, value in updates.items():
             if key in ("id", "created_at", "source_actor_id", "gateway_id"):
@@ -362,10 +363,36 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             fact.token_size = count_tokens(fact.text)
             fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
             await self._embeddings.embed_text(fact.text)
-            await cognee.add(fact.text, dataset_name=self._dataset_name)
+            # Re-ingest the new text into Cognee and refresh the fact's
+            # data_id BEFORE persisting. Without this, fact.cognee_data_id
+            # keeps pointing at the pre-update document and the cognee-side
+            # artifacts for the NEW text become permanent orphans that
+            # delete() cannot reach — the TD-50 regression in update().
+            cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+            try:
+                fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+            except (AttributeError, IndexError, KeyError, TypeError) as exc:
+                logger.warning(
+                    "Could not capture new cognee_data_id for fact %s on text update (cognee-side artifacts may orphan): %s",
+                    fact.id, exc,
+                )
+                fact.cognee_data_id = None
 
         updated_dp = FactDataPoint.from_schema(fact)
         await add_data_points([updated_dp])
+
+        # Cascade the superseded cognee doc only after the graph node points
+        # at the new one — so an observer never sees the fact referencing a
+        # half-deleted doc. Metadata-only updates (no text change) never
+        # refresh cognee_data_id and must not cascade.
+        if (
+            text_changed
+            and old_cognee_data_id
+            and old_cognee_data_id != fact.cognee_data_id
+        ):
+            await self._cascade_cognee_data(
+                old_cognee_data_id, fact_id=fact_id, context="update_text_change",
+            )
 
         await self._trace.append_event(
             TraceEvent(
@@ -375,6 +402,46 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         )
         logger.info("Updated fact %s: %s", fact_id, list(updates.keys()))
         return fact
+
+    async def _cascade_cognee_data(
+        self, cognee_data_id, *, fact_id: uuid.UUID, context: str,
+    ) -> None:
+        """Run the Cognee-side cleanup for a single data_id.
+
+        Removes Cognee-owned chunks/documents/summaries in Neo4j, chunk
+        points across Qdrant collections, SQLite rows, and the
+        .data_storage file. Entities are preserved per operator decision.
+        Used by delete() (full removal) and update() (superseded-doc
+        cleanup on text change).
+        """
+        try:
+            from uuid import UUID
+            from cognee.modules.data.methods import get_datasets_by_name
+            from cognee.modules.users.methods import get_default_user
+            user = await get_default_user()
+            datasets = await get_datasets_by_name([self._dataset_name], user.id)
+            if not datasets:
+                logger.warning(
+                    "TD-50 cascade skipped (%s): dataset %s not found for fact %s",
+                    context, self._dataset_name, fact_id,
+                )
+                return
+            data_id_uuid = UUID(str(cognee_data_id))
+            result = await cognee.datasets.delete_data(
+                dataset_id=datasets[0].id,
+                data_id=data_id_uuid,
+                mode="soft",
+                delete_dataset_if_empty=False,
+            )
+            logger.info(
+                "TD-50 cascade complete (%s): fact_id=%s data_id=%s cognee_result=%r",
+                context, fact_id, cognee_data_id, result,
+            )
+        except Exception as exc:
+            logger.warning(
+                "TD-50 cascade failed (%s, fact_id=%s, data_id=%s): %r",
+                context, fact_id, cognee_data_id, exc,
+            )
 
     @traced
     async def delete(self, fact_id: uuid.UUID, *, caller_gateway_id: str = "") -> None:
@@ -403,44 +470,16 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         except Exception as exc:
             logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
 
-        # Cascade Cognee-owned artifacts (TD-50).
-        # Probe B10 confirmed: cognee.datasets.delete_data(dataset_id, data_id,
-        # mode="soft", delete_dataset_if_empty=False) removes Neo4j chunks/
-        # documents/summaries, Qdrant points across 3 collections, SQLite data/
-        # dataset_data/nodes/edges rows, and the .data_storage/<hash>.txt file.
+        # Cascade Cognee-owned artifacts (TD-50). cognee.datasets.delete_data
+        # removes chunks/documents/summaries in Neo4j, chunk points across
+        # Qdrant collections, SQLite rows, and the .data_storage file. Graph
+        # + vector are already gone above; failure here is logged but does
+        # not roll back the EB-layer delete (partial cleanup beats rollback).
         cognee_data_id = entity.get("cognee_data_id") if isinstance(entity, dict) else None
         if cognee_data_id:
-            try:
-                from uuid import UUID
-                from cognee.modules.data.methods import get_datasets_by_name
-                from cognee.modules.users.methods import get_default_user
-                user = await get_default_user()
-                datasets = await get_datasets_by_name([self._dataset_name], user.id)
-                if datasets:
-                    dataset_id = datasets[0].id
-                    data_id_uuid = UUID(str(cognee_data_id))
-                    result = await cognee.datasets.delete_data(
-                        dataset_id=dataset_id,
-                        data_id=data_id_uuid,
-                        mode="soft",
-                        delete_dataset_if_empty=False,
-                    )
-                    logger.info(
-                        "TD-50 cascade complete: fact_id=%s data_id=%s cognee_result=%r",
-                        fact_id, cognee_data_id, result,
-                    )
-                else:
-                    logger.warning(
-                        "TD-50 cascade skipped: dataset %s not found for fact %s",
-                        self._dataset_name, fact_id,
-                    )
-            except Exception as exc:
-                # Log but don't fail the EB-layer delete — partial cleanup
-                # is better than rollback since graph + vector are already gone.
-                logger.warning(
-                    "TD-50 cascade failed (EB-layer delete already succeeded): fact_id=%s err=%r",
-                    fact_id, exc,
-                )
+            await self._cascade_cognee_data(
+                cognee_data_id, fact_id=fact_id, context="delete",
+            )
         else:
             logger.info(
                 "TD-50 cascade skipped: fact %s has no cognee_data_id (pre-TD-50 fact)",

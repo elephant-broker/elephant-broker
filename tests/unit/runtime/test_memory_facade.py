@@ -692,6 +692,95 @@ class TestMemoryStoreFacadePhase4:
         assert result.token_size is not None
         assert result.token_size > 0
 
+    # --- TD-50 regression: cognee_data_id capture + cascade-on-update ---
+
+    async def test_store_captures_cognee_data_id(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """store() captures data_id returned by cognee.add() onto fact.cognee_data_id
+        and persists exactly once via a single add_data_points() MERGE."""
+        from types import SimpleNamespace
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        returned_data_id = uuid.uuid4()
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": returned_data_id}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        result = await facade.store(fact)
+        assert result.cognee_data_id == returned_data_id
+        # Single MERGE: cognee.add() captured the id BEFORE add_data_points(),
+        # so we persist once — no double-MERGE and no cognee_data_id=None window.
+        assert len(mock_add_data_points.calls) == 1
+        persisted_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert persisted_dp.cognee_data_id == str(returned_data_id)
+
+    async def test_update_text_change_refreshes_cognee_data_id_and_cascades_old(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """update() with a new text re-ingests into Cognee, refreshes
+        fact.cognee_data_id to the NEW data_id, then cascades the OLD
+        data_id through the same cascade helper used by delete()."""
+        from types import SimpleNamespace
+        facade, graph, _, _, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+
+        old_data_id = uuid.uuid4()
+        new_data_id = uuid.uuid4()
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(old_data_id),
+        ))
+
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": new_data_id}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        cascade_spy = AsyncMock()
+        monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
+
+        result = await facade.update(fact.id, {"text": "rewritten text"})
+
+        # NEW id is on the fact
+        assert result.cognee_data_id == new_data_id
+        # cognee.add() was called with the new text (re-ingest path)
+        mock_cognee.add.assert_called_once()
+        assert mock_cognee.add.call_args[0][0] == "rewritten text"
+        # OLD id was cascaded — with update_text_change context, after MERGE
+        cascade_spy.assert_called_once()
+        call_args = cascade_spy.call_args
+        assert call_args[0][0] == old_data_id  # positional: cognee_data_id=OLD
+        assert call_args.kwargs["fact_id"] == fact.id
+        assert call_args.kwargs["context"] == "update_text_change"
+
+    async def test_update_metadata_only_leaves_cognee_data_id_untouched(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """update() without a text change must NOT re-ingest into Cognee
+        and must NOT cascade the existing cognee_data_id — metadata-only
+        edits leave the Cognee-owned document intact."""
+        facade, graph, _, _, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        existing_data_id = uuid.uuid4()
+        fact = make_fact_assertion(confidence=1.0)
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(existing_data_id),
+        ))
+
+        cascade_spy = AsyncMock()
+        monkeypatch.setattr(facade, "_cascade_cognee_data", cascade_spy)
+
+        result = await facade.update(fact.id, {"confidence": 0.5})
+
+        # cognee_data_id is untouched
+        assert result.cognee_data_id == existing_data_id
+        # No re-ingest
+        mock_cognee.add.assert_not_called()
+        # No cascade
+        cascade_spy.assert_not_called()
+
     # --- Observability tests (R1-C13, R1-C17) ---
 
     async def test_dedup_skip_emits_trace_event_with_session_fields(self, monkeypatch, mock_add_data_points, mock_cognee):

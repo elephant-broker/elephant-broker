@@ -62,3 +62,47 @@ class TestMemoryStoreFacadeIntegration:
         await memory_facade.store(fact)
         decayed = await memory_facade.decay(fact.id, 0.5)
         assert decayed.confidence == pytest.approx(0.4, abs=0.01)
+
+    async def test_update_text_change_cascades_old_and_delete_cascades_new(
+        self, memory_facade,
+    ):
+        # TD-50 regression: update(text=...) must cascade the OLD cognee doc
+        # (not just orphan it by losing the pointer), and a subsequent
+        # delete() must cascade the NEW doc. After the full flow, the
+        # dataset holds neither — confirming no orphan was left behind.
+        from cognee.modules.data.methods import get_dataset_data, get_datasets_by_name
+        from cognee.modules.users.methods import get_default_user
+
+        fact = make_fact_assertion(text="The capital of France is Paris")
+        stored = await memory_facade.store(fact)
+        old_data_id = stored.cognee_data_id
+        assert old_data_id is not None, "store() must capture cognee_data_id"
+
+        updated = await memory_facade.update(
+            fact.id, {"text": "The capital of Germany is Berlin"},
+        )
+        new_data_id = updated.cognee_data_id
+        assert new_data_id is not None, (
+            "update(text=...) must capture a new cognee_data_id"
+        )
+        assert new_data_id != old_data_id, (
+            "text change must refresh cognee_data_id to the new ingest"
+        )
+
+        user = await get_default_user()
+        datasets = await get_datasets_by_name(["test_integration"], user.id)
+        assert datasets, "test_integration dataset should exist after store()"
+        dataset_id = datasets[0].id
+
+        data_ids_after_update = {d.id for d in await get_dataset_data(dataset_id)}
+        assert old_data_id not in data_ids_after_update, (
+            f"TD-50 regression: OLD cognee doc {old_data_id} was orphaned by "
+            f"update() — dataset still contains it alongside NEW {new_data_id}"
+        )
+
+        await memory_facade.delete(fact.id)
+
+        data_ids_after_delete = {d.id for d in await get_dataset_data(dataset_id)}
+        assert new_data_id not in data_ids_after_delete, (
+            f"delete() left NEW cognee doc {new_data_id} orphaned in the dataset"
+        )
