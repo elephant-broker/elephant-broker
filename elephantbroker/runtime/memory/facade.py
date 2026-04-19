@@ -345,10 +345,37 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return dp.to_schema()
 
     @traced
-    async def update(self, fact_id: uuid.UUID, updates: dict) -> FactAssertion:
+    async def update(
+        self, fact_id: uuid.UUID, updates: dict, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")
+
+        # Gateway-ownership pre-check — mirrors the delete() pattern.
+        # Without this, PATCH /memory/{fact_id} was a cross-tenant mutation
+        # vector: any caller with a valid session could modify facts owned
+        # by another gateway. We compare the stored gateway_id against the
+        # caller-supplied value (from the X-EB-Gateway-ID header via
+        # request.state), falling back to the module's configured gateway
+        # for in-process callers. Empty stored gateway_id passes through —
+        # pre-Gateway-Identity facts exist in the wild and must remain
+        # mutable by their owning runtime.
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "update",
+                    "fact_id": str(fact_id),
+                    "owner_gateway": entity_gw,
+                    "caller_gateway": effective_gw,
+                },
+            ))
+            raise PermissionError(
+                f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
+            )
 
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)

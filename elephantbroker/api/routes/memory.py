@@ -306,11 +306,14 @@ async def delete_fact(fact_id: uuid.UUID, request: Request):
 async def update_fact(fact_id: uuid.UUID, body: dict, request: Request):
     """Update fact fields. Body is a flat dict of fields to update (e.g., {"text": "new", "confidence": 0.5})."""
     ms = get_memory_store(request)
+    caller_gw = getattr(request.state, "gateway_id", "")
     try:
-        result = await ms.update(fact_id, body)
+        result = await ms.update(fact_id, body, caller_gateway_id=caller_gw)
         return result.model_dump(mode="json")
     except KeyError:
         return JSONResponse(status_code=404, content={"detail": "Fact not found"})
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
 
 
 # --- Class promotion ---

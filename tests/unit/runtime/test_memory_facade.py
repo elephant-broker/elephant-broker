@@ -1133,6 +1133,72 @@ class TestMemoryStoreFacadePhase4:
         assert events[0].payload["fact_id"] == str(fact.id)
         assert events[0].payload["owner_gateway"] == "other-gw"
 
+    # --- PR #5 TODO 5-601: facade.update() gateway-ownership pre-check ---
+    # Without this check, PATCH /memory/{fact_id} was a cross-tenant
+    # mutation vector. These two tests pin the facade layer:
+    #   1. cross-gateway attempt raises PermissionError + emits
+    #      AUTHORITY_CHECK_FAILED trace with action="update" discriminator
+    #      (so auditors can tell update-attempts from delete-attempts).
+    #   2. matching gateway proceeds normally — the new check must NOT
+    #      regress the happy path for in-tenant updates.
+
+    async def test_update_permission_error_emits_authority_check_trace(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Cross-tenant PATCH attempt: facade.update() raises PermissionError
+        + emits AUTHORITY_CHECK_FAILED trace carrying action=update plus
+        owner/caller gateway ids. The 'action' discriminator is the piece
+        that lets operators tell mutation-attempts from deletion-attempts
+        in the forensic stream (delete() uses the same event type but
+        without an action label today — the update() site adds it)."""
+        facade, graph, _, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value={
+            **self._fact_props(fact), "gateway_id": "tenant-other",
+        })
+        with pytest.raises(PermissionError):
+            await facade.update(
+                fact.id, {"text": "cross-tenant"}, caller_gateway_id="tenant-local",
+            )
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.AUTHORITY_CHECK_FAILED]),
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["fact_id"] == str(fact.id)
+        assert payload["owner_gateway"] == "tenant-other"
+        assert payload["caller_gateway"] == "tenant-local"
+        assert payload["action"] == "update"
+        # add_data_points must NOT have been called — the update never
+        # reached the persistence path.
+        assert len(mock_add_data_points.calls) == 0
+
+    async def test_update_same_gateway_proceeds(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Matching gateway: ownership check passes, update proceeds
+        normally. Guards against a future regression that accidentally
+        flips the comparison operator."""
+        facade, graph, _, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value={
+            **self._fact_props(fact), "gateway_id": "tenant-local",
+        })
+        result = await facade.update(
+            fact.id, {"confidence": 0.42}, caller_gateway_id="tenant-local",
+        )
+        assert result.confidence == 0.42
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.AUTHORITY_CHECK_FAILED]),
+        )
+        assert events == [], "same-gateway update must not emit AUTHORITY_CHECK_FAILED"
+
 
 class TestCogneeDataIdCaptureObservability:
     """TD-50 capture-failure observability (PR #5 TODO 5-301).

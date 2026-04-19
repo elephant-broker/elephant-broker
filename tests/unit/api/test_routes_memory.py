@@ -121,6 +121,65 @@ class TestMemoryRoutes:
         )
         assert r.status_code == 404
 
+    # --- PR #5 TODO 5-601: PATCH /memory/{fact_id} cross-tenant security ---
+    # The PATCH route mirrors the DELETE route's gateway-ownership
+    # pre-check: the facade raises PermissionError on gateway mismatch,
+    # the route catches it and returns 403 with a structured detail body.
+    # These three tests pin the new branches (403 + gateway forwarding +
+    # 422 malformed-UUID) so a future regression on any branch is caught.
+    # The 200 success and 404 not-found branches are already covered by
+    # test_patch_updates_fact and test_patch_not_found_404 above.
+
+    async def test_patch_permission_error_returns_403(self, client, container):
+        """Cross-tenant mutation attempt: facade.update() raises
+        PermissionError (gateway mismatch) → route returns 403 with a
+        detail body matching the DELETE route shape."""
+        container.memory_store.update = AsyncMock(
+            side_effect=PermissionError(
+                "Fact abc belongs to gateway tenant-other, not tenant-local"
+            ),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"text": "attempted cross-tenant update"},
+            headers={"X-EB-Gateway-ID": "tenant-local"},
+        )
+        assert r.status_code == 403
+        assert "tenant-other" in r.json()["detail"]
+
+    async def test_patch_forwards_caller_gateway_id(self, client, container):
+        """The route threads request.state.gateway_id → facade.update()'s
+        caller_gateway_id kwarg, so the facade can distinguish owner from
+        attacker. Without this, the ownership check collapses to a no-op."""
+        captured: dict = {}
+
+        async def capture_update(fact_id, updates, *, caller_gateway_id=""):
+            captured["caller_gateway_id"] = caller_gateway_id
+            captured["fact_id"] = fact_id
+            return FactAssertion(text="updated", gateway_id=caller_gateway_id)
+
+        container.memory_store.update = AsyncMock(side_effect=capture_update)
+        fid = uuid.uuid4()
+        r = await client.patch(
+            f"/memory/{fid}",
+            json={"text": "ok"},
+            headers={"X-EB-Gateway-ID": "tenant-42"},
+        )
+        assert r.status_code == 200
+        assert captured["caller_gateway_id"] == "tenant-42"
+        assert captured["fact_id"] == fid
+
+    async def test_patch_malformed_uuid_returns_422(self, client):
+        """Malformed path param (not a UUID) must be rejected at the
+        FastAPI validation layer with 422, BEFORE the facade is called —
+        preserves the existing behaviour documented by fact_id: uuid.UUID
+        in the route signature."""
+        r = await client.patch(
+            "/memory/not-a-uuid",
+            json={"text": "anything"},
+        )
+        assert r.status_code == 422
+
     async def test_promote_class(self, client, container):
         fact = FactAssertion(text="promoted", memory_class=MemoryClass.SEMANTIC)
         container.memory_store.promote_class = AsyncMock(return_value=fact)
