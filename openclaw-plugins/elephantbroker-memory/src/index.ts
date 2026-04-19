@@ -1,5 +1,5 @@
 import { ElephantBrokerClient } from "./client.js";
-import { formatMemoryContext } from "./format.js";
+import { formatMemoryContext, stripOpenClawEnvelope } from "./format.js";
 import { createMemorySearchTool } from "./tools/memory_search.js";
 import { createMemoryGetTool } from "./tools/memory_get.js";
 import { createMemoryStoreTool } from "./tools/memory_store.js";
@@ -114,7 +114,7 @@ export function register(api: PluginAPI) {
       client.setActorId(actorId);
     }
 
-    const query = hookEvent.prompt || "";
+    const query = stripOpenClawEnvelope(hookEvent.prompt ?? "");
     if (!query) return {};
 
     console.info(`[EB] Hook before_agent_start: querying memories for session ${currentSessionKey}`);
