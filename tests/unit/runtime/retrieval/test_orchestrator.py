@@ -1,12 +1,13 @@
 """Tests for RetrievalOrchestrator — dataset name fix (Fix #32)."""
 from __future__ import annotations
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from elephantbroker.runtime.retrieval.orchestrator import RetrievalOrchestrator
-from elephantbroker.schemas.profile import RetrievalPolicy
+from elephantbroker.schemas.profile import IsolationScope, RetrievalPolicy
 from elephantbroker.schemas.trace import TraceEventType
 
 
@@ -162,3 +163,172 @@ class TestMemorySearchSessionIdThreading:
         assert len(events) == 1
         assert str(events[0].session_id) == "11111111-1111-1111-1111-111111111111"
         assert events[0].session_key == "agent:main:main"
+
+
+def _fact_props(fact_id: str, *, session_key: str = "", actor_id: str = "") -> dict:
+    """Build FactDataPoint props dict for a Cypher-mock row."""
+    return {
+        "eb_id": fact_id, "text": "test fact", "category": "general",
+        "scope": "session", "confidence": 1.0, "memory_class": "episodic",
+        "eb_created_at": 0, "eb_updated_at": 0, "use_count": 0,
+        "successful_use_count": 0, "provenance_refs": [],
+        "target_actor_ids": [], "goal_ids": [],
+        "session_key": session_key, "source_actor_id": actor_id,
+        "gateway_id": "test-gw",
+    }
+
+
+class TestTD61GuardSymmetry:
+    """TD-61 completeness: auto_recall bypasses isolation filters symmetrically
+    for both SESSION_KEY and ACTOR scopes, across the structural Cypher
+    pre-filter and the post-retrieval filter. Explicit-search enforces."""
+
+    @staticmethod
+    def _structural_only_policy(
+        isolation_scope: IsolationScope = IsolationScope.SESSION_KEY,
+    ) -> RetrievalPolicy:
+        return RetrievalPolicy(
+            isolation_scope=isolation_scope,
+            structural_enabled=True,
+            keyword_enabled=False,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+    # --- Structural Cypher pre-filter: session_key ---
+
+    async def test_structural_session_key_prefilter_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=True,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert "session_key" not in params
+
+    async def test_structural_session_key_prefilter_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=False,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert params.get("session_key") == "sk-A"
+
+    # --- Structural Cypher pre-filter: actor_id ---
+
+    async def test_structural_actor_prefilter_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=str(uuid.uuid4()),
+            auto_recall=True,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert "actor_id" not in params
+
+    async def test_structural_actor_prefilter_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        actor = str(uuid.uuid4())
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=actor,
+            auto_recall=False,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert params.get("actor_id") == actor
+
+    # --- Post-retrieval filter: SESSION_KEY scope ---
+
+    async def test_post_retrieval_session_key_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, session_key="sk-A"), "relations": []},
+            {"props": _fact_props(out_id, session_key="sk-B"), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=True,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id in ids, "auto_recall must surface cross-session candidates"
+
+    async def test_post_retrieval_session_key_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, session_key="sk-A"), "relations": []},
+            {"props": _fact_props(out_id, session_key="sk-B"), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=False,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id not in ids, "explicit-search must enforce session_key isolation"
+
+    # --- Post-retrieval filter: ACTOR scope ---
+
+    async def test_post_retrieval_actor_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        target_actor = str(uuid.uuid4())
+        other_actor = str(uuid.uuid4())
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, actor_id=target_actor), "relations": []},
+            {"props": _fact_props(out_id, actor_id=other_actor), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=target_actor,
+            auto_recall=True,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id in ids, "auto_recall must surface cross-actor candidates"
+
+    async def test_post_retrieval_actor_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        target_actor = str(uuid.uuid4())
+        other_actor = str(uuid.uuid4())
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, actor_id=target_actor), "relations": []},
+            {"props": _fact_props(out_id, actor_id=other_actor), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=target_actor,
+            auto_recall=False,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id not in ids, "explicit-search must enforce actor isolation"

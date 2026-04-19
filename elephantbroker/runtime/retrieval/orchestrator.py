@@ -163,11 +163,14 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             if key not in best or c.score > best[key].score:
                 best[key] = c
 
-        # Post-retrieval isolation filter
+        # Post-retrieval isolation filter. TD-61 semantics: auto_recall
+        # bypasses isolation-scope filters symmetrically for both
+        # SESSION_KEY and ACTOR scopes — explicit-search enforces, auto
+        # recall pulls cross-session/actor candidates.
         filtered = list(best.values())
         if policy.isolation_scope == IsolationScope.SESSION_KEY and session_key and not auto_recall:
             filtered = [c for c in filtered if c.fact.session_key == session_key or c.fact.session_key is None]
-        elif policy.isolation_scope == IsolationScope.ACTOR and actor_id:
+        elif policy.isolation_scope == IsolationScope.ACTOR and actor_id and not auto_recall:
             filtered = [c for c in filtered
                         if (c.fact.source_actor_id and str(c.fact.source_actor_id) == actor_id)
                         or any(str(t) == actor_id for t in c.fact.target_actor_ids)]
@@ -212,7 +215,13 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if scope:
             conditions.append("f.scope = $scope")
             params["scope"] = scope
-        if actor_id:
+        # TD-61 symmetry: session_key and actor_id are isolation-scope
+        # pre-filters. When auto_recall=True the caller wants cross-session
+        # / cross-actor candidates, so the pre-filter must bypass in lockstep
+        # with the post-retrieval isolation filter. Content selectors
+        # (scope, memory_class, goal_ids) are not isolation filters and
+        # remain applied regardless of auto_recall.
+        if actor_id and not auto_recall:
             conditions.append("f.source_actor_id = $actor_id")
             params["actor_id"] = actor_id
         if goal_ids:
@@ -221,7 +230,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if memory_class:
             conditions.append("f.memory_class = $memory_class")
             params["memory_class"] = memory_class.value if hasattr(memory_class, "value") else str(memory_class)
-        if session_key:
+        if session_key and not auto_recall:
             conditions.append("f.session_key = $session_key")
             params["session_key"] = session_key
 
