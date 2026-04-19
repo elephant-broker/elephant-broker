@@ -135,6 +135,34 @@ class TestRetrievalPerformedTraceEvent:
         assert len(events) == 1
         assert events[0].session_id is None
 
+    async def test_trace_event_payload_carries_auto_recall_true(self):
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+        await orch.retrieve_candidates(
+            "test query", policy=policy,
+            session_key="agent:main:main", auto_recall=True,
+        )
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert events[0].payload.get("auto_recall") is True
+
+    async def test_trace_event_payload_carries_auto_recall_false_default(self):
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+        # auto_recall defaults to False
+        await orch.retrieve_candidates("test query", policy=policy)
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert events[0].payload.get("auto_recall") is False
+
 
 class TestMemorySearchSessionIdThreading:
     """TD-47 complete: session_id must reach retrieve_candidates from /memory/search."""

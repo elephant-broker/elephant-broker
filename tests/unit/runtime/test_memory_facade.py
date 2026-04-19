@@ -1199,6 +1199,165 @@ class TestMemoryStoreFacadePhase4:
         )
         assert events == [], "same-gateway update must not emit AUTHORITY_CHECK_FAILED"
 
+    # --- PR #5 TODO 5-204: eb_memory_store_total{status="failure"} ---
+    # Before this fix, the failure label was declared on the counter but
+    # never incremented — any cognee.add / add_data_points / graph-level
+    # failure that propagated out of store() or delete() left the
+    # metric stream looking as if the operation had succeeded. The four
+    # tests below pin both the success and failure emission paths for
+    # both operations.
+
+    async def test_store_success_increments_success_status(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Happy-path store — status=success emitted exactly once."""
+        from unittest.mock import MagicMock
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        await facade.store(make_fact_assertion())
+        metrics.inc_store.assert_called_once_with("store", "success")
+
+    async def test_store_failure_emits_failure_status_and_reraises(
+        self, monkeypatch, mock_add_data_points,
+    ):
+        """cognee.add raises → store re-raises + inc_store("store","failure")
+        emitted. Previously this path incremented no metric at all."""
+        from unittest.mock import MagicMock
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        # Mock cognee.add to blow up mid-store.
+        class _BoomCognee:
+            async def add(self, *args, **kwargs):
+                raise RuntimeError("cognee.add exploded")
+            async def cognify(self, *args, **kwargs):
+                return None
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", _BoomCognee())
+        with pytest.raises(RuntimeError, match="cognee.add exploded"):
+            await facade.store(make_fact_assertion())
+        metrics.inc_store.assert_called_once_with("store", "failure")
+
+    async def test_store_dedup_skip_does_not_emit_failure_status(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """DedupSkipped is a legitimate skip, NOT a failure. inc_dedup
+        handles it; inc_store must NOT be called with status=failure
+        (or status=success — the store never actually ran)."""
+        from unittest.mock import MagicMock
+        facade, _, vector, emb, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        # Return a near-duplicate hit to trigger DedupSkipped.
+        vector.search_similar = AsyncMock(return_value=[
+            VectorSearchResult(id=str(uuid.uuid4()), score=0.99, payload={}),
+        ])
+        with pytest.raises(DedupSkipped):
+            await facade.store(make_fact_assertion())
+        # inc_store must NOT have been called — dedup has its own metric.
+        assert all(
+            call.args[:2] != ("store", "failure")
+            for call in metrics.inc_store.call_args_list
+        ), "DedupSkipped must not emit eb_memory_store_total{status=failure}"
+        assert all(
+            call.args[:2] != ("store", "success")
+            for call in metrics.inc_store.call_args_list
+        ), "DedupSkipped must not emit eb_memory_store_total{status=success}"
+
+    async def test_delete_success_increments_success_status(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Happy-path delete — status=success emitted exactly once."""
+        from unittest.mock import MagicMock
+        facade, graph, vector, _, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(fact))
+        await facade.delete(fact.id)
+        metrics.inc_store.assert_called_once_with("delete", "success")
+
+    async def test_delete_fact_not_found_emits_failure_status_and_reraises(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """KeyError on missing fact → inc_store("delete","failure") +
+        KeyError propagates. The route layer translates KeyError → 404."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        graph.get_entity = AsyncMock(return_value=None)  # not found
+        with pytest.raises(KeyError):
+            await facade.delete(uuid.uuid4())
+        metrics.inc_store.assert_called_once_with("delete", "failure")
+
+    async def test_delete_permission_error_emits_failure_status_and_reraises(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Cross-tenant delete → PermissionError + inc_store("delete","failure").
+        AUTHORITY_CHECK_FAILED still emits (pre-existing behavior, C7); the
+        new failure-metric emission is additive."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value={
+            **self._fact_props(fact), "gateway_id": "tenant-other",
+        })
+        with pytest.raises(PermissionError):
+            await facade.delete(fact.id, caller_gateway_id="tenant-local")
+        metrics.inc_store.assert_called_once_with("delete", "failure")
+
+    # --- PR #5 TODO 5-504: RETRIEVAL_PERFORMED payload auto_recall field ---
+    # PROGRAM.md §5.3 requires auto_recall in the trace payload so auditors
+    # can distinguish explicit-search calls from before_prompt_build
+    # auto-recalls without cross-referencing the metrics stream. Pre-fix
+    # the field was missing on facade.search's RETRIEVAL_PERFORMED event.
+
+    async def test_search_retrieval_performed_payload_carries_auto_recall_true(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        ledger = facade._trace
+        graph.query_cypher = AsyncMock(return_value=[])
+        await facade.search("q", profile_name="coding", auto_recall=True)
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.RETRIEVAL_PERFORMED]),
+        )
+        assert len(events) == 1
+        assert events[0].payload["auto_recall"] is True
+
+    async def test_search_retrieval_performed_payload_carries_auto_recall_false(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        ledger = facade._trace
+        graph.query_cypher = AsyncMock(return_value=[])
+        await facade.search("q", profile_name="coding")  # auto_recall defaults False
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.RETRIEVAL_PERFORMED]),
+        )
+        assert len(events) == 1
+        assert events[0].payload["auto_recall"] is False
+
 
 class TestCogneeDataIdCaptureObservability:
     """TD-50 capture-failure observability (PR #5 TODO 5-301).

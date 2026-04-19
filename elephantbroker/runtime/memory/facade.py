@@ -71,85 +71,101 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         dedup_threshold: float | None = None,
         precomputed_embedding: list[float] | None = None,
     ) -> FactAssertion:
-        # Token size + gateway stamp
-        fact.gateway_id = fact.gateway_id or self._gateway_id
-        fact.token_size = count_tokens(fact.text)
-        fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
-
-        # Dedup check — use caller-supplied threshold or fall back to default
-        effective_threshold = dedup_threshold if dedup_threshold is not None else _DEFAULT_DEDUP_THRESHOLD
-        if effective_threshold is not None:
-            embedding = precomputed_embedding or await self._embeddings.embed_text(fact.text)
-            try:
-                hits = await self._vector.search_similar(_FACTS_COLLECTION, embedding, top_k=1)
-                if hits and hits[0].score > effective_threshold:
-                    logger.info("Dedup: skipping near-duplicate for fact %s (score=%.3f)", fact.id, hits[0].score)
-                    if self._metrics:
-                        self._metrics.inc_dedup("skipped")
-                    else:
-                        inc_dedup("skipped")
-                    await self._trace.append_event(TraceEvent(
-                        event_type=TraceEventType.DEDUP_TRIGGERED,
-                        session_key=fact.session_key,
-                        session_id=fact.session_id,
-                        payload={
-                            "fact_text": fact.text[:50], "similarity": hits[0].score,
-                            "threshold": effective_threshold, "action": "skipped",
-                            "existing_fact_id": hits[0].id,
-                        },
-                    ))
-                    raise DedupSkipped(hits[0].id, hits[0].score)
-                if self._metrics:
-                    self._metrics.inc_dedup("stored")
-                else:
-                    inc_dedup("stored")
-            except DedupSkipped:
-                raise
-            except Exception as exc:
-                logger.warning("Dedup check failed, proceeding with store: %s", exc)
-
-        # Store via Cognee. Call cognee.add() first to capture the data_id,
-        # then persist the FactDataPoint with the captured id in a single
-        # add_data_points() MERGE. Rationale:
-        #   (a) avoids a double MERGE on the store hot path, and
-        #   (b) eliminates the partial-failure window where the graph node
-        #       existed with cognee_data_id=None — such a fact would
-        #       permanently orphan the cognee-owned artifacts on delete
-        #       because the cascade call had no data_id to pass.
-        cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
         try:
-            fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-        except (AttributeError, IndexError, KeyError, TypeError) as exc:
-            await self._emit_capture_failure(
-                operation="store", fact_id=fact.id, exc=exc,
-                session_key=fact.session_key, session_id=fact.session_id,
+            # Token size + gateway stamp
+            fact.gateway_id = fact.gateway_id or self._gateway_id
+            fact.token_size = count_tokens(fact.text)
+            fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
+
+            # Dedup check — use caller-supplied threshold or fall back to default
+            effective_threshold = dedup_threshold if dedup_threshold is not None else _DEFAULT_DEDUP_THRESHOLD
+            if effective_threshold is not None:
+                embedding = precomputed_embedding or await self._embeddings.embed_text(fact.text)
+                try:
+                    hits = await self._vector.search_similar(_FACTS_COLLECTION, embedding, top_k=1)
+                    if hits and hits[0].score > effective_threshold:
+                        logger.info("Dedup: skipping near-duplicate for fact %s (score=%.3f)", fact.id, hits[0].score)
+                        if self._metrics:
+                            self._metrics.inc_dedup("skipped")
+                        else:
+                            inc_dedup("skipped")
+                        await self._trace.append_event(TraceEvent(
+                            event_type=TraceEventType.DEDUP_TRIGGERED,
+                            session_key=fact.session_key,
+                            session_id=fact.session_id,
+                            payload={
+                                "fact_text": fact.text[:50], "similarity": hits[0].score,
+                                "threshold": effective_threshold, "action": "skipped",
+                                "existing_fact_id": hits[0].id,
+                            },
+                        ))
+                        raise DedupSkipped(hits[0].id, hits[0].score)
+                    if self._metrics:
+                        self._metrics.inc_dedup("stored")
+                    else:
+                        inc_dedup("stored")
+                except DedupSkipped:
+                    raise
+                except Exception as exc:
+                    logger.warning("Dedup check failed, proceeding with store: %s", exc)
+
+            # Store via Cognee. Call cognee.add() first to capture the data_id,
+            # then persist the FactDataPoint with the captured id in a single
+            # add_data_points() MERGE. Rationale:
+            #   (a) avoids a double MERGE on the store hot path, and
+            #   (b) eliminates the partial-failure window where the graph node
+            #       existed with cognee_data_id=None — such a fact would
+            #       permanently orphan the cognee-owned artifacts on delete
+            #       because the cascade call had no data_id to pass.
+            cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+            try:
+                fact.cognee_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+            except (AttributeError, IndexError, KeyError, TypeError) as exc:
+                await self._emit_capture_failure(
+                    operation="store", fact_id=fact.id, exc=exc,
+                    session_key=fact.session_key, session_id=fact.session_id,
+                )
+
+            dp = FactDataPoint.from_schema(fact)
+            await add_data_points([dp])
+
+            # Graph edges (best-effort)
+            edges_created = 0
+            if fact.source_actor_id:
+                edges_created += await self._try_add_edge(str(fact.id), str(fact.source_actor_id), "CREATED_BY")
+            for target_id in fact.target_actor_ids:
+                edges_created += await self._try_add_edge(str(fact.id), str(target_id), "ABOUT_ACTOR")
+            for goal_id in fact.goal_ids:
+                edges_created += await self._try_add_edge(str(fact.id), str(goal_id), "SERVES_GOAL")
+
+            if self._metrics:
+                self._metrics.inc_store("store", "success")
+            else:
+                inc_store("store", "success")
+            logger.info("Stored fact %s (%s, %d tokens)", fact.id, fact.memory_class, fact.token_size or 0)
+
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.INPUT_RECEIVED,
+                    payload={"action": "store_fact", "fact_id": str(fact.id), "text": fact.text[:50]},
+                )
             )
-
-        dp = FactDataPoint.from_schema(fact)
-        await add_data_points([dp])
-
-        # Graph edges (best-effort)
-        edges_created = 0
-        if fact.source_actor_id:
-            edges_created += await self._try_add_edge(str(fact.id), str(fact.source_actor_id), "CREATED_BY")
-        for target_id in fact.target_actor_ids:
-            edges_created += await self._try_add_edge(str(fact.id), str(target_id), "ABOUT_ACTOR")
-        for goal_id in fact.goal_ids:
-            edges_created += await self._try_add_edge(str(fact.id), str(goal_id), "SERVES_GOAL")
-
-        if self._metrics:
-            self._metrics.inc_store("store", "success")
-        else:
-            inc_store("store", "success")
-        logger.info("Stored fact %s (%s, %d tokens)", fact.id, fact.memory_class, fact.token_size or 0)
-
-        await self._trace.append_event(
-            TraceEvent(
-                event_type=TraceEventType.INPUT_RECEIVED,
-                payload={"action": "store_fact", "fact_id": str(fact.id), "text": fact.text[:50]},
-            )
-        )
-        return fact
+            return fact
+        except DedupSkipped:
+            # Dedup is a legitimate skip, not a failure — already observed via
+            # inc_dedup("skipped") above. Surface it to the caller unchanged
+            # and do NOT increment eb_memory_store_total{status="failure"}.
+            raise
+        except Exception:
+            # Everything else — cognee.add / add_data_points / graph edges /
+            # trace append — is a genuine store failure. Emit the failure
+            # status BEFORE re-raising so Prometheus sees the outcome even
+            # though the API layer will translate this to 5xx for the client.
+            if self._metrics:
+                self._metrics.inc_store("store", "failure")
+            else:
+                inc_store("store", "failure")
+            raise
 
     async def _try_add_edge(self, source: str, target: str, rel_type: str) -> int:
         try:
@@ -225,7 +241,10 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 event_type=TraceEventType.RETRIEVAL_PERFORMED,
                 session_id=session_id,
                 session_key=session_key,
-                payload={"action": "search", "query": query[:100], "results": len(fact_list)},
+                payload={
+                    "action": "search", "query": query[:100],
+                    "results": len(fact_list), "auto_recall": auto_recall,
+                },
             )
         )
         if self._metrics:
@@ -563,143 +582,159 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
     @traced
     async def delete(self, fact_id: uuid.UUID, *, caller_gateway_id: str = "") -> None:
-        entity = await self._graph.get_entity(str(fact_id))
-        if entity is None:
-            raise KeyError(f"Fact not found: {fact_id}")
+        try:
+            entity = await self._graph.get_entity(str(fact_id))
+            if entity is None:
+                raise KeyError(f"Fact not found: {fact_id}")
 
-        # GDPR pre-check: verify gateway ownership
-        # Use caller-supplied gateway_id (from request headers) if available,
-        # otherwise fall back to module's configured gateway_id.
-        effective_gw = caller_gateway_id or self._gateway_id
-        entity_gw = entity.get("gateway_id", "")
-        if entity_gw and entity_gw != effective_gw:
-            await self._trace.append_event(TraceEvent(
-                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
-                payload={"fact_id": str(fact_id), "owner_gateway": entity_gw, "caller_gateway": effective_gw},
-            ))
-            raise PermissionError(f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}")
+            # GDPR pre-check: verify gateway ownership
+            # Use caller-supplied gateway_id (from request headers) if available,
+            # otherwise fall back to module's configured gateway_id.
+            effective_gw = caller_gateway_id or self._gateway_id
+            entity_gw = entity.get("gateway_id", "")
+            if entity_gw and entity_gw != effective_gw:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={"fact_id": str(fact_id), "owner_gateway": entity_gw, "caller_gateway": effective_gw},
+                ))
+                raise PermissionError(f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}")
 
-        # Extract session fields for enriched trace payloads + TraceEvent
-        # routing. Stored session_id is a string on the graph node; parse to
-        # UUID for the TraceEvent field (payload keeps the raw string).
-        session_key_val: str | None = entity.get("session_key") or None
-        session_id_raw = entity.get("session_id")
-        session_id_val: uuid.UUID | None = None
-        if session_id_raw:
+            # Extract session fields for enriched trace payloads + TraceEvent
+            # routing. Stored session_id is a string on the graph node; parse to
+            # UUID for the TraceEvent field (payload keeps the raw string).
+            session_key_val: str | None = entity.get("session_key") or None
+            session_id_raw = entity.get("session_id")
+            session_id_val: uuid.UUID | None = None
+            if session_id_raw:
+                try:
+                    session_id_val = uuid.UUID(str(session_id_raw))
+                except (ValueError, TypeError):
+                    session_id_val = None
+
+            # Three-step cascade. Each step runs independently — a failure in
+            # any one layer must not short-circuit the remaining layers (TD-50
+            # + 5-607). Per-step failures emit DEGRADED_OPERATION + metric via
+            # _emit_cascade_failure; the aggregate cascade_status is stamped
+            # onto GDPR_DELETE so auditors can tell clean-delete from
+            # partial-failure without cross-referencing the degraded-ops stream.
+
+            # Step 1 — Neo4j (DETACH DELETE removes node + all edges)
             try:
-                session_id_val = uuid.UUID(str(session_id_raw))
-            except (ValueError, TypeError):
-                session_id_val = None
-
-        # Three-step cascade. Each step runs independently — a failure in
-        # any one layer must not short-circuit the remaining layers (TD-50
-        # + 5-607). Per-step failures emit DEGRADED_OPERATION + metric via
-        # _emit_cascade_failure; the aggregate cascade_status is stamped
-        # onto GDPR_DELETE so auditors can tell clean-delete from
-        # partial-failure without cross-referencing the degraded-ops stream.
-
-        # Step 1 — Neo4j (DETACH DELETE removes node + all edges)
-        try:
-            await self._graph.delete_entity(str(fact_id))
-            graph_status = "ok"
-        except Exception as exc:
-            logger.warning("Neo4j delete failed for fact %s: %s", fact_id, exc)
-            graph_status = "failed"
-            await self._emit_cascade_failure(
-                step="graph", fact_id=fact_id, exc=exc,
-                session_key=session_key_val, session_id=session_id_val,
-            )
-
-        # Step 2 — Qdrant (best-effort)
-        try:
-            await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
-            vector_status = "ok"
-        except Exception as exc:
-            logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
-            vector_status = "failed"
-            await self._emit_cascade_failure(
-                step="vector", fact_id=fact_id, exc=exc,
-                session_key=session_key_val, session_id=session_id_val,
-            )
-
-        # Step 3 — Cascade Cognee-owned artifacts (TD-50). cognee.datasets.
-        # delete_data removes chunks/documents/summaries in Neo4j, chunk
-        # points across Qdrant collections, SQLite rows, and the
-        # .data_storage file. _cascade_cognee_data captures its own
-        # exceptions and returns a status string; we re-emit DEGRADED_OP at
-        # this call site so the per-step metric carries step=cognee_data.
-        cognee_data_id = entity.get("cognee_data_id") if isinstance(entity, dict) else None
-        if cognee_data_id:
-            cognee_data_status = await self._cascade_cognee_data(
-                cognee_data_id, fact_id=fact_id, context="delete",
-            )
-            if cognee_data_status == "failed":
+                await self._graph.delete_entity(str(fact_id))
+                graph_status = "ok"
+            except Exception as exc:
+                logger.warning("Neo4j delete failed for fact %s: %s", fact_id, exc)
+                graph_status = "failed"
                 await self._emit_cascade_failure(
-                    step="cognee_data", fact_id=fact_id,
-                    exc=RuntimeError(
-                        f"cognee.datasets.delete_data failed for data_id={cognee_data_id}"
-                    ),
+                    step="graph", fact_id=fact_id, exc=exc,
                     session_key=session_key_val, session_id=session_id_val,
                 )
-        else:
-            logger.info(
-                "TD-50 cascade skipped: fact %s has no cognee_data_id (pre-TD-50 fact)",
-                fact_id,
-            )
-            cognee_data_status = "skipped_no_data_id"
 
-        # Scrub from recent_facts extraction-context window (prevents LLM
-        # re-extraction of deleted fact — see Phase 4 TD #2). Outcome is
-        # reported via eb_recent_facts_scrubbed_total (status=scrubbed|noop|
-        # failure) so dashboards can alert on scrub regressions — the merge
-        # report's TF-ER-003 flow-result claim depends on this metric.
-        if self._ingest_buffer is not None and session_key_val:
+            # Step 2 — Qdrant (best-effort)
             try:
-                removed = await self._ingest_buffer.scrub_fact_from_recent(
-                    session_key_val, str(fact_id),
-                )
-                scrub_status = "scrubbed" if removed else "noop"
+                await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
+                vector_status = "ok"
             except Exception as exc:
-                logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
-                scrub_status = "failure"
-            if self._metrics:
-                self._metrics.inc_recent_facts_scrubbed(scrub_status)
-            else:
-                inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
+                logger.warning("Qdrant delete failed for fact %s: %s", fact_id, exc)
+                vector_status = "failed"
+                await self._emit_cascade_failure(
+                    step="vector", fact_id=fact_id, exc=exc,
+                    session_key=session_key_val, session_id=session_id_val,
+                )
 
-        # GDPR_DELETE audit event — emitted on every delete that reached
-        # this point, INCLUDING partial-cascade failures. cascade_status
-        # records the per-step outcome so downstream auditors can reason
-        # about the completeness of the delete without stitching together
-        # the degraded-operation stream. session_key/session_id are
-        # promoted to first-class TraceEvent fields so SessionTimeline and
-        # the /trace search surface can filter by the originating session
-        # (the merge report's GDPR flow claim depends on this — without
-        # the session fields a /trace?session_key=... query would miss
-        # delete events).
-        await self._trace.append_event(
-            TraceEvent(
-                event_type=TraceEventType.GDPR_DELETE,
-                session_key=session_key_val,
-                session_id=session_id_val,
-                payload={
-                    "fact_id": str(fact_id),
-                    "session_key": session_key_val,
-                    "cascade_status": {
-                        "graph": graph_status,
-                        "vector": vector_status,
-                        "cognee_data": cognee_data_status,
+            # Step 3 — Cascade Cognee-owned artifacts (TD-50). cognee.datasets.
+            # delete_data removes chunks/documents/summaries in Neo4j, chunk
+            # points across Qdrant collections, SQLite rows, and the
+            # .data_storage file. _cascade_cognee_data captures its own
+            # exceptions and returns a status string; we re-emit DEGRADED_OP at
+            # this call site so the per-step metric carries step=cognee_data.
+            cognee_data_id = entity.get("cognee_data_id") if isinstance(entity, dict) else None
+            if cognee_data_id:
+                cognee_data_status = await self._cascade_cognee_data(
+                    cognee_data_id, fact_id=fact_id, context="delete",
+                )
+                if cognee_data_status == "failed":
+                    await self._emit_cascade_failure(
+                        step="cognee_data", fact_id=fact_id,
+                        exc=RuntimeError(
+                            f"cognee.datasets.delete_data failed for data_id={cognee_data_id}"
+                        ),
+                        session_key=session_key_val, session_id=session_id_val,
+                    )
+            else:
+                logger.info(
+                    "TD-50 cascade skipped: fact %s has no cognee_data_id (pre-TD-50 fact)",
+                    fact_id,
+                )
+                cognee_data_status = "skipped_no_data_id"
+
+            # Scrub from recent_facts extraction-context window (prevents LLM
+            # re-extraction of deleted fact — see Phase 4 TD #2). Outcome is
+            # reported via eb_recent_facts_scrubbed_total (status=scrubbed|noop|
+            # failure) so dashboards can alert on scrub regressions — the merge
+            # report's TF-ER-003 flow-result claim depends on this metric.
+            if self._ingest_buffer is not None and session_key_val:
+                try:
+                    removed = await self._ingest_buffer.scrub_fact_from_recent(
+                        session_key_val, str(fact_id),
+                    )
+                    scrub_status = "scrubbed" if removed else "noop"
+                except Exception as exc:
+                    logger.warning("recent_facts scrub failed for fact %s: %s", fact_id, exc)
+                    scrub_status = "failure"
+                if self._metrics:
+                    self._metrics.inc_recent_facts_scrubbed(scrub_status)
+                else:
+                    inc_recent_facts_scrubbed(scrub_status, gateway_id=self._gateway_id)
+
+            # GDPR_DELETE audit event — emitted on every delete that reached
+            # this point, INCLUDING partial-cascade failures. cascade_status
+            # records the per-step outcome so downstream auditors can reason
+            # about the completeness of the delete without stitching together
+            # the degraded-operation stream. session_key/session_id are
+            # promoted to first-class TraceEvent fields so SessionTimeline and
+            # the /trace search surface can filter by the originating session
+            # (the merge report's GDPR flow claim depends on this — without
+            # the session fields a /trace?session_key=... query would miss
+            # delete events).
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.GDPR_DELETE,
+                    session_key=session_key_val,
+                    session_id=session_id_val,
+                    payload={
+                        "fact_id": str(fact_id),
+                        "session_key": session_key_val,
+                        "cascade_status": {
+                            "graph": graph_status,
+                            "vector": vector_status,
+                            "cognee_data": cognee_data_status,
+                        },
                     },
-                },
+                )
             )
-        )
-        if self._metrics:
-            self._metrics.inc_gdpr_delete()
-            self._metrics.inc_store("delete", "success")
-        else:
-            inc_gdpr_delete()
-            inc_store("delete", "success")
-        logger.info("GDPR delete: fact %s", fact_id)
+            if self._metrics:
+                self._metrics.inc_gdpr_delete()
+                self._metrics.inc_store("delete", "success")
+            else:
+                inc_gdpr_delete()
+                inc_store("delete", "success")
+            logger.info("GDPR delete: fact %s", fact_id)
+        except Exception:
+            # KeyError (fact not found), PermissionError (cross-tenant), or
+            # any unhandled fall-through from the cascade / scrub / trace
+            # path. The individual cascade steps already self-capture their
+            # own exceptions and emit per-step cascade-failure metrics, so
+            # anything surfacing here is a pre-cascade or post-cascade
+            # failure (e.g., trace ledger unavailable). Emit
+            # eb_memory_store_total{operation="delete", status="failure"}
+            # BEFORE re-raising so Prometheus sees the aggregate outcome
+            # alongside the per-step observability.
+            if self._metrics:
+                self._metrics.inc_store("delete", "failure")
+            else:
+                inc_store("delete", "failure")
+            raise
 
     @traced
     async def decay(self, fact_id: uuid.UUID, factor: float) -> FactAssertion:

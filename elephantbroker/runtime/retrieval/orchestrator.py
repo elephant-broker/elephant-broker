@@ -189,6 +189,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                 payload={
                     "action": "retrieve_candidates", "query": query[:100],
                     "sources": source_names, "results": len(capped),
+                    "auto_recall": auto_recall,
                 },
             )
         )
