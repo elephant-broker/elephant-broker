@@ -52,6 +52,12 @@
 #   --no-restart     Do not restart systemd services after install (useful for
 #                    multi-step upgrades, or when running on a host with no
 #                    systemd units installed).
+#   --skip-plugins   Skip the TypeScript plugin rebuild (Step 3). Intended as
+#                    an operator escape hatch for dedicated DB-VM runs where
+#                    the plugin rebuild is known-irrelevant, or for recovery
+#                    scenarios where npm is broken on the target host and the
+#                    plugin rebuild would stall the update. Plugins retain
+#                    whatever dist/ they had before the run.
 #   --prefix PATH    Override the install prefix (default: /opt/elephantbroker)
 #   --help           Show this message
 # =============================================================================
@@ -65,19 +71,21 @@ SERVICE_GROUP="elephantbroker"
 CONFIG_DIR="/etc/elephantbroker"
 UPGRADE_LOCK=0
 RESTART=1
+SKIP_PLUGINS=0
 
 # --- Parse flags ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --upgrade) UPGRADE_LOCK=1; shift ;;
         --no-restart) RESTART=0; shift ;;
+        --skip-plugins) SKIP_PLUGINS=1; shift ;;
         --prefix) PREFIX="$2"; shift 2 ;;
         --help|-h)
             cat <<'HELP'
 ElephantBroker DB-VM updater
 
 Usage:
-  sudo ./update.sh [--upgrade] [--no-restart] [--prefix PATH]
+  sudo ./update.sh [--upgrade] [--no-restart] [--skip-plugins] [--prefix PATH]
 
 Flags:
   --upgrade        Regenerate uv.lock before syncing. Use when a new dependency
@@ -85,6 +93,8 @@ Flags:
                    --upgrade, the script installs EXACTLY what uv.lock specifies
                    (frozen mode) — the safe default for in-place updates.
   --no-restart     Do not restart systemd services after install.
+  --skip-plugins   Skip the TypeScript plugin rebuild step. Escape hatch for
+                   dedicated DB-VM runs or npm-broken recovery scenarios.
   --prefix PATH    Override install prefix (default: /opt/elephantbroker)
   --help, -h       Show this message
 
@@ -150,7 +160,7 @@ log "Install prefix: $PREFIX"
 log "Current branch: $CURRENT_BRANCH"
 
 # =============================================================================
-log "Step 1/7: git pull"
+log "Step 1/8: git pull"
 # =============================================================================
 BEFORE_SHA="$(git rev-parse HEAD)"
 git pull --ff-only origin "$CURRENT_BRANCH"
@@ -239,9 +249,32 @@ log "Step 3/8: rebuild TypeScript plugins"
 # land here; dedicated DB-VM deployments build plugins on the gateway
 # host via its own update path.
 PLUGINS_DIR="$PREFIX/openclaw-plugins"
-if ! command -v npm &>/dev/null; then
-    warn "  npm not on PATH — skipping plugin rebuild"
-    warn "  (expected on dedicated DB-VM deployments; plugins built on gateway host)"
+PLUGIN_FAILURES=()  # TODO-5-108: track failures so the summary at end of Step 3
+                    # is loud and enumerated, not silent-continue.
+if [[ "$SKIP_PLUGINS" -eq 1 ]]; then
+    # TODO-5-311: operator escape hatch. Used when the target host genuinely
+    # has no working npm, or when the operator explicitly wants to keep the
+    # existing dist/ (e.g. recovering from a botched upstream release).
+    warn "  --skip-plugins flag set — skipping plugin rebuild entirely"
+    warn "  plugins retain whatever dist/ they had before this run"
+elif ! command -v npm &>/dev/null; then
+    # TODO-5-007: npm-missing is a plausible state (dedicated DB-VM builds
+    # plugins on a separate gateway host) — do not fail-fast. But do make
+    # the warning loud enough that a co-located deployment operator cannot
+    # miss it, since in that topology a stale dist/ is a real bug.
+    warn "================================================================"
+    warn "  npm NOT FOUND on PATH — plugin rebuild SKIPPED"
+    warn "================================================================"
+    warn "  dist/ in $PLUGINS_DIR/elephantbroker-* MAY BE STALE."
+    warn ""
+    warn "  This is expected on dedicated DB-VM deployments (plugins are"
+    warn "  built on the OpenClaw gateway host via its own update path)."
+    warn ""
+    warn "  On a CO-LOCATED deployment (EB runtime + OpenClaw gateway on"
+    warn "  one host), this means TS source changes in this pull have NOT"
+    warn "  been bundled. Install Node.js and re-run update.sh, or pass"
+    warn "  --skip-plugins to acknowledge the skip is intentional."
+    warn "================================================================"
 elif [[ ! -d "$PLUGINS_DIR" ]]; then
     warn "  $PLUGINS_DIR missing — skipping plugin rebuild"
 else
@@ -250,21 +283,53 @@ else
         [[ -f "$plugin/package.json" ]] || continue
         plugin_name=$(basename "$plugin")
         log "  building $plugin_name"
-        # Run as non-root so node_modules ownership matches source tree.
-        # `sudo -u "$SERVICE_USER"` fails if the user can't read the dir;
-        # fall back to a plain invocation if so. We never need root here —
-        # npm just writes to node_modules/ and dist/, both owned by the
-        # tree's existing owner post-git-pull.
-        if ! (cd "$plugin" && npm ci --silent 2>&1 | tail -5); then
-            warn "    npm ci failed in $plugin_name — skipping build"
+        # TODO-5-208: npm runs as root here. The entire script enforces
+        # `[[ $EUID -eq 0 ]]` at pre-flight, so there is no non-root
+        # invocation path — node_modules/ and dist/ end up root-owned,
+        # consistent with the rest of the git tree (install.sh clones as
+        # root too). Plugins are read-only at runtime, so root ownership
+        # is fine. Previous comment here claimed "Run as non-root" — that
+        # was aspirational, never matched the code, and is now corrected.
+        #
+        # TODO-5-108: previous version used `... --silent 2>&1 | tail -5`
+        # which suppressed npm's own progress AND truncated its error
+        # output to the last 5 lines on failure — dropping the real
+        # error message mid-stream. New shape: capture full output to a
+        # per-plugin tmp file, echo concise tail on success, dump FULL
+        # contents on failure so operators can diagnose without having
+        # to re-run manually.
+        BUILD_LOG=$(mktemp -t "eb-plugin-${plugin_name}.XXXXXX")
+        if ! (cd "$plugin" && npm ci) >"$BUILD_LOG" 2>&1; then
+            warn "    npm ci FAILED in $plugin_name — dumping full output:"
+            while IFS= read -r line; do warn "      $line"; done < "$BUILD_LOG"
+            PLUGIN_FAILURES+=("$plugin_name (npm ci)")
+            rm -f "$BUILD_LOG"
             continue
         fi
-        if ! (cd "$plugin" && npm run build --silent 2>&1 | tail -5); then
-            warn "    npm run build failed in $plugin_name — dist/ may be stale"
+        if ! (cd "$plugin" && npm run build) >"$BUILD_LOG" 2>&1; then
+            warn "    npm run build FAILED in $plugin_name — dist/ is stale. Full output:"
+            while IFS= read -r line; do warn "      $line"; done < "$BUILD_LOG"
+            PLUGIN_FAILURES+=("$plugin_name (npm run build)")
+            rm -f "$BUILD_LOG"
             continue
         fi
+        rm -f "$BUILD_LOG"
         log "    ✓ $plugin_name/dist/index.js rebuilt"
     done
+    # TODO-5-108: summary after the loop. If any plugin failed the summary
+    # is unmissable (multi-line banner), and the failing plugin names are
+    # enumerated so the operator knows exactly which dist/ is stale.
+    if [[ ${#PLUGIN_FAILURES[@]} -gt 0 ]]; then
+        warn "================================================================"
+        warn "  PLUGIN REBUILD FAILURES (${#PLUGIN_FAILURES[@]}):"
+        for failure in "${PLUGIN_FAILURES[@]}"; do
+            warn "    - $failure"
+        done
+        warn "  Affected dist/ bundles are STALE. Fix the underlying error"
+        warn "  (npm output dumped above) and re-run update.sh, or pass"
+        warn "  --skip-plugins if the staleness is acceptable for this run."
+        warn "================================================================"
+    fi
 fi
 
 # Cognee writable directories: re-create in case a fresh sync wiped them.
