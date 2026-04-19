@@ -621,8 +621,12 @@ class TestMemoryStoreFacadePhase4:
 
             async def eval(self, script, numkeys, *keys_and_args):
                 # Minimal Lua eval emulation for the scrub script (5-101).
-                # Redis runs Lua atomically; the Python GIL gives this mock
-                # the same reentrancy guarantee for the body.
+                # Redis runs Lua atomically server-side. This Python mock is
+                # trivially "atomic" against concurrent coroutines because the
+                # body contains zero `await` points — asyncio cannot interleave
+                # another coroutine's eval() on the same key. (The Python GIL
+                # is about thread scheduling; asyncio atomicity here comes
+                # from the absence of suspension points, not the GIL.)
                 key = keys_and_args[0]
                 target = keys_and_args[1]
                 ttl = int(keys_and_args[2])

@@ -1,8 +1,10 @@
 import type { SearchResult } from "./types.js";
 
-// Re-exported from the shared cross-plugin helper so the memory plugin and the
-// context plugin cannot drift: both import from `openclaw-plugins/shared`.
-// See that module for the extraction contract and the 5-102 RC-A hardening.
+// `stripOpenClawEnvelope` is re-exported from the shared cross-plugin helper so
+// the memory plugin and the context plugin cannot drift: both import from
+// `openclaw-plugins/shared`. See that module for the extraction contract and
+// the 5-102 RC-A hardening. (The comment scopes the re-export only —
+// `formatMemoryContext` below is memory-plugin-local, not shared.)
 export { stripOpenClawEnvelope } from "../../shared/envelope.js";
 
 /**

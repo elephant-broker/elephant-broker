@@ -433,11 +433,15 @@ class _FakeRedis:
     async def eval(self, script, numkeys, *keys_and_args):
         """Minimal Lua eval emulation for _SCRUB_LUA.
 
-        Redis Lua executes atomically server-side. The Python GIL gives this
-        mock the same property for simple reentrancy — the whole body runs
-        without yielding control to another coroutine awaiting eval() on the
-        same key, which is what 5-101's "no lost-update" guarantee hinges on.
-        The script is identified by signature rather than parsed.
+        Redis Lua executes atomically server-side. This Python mock is
+        trivially "atomic" against concurrent coroutines because the body
+        contains zero `await` points — asyncio cannot interleave another
+        coroutine's eval() on the same key between the GET-like read and the
+        SET-like write, which is what 5-101's "no lost-update" guarantee
+        hinges on at the mock tier. (The Python GIL is about thread
+        scheduling; asyncio atomicity here comes from the absence of
+        suspension points, not the GIL.) The script is identified by
+        signature rather than parsed.
         """
         assert "tostring(e.id) == ARGV[1]" in script, "only _SCRUB_LUA is emulated"
         key = keys_and_args[0]

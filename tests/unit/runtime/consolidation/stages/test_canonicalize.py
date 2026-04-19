@@ -206,19 +206,22 @@ class TestCanonicalize:
 
     # --- PR #5 TODO 5-201: canonicalize TD-50 cognee_data_id capture ---
     # Three tests pinning the C8 fix:
-    #   1. Success path — cognee.add() return wired onto new_fact.cognee_data_id
-    #      BEFORE the graph MERGE (so the canonical node is storable with a
-    #      cascade-reachable pointer, not the pre-fix silent None).
+    #   1. Success path — cognee.add() return is captured and threaded onto
+    #      the canonical FactDataPoint via `from_schema(..., cognee_data_id=…)`
+    #      BEFORE add_data_points() runs the MERGE (so the canonical node is
+    #      storable with a cascade-reachable pointer, not the pre-fix silent
+    #      None). Post-C21 (`95457e4`) the field lives only on `FactDataPoint`
+    #      (storage layer); `FactAssertion` no longer carries it.
     #   2. Capture failure — when cognee.add() returns a malformed shape the
     #      facade cannot extract a data_id from, the DEGRADED_OPERATION trace
     #      and the eb_cognee_data_id_capture_failures_total metric (operation
-    #      label "canonicalize") both fire. The fact is still persisted with
-    #      cognee_data_id=None (graceful degradation — same contract as
-    #      facade.store()/update()).
-    #   3. Superseded cascade — each pre-existing fact that carried its own
-    #      cognee_data_id has that id enqueued for the Cognee-side delete so
-    #      the old documents don't silently accumulate as orphans after the
-    #      canonical merge supersedes them.
+    #      label "canonicalize") both fire. The canonical FactDataPoint is
+    #      still persisted with cognee_data_id=None (graceful degradation —
+    #      same contract as facade.store()/update()).
+    #   3. Superseded cascade — each pre-existing fact whose FactDataPoint
+    #      carried its own cognee_data_id has that id enqueued for the
+    #      Cognee-side delete so the old documents don't silently accumulate
+    #      as orphans after the canonical merge supersedes them.
 
     async def test_canonicalize_captures_cognee_data_id_on_new_fact(self, monkeypatch):
         """Success path: cognee.add() returns a valid shape → new_fact.cognee_data_id is set

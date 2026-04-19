@@ -29,6 +29,21 @@ class TestMemoryStoreFacadeIntegration:
         # auto_recall=True. Pre-TD-61 the post-retrieval SESSION_KEY
         # isolation filter silently dropped all cross-session vector hits
         # regardless of auto_recall, breaking before_agent_start recall.
+        #
+        # TODO 5-411 DOC NOTE — integration coverage gap (acknowledged, no
+        # new test added): this C2 companion test exercises store → retrieve
+        # but does NOT cover the clean cognify-then-delete "ok" path end-to-
+        # end against real Cognee state. The TD-Cognee-Qdrant-404 Cfx
+        # (`94f259c`) added unit-tier `TestCascadeCogneeDataGuards` coverage
+        # for the UnexpectedResponse → ok_idempotent recovery path, but the
+        # happy-path delete (Qdrant collection present → status "ok") is
+        # still only validated by the unit suite with a mocked Cognee SDK.
+        # Closing the gap would require an integration fixture that (a)
+        # stores a fact, (b) runs `cognee.cognify()` to materialize the
+        # FactDataPoint_text collection, (c) deletes, (d) asserts the
+        # cascade_status dict contains "ok" for all three steps. Left as
+        # explicit known-gap rather than new test to avoid expanding the
+        # integration fixture surface during the R2 doc cluster.
         # Exercises retrieve_candidates directly — memory_facade.search uses
         # a different code path that does not apply the isolation filter.
         #
