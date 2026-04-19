@@ -1412,6 +1412,66 @@ class TestMemoryStoreFacadePhase4:
             await facade.delete(fact.id, caller_gateway_id="tenant-local")
         metrics.inc_store.assert_called_once_with("delete", "failure")
 
+    # --- PR #5 C19: eb_memory_store_total for update() ---
+    # update() was the third entry point on the store-total counter; pre-fix
+    # it emitted neither success nor failure. The three tests below pin the
+    # success path (metadata-only update, no cognee.add), the not-found
+    # failure path (graph.get_entity returns None), and the cross-tenant
+    # failure path (PermissionError). All three mirror the delete() matrix.
+
+    async def test_update_success_increments_success_status(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Metadata-only update (no text change) — status=success emitted once."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(fact))
+        await facade.update(fact.id, {"confidence": 0.77})
+        metrics.inc_store.assert_called_once_with("update", "success")
+
+    async def test_update_fact_not_found_emits_failure_status_and_reraises(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """KeyError on missing fact → inc_store("update","failure") + KeyError
+        propagates. The route layer translates KeyError → 404."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        graph.get_entity = AsyncMock(return_value=None)
+        with pytest.raises(KeyError):
+            await facade.update(uuid.uuid4(), {"confidence": 0.5})
+        metrics.inc_store.assert_called_once_with("update", "failure")
+
+    async def test_update_permission_error_emits_failure_status_and_reraises(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Cross-tenant update → PermissionError + inc_store("update","failure").
+        AUTHORITY_CHECK_FAILED still emits (pre-existing behavior, C7); the
+        new failure-metric emission is additive."""
+        from unittest.mock import MagicMock
+        facade, graph, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value={
+            **self._fact_props(fact), "gateway_id": "tenant-other",
+        })
+        with pytest.raises(PermissionError):
+            await facade.update(
+                fact.id, {"text": "cross-tenant"}, caller_gateway_id="tenant-local",
+            )
+        metrics.inc_store.assert_called_once_with("update", "failure")
+
     # --- PR #5 TODO 5-504: RETRIEVAL_PERFORMED payload auto_recall field ---
     # PROGRAM.md §5.3 requires auto_recall in the trace payload so auditors
     # can distinguish explicit-search calls from before_prompt_build

@@ -39,6 +39,14 @@ class RedisKeyBuilder:
     def ws_snapshot(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:ws_snapshot:{session_key}:{session_id}"
 
+    def ws_snapshot_scan_pattern(self, session_id: str) -> str:
+        """Glob pattern for scanning ws_snapshot keys across all session_keys.
+
+        Used by WorkingSetManager.get_working_set() when resolving a snapshot
+        from a session_id without knowing the routing session_key.
+        """
+        return f"{self._prefix}:ws_snapshot:*:{session_id}"
+
     def compact_state(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:compact_state:{session_key}:{session_id}"
 

@@ -364,7 +364,11 @@ class TestGoalEmbeddings:
 class TestSessionGoalLoading:
     @pytest.mark.asyncio
     async def test_session_goals_loaded_from_redis_primary(self):
-        """Session goals are loaded from Redis via redis.get with the correct key pattern."""
+        """Session goals are loaded from Redis via redis.get with the correct
+        key pattern. Since PR #5 C19 the key routes unconditionally through
+        RedisKeyBuilder, so the gateway prefix is present even without an
+        explicit builder — the substring check stays broad enough to cover
+        both ``eb:{gw}:session_goals:`` and the empty-gateway form."""
         redis = AsyncMock()
         redis.get = AsyncMock(return_value=None)
         redis.setex = AsyncMock()
@@ -378,7 +382,7 @@ class TestSessionGoalLoading:
         )
         # redis.get should have been called with a session_goals key pattern
         get_calls = [str(call.args[0]) for call in redis.get.call_args_list]
-        assert any("eb:session_goals:" in c for c in get_calls)
+        assert any(":session_goals:" in c for c in get_calls)
 
 
 class TestProfileRegistryFailure:

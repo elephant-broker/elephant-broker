@@ -10,6 +10,7 @@ from elephantbroker.runtime.interfaces.retrieval import IRetrievalOrchestrator
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.interfaces.working_set import IWorkingSetManager
 from elephantbroker.runtime.observability import traced
+from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.runtime.working_set.candidates import CandidateGenerator
 from elephantbroker.runtime.working_set.scoring import ScoringEngine
 from elephantbroker.runtime.working_set.selector import BudgetSelector
@@ -61,7 +62,7 @@ class WorkingSetManager(IWorkingSetManager):
         self._config = config or ElephantBrokerConfig()
         self._snapshots: dict[uuid.UUID, WorkingSetSnapshot] = {}
         self._gateway_id = gateway_id
-        self._keys = redis_keys
+        self._keys = redis_keys or RedisKeyBuilder(gateway_id)
         self._metrics = metrics
         self._scoring_ledger_store = scoring_ledger_store
         self._session_goals = session_goal_store
@@ -198,7 +199,7 @@ class WorkingSetManager(IWorkingSetManager):
         self._snapshots[session_id] = snapshot
         if self._redis:
             try:
-                cache_key = self._keys.ws_snapshot(session_key, str(session_id)) if self._keys else f"eb:ws_snapshot:{session_key}:{session_id}"
+                cache_key = self._keys.ws_snapshot(session_key, str(session_id))
                 ttl = self._config.scoring.snapshot_ttl_seconds
                 await self._redis.setex(
                     cache_key, ttl, snapshot.model_dump_json(),
@@ -266,7 +267,7 @@ class WorkingSetManager(IWorkingSetManager):
         if self._redis:
             try:
                 # Scan for matching key
-                pattern = f"{self._keys.prefix}:ws_snapshot:*:{session_id}" if self._keys else f"eb:ws_snapshot:*:{session_id}"
+                pattern = self._keys.ws_snapshot_scan_pattern(str(session_id))
                 keys = []
                 async for key in self._redis.scan_iter(match=pattern, count=10):
                     keys.append(key)

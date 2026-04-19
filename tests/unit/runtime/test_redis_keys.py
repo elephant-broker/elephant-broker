@@ -28,6 +28,18 @@ def test_ws_snapshot_key_includes_gateway():
     assert result == "eb:gw-prod:ws_snapshot:agent:main:main:sid1"
 
 
+def test_ws_snapshot_scan_pattern_includes_gateway_and_glob():
+    keys = RedisKeyBuilder("gw-prod")
+    result = keys.ws_snapshot_scan_pattern("sid1")
+    assert result == "eb:gw-prod:ws_snapshot:*:sid1"
+
+
+def test_ws_snapshot_scan_pattern_different_gateways_different_patterns():
+    keys_a = RedisKeyBuilder("gw-a")
+    keys_b = RedisKeyBuilder("gw-b")
+    assert keys_a.ws_snapshot_scan_pattern("sid") != keys_b.ws_snapshot_scan_pattern("sid")
+
+
 def test_compact_state_key_includes_gateway():
     keys = RedisKeyBuilder("gw-prod")
     result = keys.compact_state("sk", "sid")

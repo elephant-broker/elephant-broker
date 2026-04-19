@@ -411,97 +411,113 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     async def update(
         self, fact_id: uuid.UUID, updates: dict, *, caller_gateway_id: str = "",
     ) -> FactAssertion:
-        entity = await self._graph.get_entity(str(fact_id))
-        if entity is None:
-            raise KeyError(f"Fact not found: {fact_id}")
+        try:
+            entity = await self._graph.get_entity(str(fact_id))
+            if entity is None:
+                raise KeyError(f"Fact not found: {fact_id}")
 
-        # Gateway-ownership pre-check — mirrors the delete() pattern.
-        # Without this, PATCH /memory/{fact_id} was a cross-tenant mutation
-        # vector: any caller with a valid session could modify facts owned
-        # by another gateway. We compare the stored gateway_id against the
-        # caller-supplied value (from the X-EB-Gateway-ID header via
-        # request.state), falling back to the module's configured gateway
-        # for in-process callers. Empty stored gateway_id passes through —
-        # pre-Gateway-Identity facts exist in the wild and must remain
-        # mutable by their owning runtime.
-        effective_gw = caller_gateway_id or self._gateway_id
-        entity_gw = entity.get("gateway_id", "")
-        if entity_gw and entity_gw != effective_gw:
-            await self._trace.append_event(TraceEvent(
-                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
-                payload={
-                    "action": "update",
-                    "fact_id": str(fact_id),
-                    "owner_gateway": entity_gw,
-                    "caller_gateway": effective_gw,
-                },
-            ))
-            raise PermissionError(
-                f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
-            )
-
-        props = clean_graph_props(entity)
-        dp = FactDataPoint(**props)
-        fact = dp.to_schema()
-        old_cognee_data_id = fact.cognee_data_id
-
-        text_changed = "text" in updates
-        for key, value in updates.items():
-            if key in ("id", "created_at", "source_actor_id", "gateway_id"):
-                continue  # Immutable
-            if hasattr(fact, key):
-                setattr(fact, key, value)
-        fact.updated_at = datetime.now(UTC)
-
-        if text_changed:
-            fact.token_size = count_tokens(fact.text)
-            fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
-            await self._embeddings.embed_text(fact.text)
-            # Re-ingest the new text into Cognee and refresh the fact's
-            # data_id BEFORE persisting. Without this, fact.cognee_data_id
-            # keeps pointing at the pre-update document and the cognee-side
-            # artifacts for the NEW text become permanent orphans that
-            # delete() cannot reach — the TD-50 regression in update().
-            cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
-            # TODO-5-003 / TODO-5-211: same UUID coercion shape as store().
-            # See the store-path comment for the full rationale.
-            try:
-                raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
-                fact.cognee_data_id = (
-                    raw_data_id if isinstance(raw_data_id, uuid.UUID)
-                    else uuid.UUID(str(raw_data_id))
+            # Gateway-ownership pre-check — mirrors the delete() pattern.
+            # Without this, PATCH /memory/{fact_id} was a cross-tenant mutation
+            # vector: any caller with a valid session could modify facts owned
+            # by another gateway. We compare the stored gateway_id against the
+            # caller-supplied value (from the X-EB-Gateway-ID header via
+            # request.state), falling back to the module's configured gateway
+            # for in-process callers. Empty stored gateway_id passes through —
+            # pre-Gateway-Identity facts exist in the wild and must remain
+            # mutable by their owning runtime.
+            effective_gw = caller_gateway_id or self._gateway_id
+            entity_gw = entity.get("gateway_id", "")
+            if entity_gw and entity_gw != effective_gw:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={
+                        "action": "update",
+                        "fact_id": str(fact_id),
+                        "owner_gateway": entity_gw,
+                        "caller_gateway": effective_gw,
+                    },
+                ))
+                raise PermissionError(
+                    f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
                 )
-            except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
-                await self._emit_capture_failure(
-                    operation="update", fact_id=fact.id, exc=exc,
-                    session_key=fact.session_key, session_id=fact.session_id,
+
+            props = clean_graph_props(entity)
+            dp = FactDataPoint(**props)
+            fact = dp.to_schema()
+            old_cognee_data_id = fact.cognee_data_id
+
+            text_changed = "text" in updates
+            for key, value in updates.items():
+                if key in ("id", "created_at", "source_actor_id", "gateway_id"):
+                    continue  # Immutable
+                if hasattr(fact, key):
+                    setattr(fact, key, value)
+            fact.updated_at = datetime.now(UTC)
+
+            if text_changed:
+                fact.token_size = count_tokens(fact.text)
+                fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
+                await self._embeddings.embed_text(fact.text)
+                # Re-ingest the new text into Cognee and refresh the fact's
+                # data_id BEFORE persisting. Without this, fact.cognee_data_id
+                # keeps pointing at the pre-update document and the cognee-side
+                # artifacts for the NEW text become permanent orphans that
+                # delete() cannot reach — the TD-50 regression in update().
+                cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+                # TODO-5-003 / TODO-5-211: same UUID coercion shape as store().
+                # See the store-path comment for the full rationale.
+                try:
+                    raw_data_id = cognee_add_result.data_ingestion_info[0]["data_id"]
+                    fact.cognee_data_id = (
+                        raw_data_id if isinstance(raw_data_id, uuid.UUID)
+                        else uuid.UUID(str(raw_data_id))
+                    )
+                except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+                    await self._emit_capture_failure(
+                        operation="update", fact_id=fact.id, exc=exc,
+                        session_key=fact.session_key, session_id=fact.session_id,
+                    )
+                    fact.cognee_data_id = None
+
+            updated_dp = FactDataPoint.from_schema(fact)
+            await add_data_points([updated_dp])
+
+            # Cascade the superseded cognee doc only after the graph node points
+            # at the new one — so an observer never sees the fact referencing a
+            # half-deleted doc. Metadata-only updates (no text change) never
+            # refresh cognee_data_id and must not cascade.
+            if (
+                text_changed
+                and old_cognee_data_id
+                and old_cognee_data_id != fact.cognee_data_id
+            ):
+                await self._cascade_cognee_data(
+                    old_cognee_data_id, fact_id=fact_id, context="update_text_change",
                 )
-                fact.cognee_data_id = None
 
-        updated_dp = FactDataPoint.from_schema(fact)
-        await add_data_points([updated_dp])
-
-        # Cascade the superseded cognee doc only after the graph node points
-        # at the new one — so an observer never sees the fact referencing a
-        # half-deleted doc. Metadata-only updates (no text change) never
-        # refresh cognee_data_id and must not cascade.
-        if (
-            text_changed
-            and old_cognee_data_id
-            and old_cognee_data_id != fact.cognee_data_id
-        ):
-            await self._cascade_cognee_data(
-                old_cognee_data_id, fact_id=fact_id, context="update_text_change",
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.INPUT_RECEIVED,
+                    payload={"action": "update_fact", "fact_id": str(fact_id), "fields": list(updates.keys())},
+                )
             )
-
-        await self._trace.append_event(
-            TraceEvent(
-                event_type=TraceEventType.INPUT_RECEIVED,
-                payload={"action": "update_fact", "fact_id": str(fact_id), "fields": list(updates.keys())},
-            )
-        )
-        logger.info("Updated fact %s: %s", fact_id, list(updates.keys()))
-        return fact
+            if self._metrics:
+                self._metrics.inc_store("update", "success")
+            else:
+                inc_store("update", "success")
+            logger.info("Updated fact %s: %s", fact_id, list(updates.keys()))
+            return fact
+        except Exception:
+            # KeyError (fact not found), PermissionError (cross-tenant), or any
+            # failure from cognee.add / add_data_points / cascade / trace.
+            # Emit eb_memory_store_total{operation="update", status="failure"}
+            # BEFORE re-raising so Prometheus sees the outcome; the route layer
+            # translates KeyError → 404, PermissionError → 403, other → 5xx.
+            if self._metrics:
+                self._metrics.inc_store("update", "failure")
+            else:
+                inc_store("update", "failure")
+            raise
 
     async def _emit_cascade_failure(
         self, *, step: str, fact_id: uuid.UUID, exc: Exception,
