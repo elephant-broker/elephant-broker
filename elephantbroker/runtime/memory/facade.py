@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib  # [DIAG-50-A]
 import logging
 import math
 import uuid
@@ -106,8 +107,24 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
         # Store via Cognee
         dp = FactDataPoint.from_schema(fact)
-        await add_data_points([dp])
-        await cognee.add(fact.text, dataset_name=self._dataset_name)
+        logger.info(
+            "[DIAG-50-A] pre_add_data_points fact_id=%s text_hash=%s text_len=%d dataset=%s",
+            fact.id,
+            hashlib.sha256(fact.text.encode("utf-8")).hexdigest()[:16],
+            len(fact.text),
+            self._dataset_name,
+        )
+        add_dp_result = await add_data_points([dp])
+        logger.info(
+            "[DIAG-50-A] post_add_data_points fact_id=%s result_type=%s result=%r",
+            fact.id, type(add_dp_result).__name__, add_dp_result,
+        )
+        logger.info("[DIAG-50-A] pre_cognee_add fact_id=%s dataset=%s", fact.id, self._dataset_name)
+        cognee_add_result = await cognee.add(fact.text, dataset_name=self._dataset_name)
+        logger.info(
+            "[DIAG-50-A] post_cognee_add fact_id=%s result_type=%s result=%r",
+            fact.id, type(cognee_add_result).__name__, cognee_add_result,
+        )
 
         # Graph edges (best-effort)
         edges_created = 0
@@ -368,6 +385,17 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")
 
+        logger.info(
+            "[DIAG-50-C] delete_entry fact_id=%s entity_keys=%s entity_text_preview=%r",
+            fact_id,
+            list(entity.keys()) if isinstance(entity, dict) else "<not-dict>",
+            (entity.get("text", "")[:80] if isinstance(entity, dict) else ""),
+        )
+        logger.info(
+            "[DIAG-50-C] would_call_cognee_delete dataset=%s data_id=<not_captured_yet> mode=soft",
+            self._dataset_name,
+        )
+
         # GDPR pre-check: verify gateway ownership
         # Use caller-supplied gateway_id (from request headers) if available,
         # otherwise fall back to module's configured gateway_id.
@@ -381,9 +409,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             raise PermissionError(f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}")
 
         # Remove from Neo4j (DETACH DELETE removes node + all edges)
+        logger.info("[DIAG-50-C] pre_neo4j_delete fact_id=%s", fact_id)
         await self._graph.delete_entity(str(fact_id))
 
         # Remove from Qdrant (best-effort)
+        logger.info("[DIAG-50-C] pre_qdrant_delete fact_id=%s collection=%s", fact_id, _FACTS_COLLECTION)
         try:
             await self._vector.delete_embedding(_FACTS_COLLECTION, str(fact_id))
         except Exception as exc:
@@ -411,6 +441,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         else:
             inc_gdpr_delete()
             inc_store("delete", "success")
+        logger.info("[DIAG-50-C] delete_complete fact_id=%s", fact_id)
         logger.info("GDPR delete: fact %s", fact_id)
 
     @traced

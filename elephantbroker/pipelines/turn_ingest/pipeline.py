@@ -370,6 +370,34 @@ class TurnIngestPipeline:
             for fact in assertions:
                 await cognee.add(fact.text, dataset_name=self._dataset_name)
             await cognee.cognify(datasets=[self._dataset_name])
+            # [DIAG-50-B] TD-50 Phase 1 probe — capture post-cognify relational Data rows
+            logger.info(
+                "[DIAG-50-B] post_cognify dataset=%s fact_count=%d fact_ids=%s",
+                self._dataset_name,
+                len(assertions),
+                [str(getattr(f, "id", "?")) for f in assertions[:5]],
+            )
+            try:
+                from datetime import datetime, timedelta
+
+                from cognee.infrastructure.databases.relational import get_relational_engine
+                from sqlalchemy import text as sql_text
+                engine = get_relational_engine()
+                async with engine.get_async_session() as session:
+                    result = await session.execute(
+                        sql_text(
+                            "SELECT id, name, created_at FROM data "
+                            "WHERE created_at > :since ORDER BY created_at DESC LIMIT 20"
+                        ),
+                        {"since": datetime.utcnow() - timedelta(seconds=120)},
+                    )
+                    rows = [dict(r._mapping) for r in result]
+                    logger.info(
+                        "[DIAG-50-B] recent_data_rows count=%d sample=%s",
+                        len(rows), rows[:5],
+                    )
+            except Exception as diag_exc:
+                logger.info("[DIAG-50-B] data_query_failed err=%r", diag_exc)
             if self._metrics:
                 self._metrics.inc_cognify("success")
             else:
