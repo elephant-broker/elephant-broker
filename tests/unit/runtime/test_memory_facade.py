@@ -2195,3 +2195,142 @@ class TestCascadeCogneeDataGuards:
         joined = "\n".join(r.getMessage() for r in caplog.records)
         assert "recovery" in joined.lower()
         assert "relational engine unavailable" in joined
+
+
+class TestCascadePointerPreservation:
+    """TODO-5-008: MERGE-by-ID upserts must preserve cognee_data_id.
+
+    Regression bundle for five call sites that previously invoked
+    FactDataPoint.from_schema(fact) without the cognee_data_id kwarg.
+    Post-C21, FactAssertion no longer carries the storage-backend id, so
+    the default None wiped the graph property on MERGE — re-orphaning
+    TD-50 cascades for any searched-then-mutated fact.
+
+    Each test drives one call site, lets it MERGE, and asserts the DP
+    actually passed to add_data_points carries the expected
+    cognee_data_id (not None).
+    """
+
+    def _make(self, gateway_id: str = "gw-test"):
+        graph = AsyncMock()
+        vector = AsyncMock()
+        embeddings = AsyncMock()
+        embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+        ledger = TraceLedger(gateway_id=gateway_id)
+        facade = MemoryStoreFacade(
+            graph, vector, embeddings, ledger,
+            dataset_name="test_ds", gateway_id=gateway_id,
+        )
+        return facade, graph
+
+    def _fact_props_with_data_id(self, fact, cognee_data_id: str, gateway_id: str = "gw-test"):
+        return {
+            "eb_id": str(fact.id), "text": fact.text, "category": "general",
+            "scope": "session", "confidence": 1.0, "memory_class": "episodic",
+            "eb_created_at": 0, "eb_updated_at": 0, "use_count": 0,
+            "successful_use_count": 0, "provenance_refs": [], "target_actor_ids": [],
+            "goal_ids": [], "gateway_id": gateway_id,
+            "cognee_data_id": cognee_data_id,
+        }
+
+    # Site 1 — facade.py:_update_use_counts
+    async def test_update_use_counts_preserves_cognee_data_id_via_batch_fetch(
+        self, monkeypatch, mock_add_data_points,
+    ):
+        """_update_use_counts takes a FactAssertion list (no data_id in
+        scope) → must batch-fetch cognee_data_id from the graph BEFORE
+        MERGE so the on-graph property is not wiped."""
+        facade, graph = self._make()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.add_data_points",
+            mock_add_data_points,
+        )
+        fact = make_fact_assertion()
+        expected_data_id = str(uuid.uuid4())
+        graph.query_cypher = AsyncMock(return_value=[
+            {"eb_id": str(fact.id), "cognee_data_id": expected_data_id},
+        ])
+
+        await facade._update_use_counts([fact])
+
+        assert len(mock_add_data_points.calls) == 1
+        stored_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert stored_dp.cognee_data_id == expected_data_id, (
+            "MERGE dropped the cascade pointer — would re-orphan TD-50 "
+            "on any later delete of this fact."
+        )
+
+    # Site 2 — facade.py:promote_scope
+    async def test_promote_scope_preserves_cognee_data_id_through_merge(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """promote_scope holds a DP in scope after clean_graph_props →
+        FactDataPoint(**props). The dp.cognee_data_id must be forwarded
+        into the rebuilt DP or the MERGE wipes the graph property."""
+        facade, graph = self._make()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.add_data_points",
+            mock_add_data_points,
+        )
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        expected_data_id = str(uuid.uuid4())
+        graph.get_entity = AsyncMock(
+            return_value=self._fact_props_with_data_id(fact, expected_data_id),
+        )
+
+        await facade.promote_scope(fact.id, Scope.GLOBAL)
+
+        assert len(mock_add_data_points.calls) == 1
+        stored_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert stored_dp.cognee_data_id == expected_data_id
+
+    # Site 3 — facade.py:promote_class
+    async def test_promote_class_preserves_cognee_data_id_through_merge(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Same contract as promote_scope — memory_class mutation path
+        must not wipe the cascade pointer."""
+        facade, graph = self._make()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.add_data_points",
+            mock_add_data_points,
+        )
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        expected_data_id = str(uuid.uuid4())
+        graph.get_entity = AsyncMock(
+            return_value=self._fact_props_with_data_id(fact, expected_data_id),
+        )
+
+        await facade.promote_class(fact.id, MemoryClass.SEMANTIC)
+
+        assert len(mock_add_data_points.calls) == 1
+        stored_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert stored_dp.cognee_data_id == expected_data_id
+
+    # Site 4 — facade.py:decay
+    async def test_decay_preserves_cognee_data_id_through_merge(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Same contract as promote_scope — confidence-decay path must
+        not wipe the cascade pointer."""
+        facade, graph = self._make()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.add_data_points",
+            mock_add_data_points,
+        )
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion(confidence=0.8)
+        expected_data_id = str(uuid.uuid4())
+        graph.get_entity = AsyncMock(
+            return_value=self._fact_props_with_data_id(
+                fact, expected_data_id,
+            ) | {"confidence": 0.8},
+        )
+
+        await facade.decay(fact.id, 0.5)
+
+        assert len(mock_add_data_points.calls) == 1
+        stored_dp = mock_add_data_points.calls[0]["data_points"][0]
+        assert stored_dp.cognee_data_id == expected_data_id

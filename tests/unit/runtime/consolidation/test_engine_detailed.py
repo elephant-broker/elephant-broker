@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from elephantbroker.runtime.consolidation.engine import (
 from elephantbroker.runtime.trace.ledger import TraceLedger
 from elephantbroker.schemas.consolidation import ConsolidationContext, StageResult
 from elephantbroker.schemas.config import ElephantBrokerConfig
+from elephantbroker.schemas.fact import FactAssertion, FactCategory
 from elephantbroker.schemas.trace import TraceEventType
 
 
@@ -150,3 +152,47 @@ class TestEngineGetReport:
         engine = _make_engine(report_store=store)
         await engine.get_consolidation_report("report-1")
         store.get_report.assert_called_once_with("report-1")
+
+
+class TestApplyFactUpsertsPreservesCascadePointer:
+    """TODO-5-008 — Site 6 of cascade-pointer-wipe cluster.
+
+    _apply_fact_upserts takes FactAssertion objects (no storage-backend
+    id in scope) and MERGEs them through add_data_points. Without a
+    graph round-trip to recover cognee_data_id, the MERGE wipes the
+    graph property and re-orphans TD-50 cascades for any
+    consolidation-touched fact on a later delete.
+    """
+
+    async def test_preserves_cognee_data_id_via_graph_roundtrip(self, monkeypatch):
+        """Consolidation batch upsert must fetch existing cognee_data_ids
+        and forward them into from_schema() — otherwise MERGE overwrites
+        the node property with None."""
+        graph = AsyncMock()
+        fact = FactAssertion(text="consolidation touch", category=FactCategory.GENERAL)
+        expected_data_id = str(uuid.uuid4())
+        graph.query_cypher = AsyncMock(return_value=[
+            {"eb_id": str(fact.id), "cognee_data_id": expected_data_id},
+        ])
+
+        recorded = []
+
+        async def fake_add(data_points, context=None, custom_edges=None, embed_triplets=False):
+            recorded.extend(list(data_points))
+            return list(data_points)
+
+        monkeypatch.setattr("cognee.tasks.storage.add_data_points", fake_add)
+
+        engine = _make_engine(graph=graph, gateway_id="gw-cons")
+        await engine._apply_fact_upserts([fact], gateway_id="gw-cons")
+
+        assert len(recorded) == 1
+        assert recorded[0].cognee_data_id == expected_data_id, (
+            "Consolidation upsert dropped the cascade pointer — would "
+            "re-orphan TD-50 on later delete of this fact."
+        )
+        # And the Cypher was gateway-scoped (TODO-5-008 + FIX-GATEWAY-IDENTITY).
+        call_kwargs = graph.query_cypher.call_args
+        assert call_kwargs is not None
+        params = call_kwargs.args[1] if len(call_kwargs.args) > 1 else call_kwargs.kwargs.get("params", {})
+        assert params["gw"] == "gw-cons"

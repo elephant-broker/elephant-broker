@@ -303,15 +303,64 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             self._metrics.inc_retrieval(auto_recall=str(auto_recall).lower(), profile_name=profile_name)
         return fact_list
 
+    async def _fetch_cognee_data_ids(
+        self, fact_ids: list[uuid.UUID | str],
+    ) -> dict[str, str | None]:
+        """Batch-fetch cognee_data_id per fact from the graph, gateway-scoped.
+
+        TODO-5-008: FactDataPoint.from_schema() defaults cognee_data_id=None.
+        Any MERGE-by-ID call site that omits the kwarg wipes the existing
+        graph property, re-orphaning TD-50 cascades on a later delete. Call
+        sites that don't hold a DP with the value in scope (e.g. post-C21
+        fire-and-forget paths whose input is a FactAssertion list — the
+        schema layer no longer carries the storage-backend id) must
+        round-trip the graph before MERGE.
+
+        Returns a map of eb_id (str) → cognee_data_id (str or None).
+        Missing or read-failing ids simply do not appear in the returned
+        map; callers that pass an unknown id get None via dict.get().
+        """
+        if not fact_ids:
+            return {}
+        ids_as_str = [str(fid) for fid in fact_ids]
+        try:
+            records = await self._graph.query_cypher(
+                "MATCH (f:FactDataPoint) "
+                "WHERE f.eb_id IN $ids AND f.gateway_id = $gw "
+                "RETURN f.eb_id AS eb_id, f.cognee_data_id AS cognee_data_id",
+                {"ids": ids_as_str, "gw": self._gateway_id},
+            )
+            return {rec["eb_id"]: rec.get("cognee_data_id") for rec in records}
+        except Exception as exc:
+            logger.warning(
+                "Batch fetch of cognee_data_ids failed "
+                "(gateway=%s, count=%d): %s",
+                self._gateway_id, len(ids_as_str), exc,
+            )
+            return {}
+
     async def _update_use_counts(self, facts: list[FactAssertion]) -> None:
-        """Fire-and-forget: increment use_count and last_used_at."""
+        """Fire-and-forget: increment use_count and last_used_at.
+
+        TODO-5-008: batch-fetch cognee_data_ids BEFORE MERGE. FactAssertion
+        does not carry the storage-backend id (schema/storage hygiene per
+        C21), so passing fact directly to FactDataPoint.from_schema()
+        without the kwarg would default cognee_data_id=None and wipe the
+        graph property on MERGE — re-orphaning TD-50 cascades for any
+        searched-then-deleted fact.
+        """
         try:
             now = datetime.now(UTC)
+            data_id_map = await self._fetch_cognee_data_ids(
+                [f.id for f in facts]
+            )
             dps = []
             for fact in facts:
                 fact.use_count += 1
                 fact.last_used_at = now
-                dps.append(FactDataPoint.from_schema(fact))
+                dps.append(FactDataPoint.from_schema(
+                    fact, cognee_data_id=data_id_map.get(str(fact.id)),
+                ))
             await add_data_points(dps)
         except Exception as exc:
             logger.warning("Failed to update use counts: %s", exc)
@@ -378,7 +427,13 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         fact.updated_at = datetime.now(UTC)
         fact.gateway_id = fact.gateway_id or self._gateway_id
 
-        updated_dp = FactDataPoint.from_schema(fact)
+        # TODO-5-008: carry cognee_data_id through the to_schema/from_schema
+        # round-trip. to_schema() drops it (schema/storage separation, C21)
+        # so we forward the value from the in-scope `dp` — otherwise MERGE
+        # wipes the graph pointer and re-orphans TD-50 cascades.
+        updated_dp = FactDataPoint.from_schema(
+            fact, cognee_data_id=dp.cognee_data_id,
+        )
         await add_data_points([updated_dp])
         return fact
 
@@ -399,7 +454,10 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         fact.updated_at = datetime.now(UTC)
         fact.gateway_id = fact.gateway_id or self._gateway_id
 
-        updated_dp = FactDataPoint.from_schema(fact)
+        # TODO-5-008: see promote_scope for rationale.
+        updated_dp = FactDataPoint.from_schema(
+            fact, cognee_data_id=dp.cognee_data_id,
+        )
         await add_data_points([updated_dp])
         return fact
 
@@ -945,7 +1003,10 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         fact.updated_at = datetime.now(UTC)
         fact.gateway_id = fact.gateway_id or self._gateway_id
 
-        updated_dp = FactDataPoint.from_schema(fact)
+        # TODO-5-008: see promote_scope for rationale.
+        updated_dp = FactDataPoint.from_schema(
+            fact, cognee_data_id=dp.cognee_data_id,
+        )
         await add_data_points([updated_dp])
         return fact
 
