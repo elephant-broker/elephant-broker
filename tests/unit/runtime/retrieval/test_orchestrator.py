@@ -360,3 +360,80 @@ class TestTD61GuardSymmetry:
         ids = {str(c.fact.id) for c in candidates}
         assert in_id in ids
         assert out_id not in ids, "explicit-search must enforce actor isolation"
+
+
+class TestSourceFailureMetric:
+    """TODO-5-508: `eb_memory_search_stage_failures_total` wired to the
+    5-source orchestrator exception branch. Pre-fix only facade.search
+    Stage 1 was emitting this metric; the RetrievalOrchestrator's per-
+    source `return_exceptions=True` branch produced a RETRIEVAL_SOURCE_
+    RESULT trace but no counter increment — so dashboards could not
+    alert on a silently failing source."""
+
+    async def test_source_failure_increments_metric(self, monkeypatch):
+        """A single source raising inside the asyncio.gather must fire
+        `inc_search_stage_failure(source_name, exception_type, gateway_id=...)`
+        adjacent to the existing trace event."""
+        captured: list = []
+
+        def fake_inc(stage, exception_type, gateway_id=""):
+            captured.append((stage, exception_type, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.retrieval.orchestrator.inc_search_stage_failure",
+            fake_inc,
+        )
+
+        orch = _make_orchestrator()
+        # Structural-only policy so only one coroutine runs — keeps the
+        # test focused on the exception-branch contract.
+        policy = RetrievalPolicy(
+            structural_enabled=True,
+            keyword_enabled=False,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        async def boom(**kw):
+            raise RuntimeError("neo4j down")
+
+        with patch.object(orch, "get_structural_hits", new=boom):
+            candidates = await orch.retrieve_candidates("q", policy=policy)
+
+        assert candidates == []
+        assert captured == [("structural", "RuntimeError", "test-gw")]
+
+    async def test_source_failure_uses_caller_gateway_id_when_provided(self, monkeypatch):
+        """When retrieve_candidates is called with caller_gateway_id, that
+        value (not the orchestrator's configured gateway_id) must label
+        the metric — same gateway-scoping rule the adjacent trace event
+        already follows."""
+        captured: list = []
+
+        def fake_inc(stage, exception_type, gateway_id=""):
+            captured.append((stage, exception_type, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.retrieval.orchestrator.inc_search_stage_failure",
+            fake_inc,
+        )
+
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            structural_enabled=True,
+            keyword_enabled=False,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        async def boom(**kw):
+            raise ValueError("bad query")
+
+        with patch.object(orch, "get_structural_hits", new=boom):
+            await orch.retrieve_candidates(
+                "q", policy=policy, caller_gateway_id="caller-gw",
+            )
+
+        assert captured == [("structural", "ValueError", "caller-gw")]

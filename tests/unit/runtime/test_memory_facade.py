@@ -1162,6 +1162,90 @@ class TestMemoryStoreFacadePhase4:
         assert call_args.kwargs["fact_id"] == fact.id
         assert call_args.kwargs["context"] == "update_text_change"
 
+    async def test_update_cascade_failed_emits_degraded_operation_trace(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-5-110: when the update-path cascade helper returns
+        "failed" (cognee.datasets.delete_data raised for a reason other
+        than the recoverable Qdrant-404), facade.update() must mirror
+        delete()'s observability pattern — emit `_emit_cascade_failure`
+        with operation="update" + step="cognee_data" so the trio
+        (metric + DEGRADED_OPERATION trace) fires. Pre-fix the update
+        path discarded the status and the failure was silent."""
+        from types import SimpleNamespace
+        facade, graph, _, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+
+        old_data_id = uuid.uuid4()
+        new_data_id = uuid.uuid4()
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(old_data_id),
+        ))
+
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": new_data_id}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+
+        monkeypatch.setattr(
+            facade, "_cascade_cognee_data", AsyncMock(return_value="failed"),
+        )
+
+        await facade.update(fact.id, {"text": "rewritten text"})
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        cascade_events = [
+            e for e in events
+            if e.payload.get("failure") == "cascade_step"
+        ]
+        assert len(cascade_events) == 1
+        payload = cascade_events[0].payload
+        assert payload["operation"] == "update"
+        assert payload["step"] == "cognee_data"
+        assert payload["fact_id"] == str(fact.id)
+        assert payload["exception_type"] == "RuntimeError"
+
+    async def test_update_cascade_ok_does_not_emit_degraded_operation(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-5-110 negative: a clean cascade ("ok" / "ok_idempotent")
+        on the update path must NOT emit the cascade-failure trio —
+        otherwise dashboards would tag every clean text-change update
+        as a degraded operation."""
+        from types import SimpleNamespace
+        facade, graph, _, _, ledger = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+
+        old_data_id = uuid.uuid4()
+        new_data_id = uuid.uuid4()
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(old_data_id),
+        ))
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": new_data_id}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr(
+            facade, "_cascade_cognee_data", AsyncMock(return_value="ok"),
+        )
+
+        await facade.update(fact.id, {"text": "rewritten text"})
+
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        events = await ledger.query_trace(
+            TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
+        )
+        cascade_events = [
+            e for e in events
+            if e.payload.get("failure") == "cascade_step"
+        ]
+        assert cascade_events == []
+
     async def test_update_metadata_only_leaves_cognee_data_id_untouched(
         self, monkeypatch, mock_add_data_points, mock_cognee,
     ):

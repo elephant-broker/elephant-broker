@@ -158,6 +158,9 @@ class ConsolidationEngine(IConsolidationEngine):
                     self._graph, self._vector, self._llm, self._embeddings, consolidation_cfg,
                     dataset_name=self._dataset_name,
                     trace_ledger=self._trace, metrics=self._metrics,
+                    # TODO-5-509: thread engine's gateway_id so the stage's
+                    # bare-function metric paths carry the correct label.
+                    gateway_id=self._gateway_id,
                 )
         except Exception:
             pass

@@ -227,11 +227,13 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             # 5-205: downgrade Stage 1 failure to partial results (Stage 2
             # structural may still produce hits) but emit log + metric +
             # DEGRADED_OPERATION trace so the silent failure is visible.
+            # TODO-5-510: route through the GatewayLoggerAdapter so the log
+            # carries the gateway_id prefix — C18 migration missed this site.
             exc_type = type(exc).__name__
-            logger.warning(
+            self._log.warning(
                 "facade.search Stage 1 (semantic) failed — downgrading to "
-                "structural-only results (gateway=%s, query=%r, exc=%s: %s)",
-                self._gateway_id, query[:80], exc_type, exc,
+                "structural-only results (query=%r, exc=%s: %s)",
+                query[:80], exc_type, exc,
             )
             if self._metrics:
                 self._metrics.inc_search_stage_failure("semantic", exc_type)
@@ -564,14 +566,29 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             # at the new one — so an observer never sees the fact referencing a
             # half-deleted doc. Metadata-only updates (no text change) never
             # refresh the data_id and must not cascade.
+            # TODO-5-110: mirror delete()'s emit-on-failure pattern so a
+            # cascade "failed" status on the update path also produces the
+            # observability trio (warn log inside helper + metric +
+            # DEGRADED_OPERATION trace). Pre-fix, update-path cascade
+            # failures were silent — the superseded Cognee doc would leak
+            # without any dashboard signal.
             if (
                 text_changed
                 and old_cognee_data_id
                 and old_cognee_data_id != new_cognee_data_id
             ):
-                await self._cascade_cognee_data(
+                update_cascade_status = await self._cascade_cognee_data(
                     old_cognee_data_id, fact_id=fact_id, context="update_text_change",
                 )
+                if update_cascade_status == "failed":
+                    await self._emit_cascade_failure(
+                        step="cognee_data", fact_id=fact_id,
+                        exc=RuntimeError(
+                            f"cognee.datasets.delete_data failed for data_id={old_cognee_data_id}"
+                        ),
+                        session_key=fact.session_key, session_id=fact.session_id,
+                        operation="update",
+                    )
 
             await self._trace.append_event(
                 TraceEvent(
@@ -600,17 +617,23 @@ class MemoryStoreFacade(IMemoryStoreFacade):
     async def _emit_cascade_failure(
         self, *, step: str, fact_id: uuid.UUID, exc: Exception,
         session_key: str | None = None, session_id: uuid.UUID | None = None,
+        operation: str = "delete",
     ) -> None:
-        """Observability for a failed TD-50 delete cascade step.
+        """Observability for a failed TD-50 cascade step.
 
-        Fires when one of the three delete cascade layers (graph, vector,
-        cognee_data) raises. The EB-layer delete continues on each failure
-        so the eventual GDPR_DELETE trace is emitted even on partial
-        cascade failure — but we still need a per-step signal so dashboards
-        can distinguish "delete succeeded cleanly" from "delete acknowledged
-        but one layer is lagging". Emits a metric + DEGRADED_OPERATION trace
-        identifying which step failed + the fact id; existing WARNING logs
-        at the call site are preserved.
+        Fires when one of the cascade layers (graph, vector, cognee_data)
+        raises during delete — or when update()'s post-text-change cascade
+        of the superseded cognee doc fails (TODO-5-110). The EB-layer
+        operation continues on each failure so the eventual GDPR_DELETE /
+        updated-fact trace is emitted even on partial cascade failure —
+        but we still need a per-step signal so dashboards can distinguish
+        "clean" from "acknowledged but one layer is lagging". Emits a
+        metric + DEGRADED_OPERATION trace identifying which step failed +
+        the fact id; existing WARNING logs at the call site are preserved.
+
+        `operation` tags the parent op ("delete" | "update") in the trace
+        payload so a single metric + trace type covers both code paths
+        while keeping them distinguishable in audit.
         """
         if self._metrics:
             self._metrics.inc_fact_delete_cascade_failure(step)
@@ -623,7 +646,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                 session_id=session_id,
                 payload={
                     "component": "memory_facade",
-                    "operation": "delete",
+                    "operation": operation,
                     "failure": "cascade_step",
                     "step": step,
                     "fact_id": str(fact_id),

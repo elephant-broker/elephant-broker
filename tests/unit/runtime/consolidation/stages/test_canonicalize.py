@@ -31,7 +31,7 @@ def _mock_cognee_for_canonicalize(monkeypatch):
     return mock_adp
 
 
-def _make_stage(llm_text="merged fact", llm_fail=False, trace=None, metrics=None):
+def _make_stage(llm_text="merged fact", llm_fail=False, trace=None, metrics=None, gateway_id="gw"):
     from elephantbroker.runtime.consolidation.stages.canonicalize import CanonicalizationStage
 
     graph = AsyncMock()
@@ -47,6 +47,7 @@ def _make_stage(llm_text="merged fact", llm_fail=False, trace=None, metrics=None
         graph, vector, llm, embeddings, config,
         dataset_name="gw__elephantbroker",
         trace_ledger=trace, metrics=metrics,
+        gateway_id=gateway_id,
     )
     return stage, graph, vector, llm
 
@@ -553,3 +554,104 @@ class TestCanonicalize:
         called_with_row = delete_data_row_mock.await_args_list[0].args
         assert called_with_row[0] is fake_data_row
         assert called_with_row[1] == fake_ds_id
+
+    # --- PR #5 TODO 5-113 / 5-509: preload + gateway_id observability ---
+
+    async def test_preload_failure_emits_warning_metric_trace(self, monkeypatch, caplog):
+        """TODO-5-113: graph.get_entity raising during the preload loop
+        fires the observability trio (WARNING log + capture-failure metric
+        with operation='canonicalize_preload' + DEGRADED_OPERATION trace)
+        rather than the pre-fix silent logger.debug + None fallback. The
+        canonicalize run itself continues — the failing member is simply
+        excluded from the superseded-cognee-data cascade."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        fake_data_id = uuid.uuid4()
+        fake_result = _MagicMock()
+        fake_result.data_ingestion_info = [{"data_id": fake_data_id}]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=fake_result))
+
+        trace_calls: list = []
+
+        class FakeTrace:
+            async def append_event(self, event):
+                trace_calls.append(event)
+
+        class FakeMetrics:
+            def __init__(self):
+                self.capture_calls: list[str] = []
+
+            def inc_cognee_capture_failure(self, operation):
+                self.capture_calls.append(operation)
+
+        fake_metrics = FakeMetrics()
+        fake_trace = FakeTrace()
+
+        stage, graph, *_ = _make_stage(
+            llm_text="merged canonical text",
+            trace=fake_trace,
+            metrics=fake_metrics,
+        )
+
+        facts = [
+            make_fact_assertion(text="identical", session_key="s1"),
+            make_fact_assertion(text="identical", session_key="s2"),
+        ]
+
+        bad_member_id = str(facts[0].id)
+
+        async def _get_entity(node_id: str):
+            if node_id == bad_member_id:
+                raise RuntimeError("neo4j transient error")
+            return {"cognee_data_id": str(uuid.uuid4())}
+
+        graph.get_entity = AsyncMock(side_effect=_get_entity)
+
+        cluster = _make_cluster(facts)
+        ctx = _make_context()
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING, logger="elephantbroker.runtime.consolidation.stages.canonicalize"):
+            await stage.run([cluster], facts, "gw", ctx)
+
+        assert fake_metrics.capture_calls == ["canonicalize_preload"]
+
+        from elephantbroker.schemas.trace import TraceEventType
+        degraded = [e for e in trace_calls if e.event_type == TraceEventType.DEGRADED_OPERATION]
+        assert len(degraded) == 1
+        assert degraded[0].payload["operation"] == "canonicalize_preload"
+        assert degraded[0].payload["failure"] == "get_entity_exception"
+        assert degraded[0].payload["fact_id"] == bad_member_id
+        assert degraded[0].payload["exception_type"] == "RuntimeError"
+
+        assert any(
+            "Preload of cognee_data_id failed for member" in rec.message
+            for rec in caplog.records
+        )
+
+    async def test_emit_capture_failure_threads_gateway_id_on_bare_path(self, monkeypatch):
+        """TODO-5-509: when `self._metrics` is None (bare-function metric
+        path), `_emit_capture_failure` must pass `gateway_id=self._gateway_id`
+        to `inc_cognee_capture_failure` so the Prometheus label matches the
+        MetricsContext-wrapped path. Pre-fix the bare call elided the kwarg,
+        defaulting the label to the empty string."""
+        captured_calls: list = []
+
+        def fake_inc(operation, gateway_id=""):
+            captured_calls.append((operation, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.consolidation.stages.canonicalize.inc_cognee_capture_failure",
+            fake_inc,
+        )
+
+        stage, *_ = _make_stage(gateway_id="gw-5-509")
+        # Directly invoke the helper — its own contract is the unit under test.
+        await stage._emit_capture_failure(
+            fact_id=uuid.uuid4(), exc=RuntimeError("boom"),
+        )
+        await stage._emit_preload_failure(
+            fact_id=uuid.uuid4(), exc=RuntimeError("boom"),
+        )
+
+        assert ("canonicalize", "gw-5-509") in captured_calls
+        assert ("canonicalize_preload", "gw-5-509") in captured_calls

@@ -14,6 +14,7 @@ from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
 from elephantbroker.runtime.interfaces.retrieval import IRetrievalOrchestrator, RetrievalCandidate
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+from elephantbroker.runtime.metrics import inc_search_stage_failure
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 from elephantbroker.schemas.profile import IsolationLevel, IsolationScope, RetrievalPolicy
@@ -122,6 +123,17 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             _trace_gw = caller_gateway_id or self._gateway_id
             if isinstance(result, Exception):
                 logger.warning("Retrieval source %s failed: %s", source_name, result)
+                # TODO-5-508: wire eb_memory_search_stage_failures_total to
+                # per-source orchestrator failures. Pre-fix only facade.search
+                # Stage 1 was emitting this metric; the 5-source orchestrator
+                # (structural/keyword/vector/graph/artifact) was trace-only, so
+                # Prometheus never saw a source-level failure. Bare-function
+                # form because __init__ does not hold a MetricsContext — thread
+                # gateway_id explicitly from the same _trace_gw the adjacent
+                # trace event uses, keeping both signals in lockstep.
+                inc_search_stage_failure(
+                    source_name, type(result).__name__, gateway_id=_trace_gw,
+                )
                 if self._trace:
                     await self._trace.append_event(TraceEvent(
                         event_type=TraceEventType.RETRIEVAL_SOURCE_RESULT,

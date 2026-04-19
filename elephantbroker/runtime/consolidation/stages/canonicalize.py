@@ -61,6 +61,7 @@ class CanonicalizationStage:
         dataset_name: str,
         trace_ledger: ITraceLedger | None = None,
         metrics: MetricsContext | None = None,
+        gateway_id: str = "",
     ) -> None:
         self._graph = graph
         self._vector = vector
@@ -70,6 +71,11 @@ class CanonicalizationStage:
         self._dataset_name = dataset_name
         self._trace = trace_ledger
         self._metrics = metrics
+        # TODO-5-509: hold gateway_id so the bare-function metric paths
+        # (used when self._metrics is None — e.g. unit tests) can label
+        # the counter correctly. The wrapped MetricsContext path already
+        # carries gateway_id internally; the bare path did not.
+        self._gateway_id = gateway_id
 
     @traced
     async def run(
@@ -259,8 +265,17 @@ class CanonicalizationStage:
                     member_cognee_data_ids[member.id] = str(raw) if raw else None
                 else:
                     member_cognee_data_ids[member.id] = None
-            except Exception:
-                logger.debug("get_entity failed for member %s", member.id, exc_info=True)
+            except Exception as exc:
+                # TODO-5-113: a preload failure here silently strands the
+                # member's superseded cognee_data_id — the cascade loop at
+                # line 308 skips None entries, so the Cognee document
+                # becomes an orphan with no dashboard signal. Upgrade the
+                # silent logger.debug to the observability trio (WARNING +
+                # metric + DEGRADED_OPERATION trace) used by every other
+                # TD-50 silent-failure site. operation="canonicalize_preload"
+                # keeps this distinguishable from the canonicalize capture
+                # failure at line 338 so dashboards can split the two.
+                await self._emit_preload_failure(fact_id=member.id, exc=exc)
                 member_cognee_data_ids[member.id] = None
 
         # Collect the superseded facts' cognee_data_ids. Each old id points
@@ -338,7 +353,10 @@ class CanonicalizationStage:
         if self._metrics:
             self._metrics.inc_cognee_capture_failure("canonicalize")
         else:
-            inc_cognee_capture_failure("canonicalize")
+            # TODO-5-509: thread gateway_id through the bare-function
+            # path so the metric label matches the MetricsContext path.
+            # Before fix: label was the empty-string default.
+            inc_cognee_capture_failure("canonicalize", gateway_id=self._gateway_id)
         logger.warning(
             "Could not capture cognee_data_id for canonical fact %s "
             "(delete cascade will skip cognee cleanup): %s",
@@ -352,6 +370,48 @@ class CanonicalizationStage:
                         "component": "consolidation_canonicalize",
                         "operation": "canonicalize",
                         "failure": "cognee_data_id_capture",
+                        "fact_id": str(fact_id),
+                        "exception_type": type(exc).__name__,
+                        "exception": str(exc),
+                    },
+                )
+            )
+
+    async def _emit_preload_failure(
+        self, *, fact_id: uuid.UUID, exc: Exception,
+    ) -> None:
+        """TODO-5-113: observability trio for a failed graph preload.
+
+        Fires when `self._graph.get_entity` raises while the canonicalize
+        stage is preloading the superseded members' cognee_data_ids. The
+        preload's fallback value is None, which downstream elides the
+        cascade for that member — so without a signal the Cognee document
+        silently becomes an orphan. Emits the same trio as
+        `_emit_capture_failure` (WARNING log + metric + DEGRADED_OPERATION
+        trace) but with `operation="canonicalize_preload"` so dashboards
+        can split the preload-miss failure mode from the capture-miss
+        failure mode. `gateway_id` is threaded through the bare-function
+        metric path (TODO-5-509) so the label is always populated.
+        """
+        if self._metrics:
+            self._metrics.inc_cognee_capture_failure("canonicalize_preload")
+        else:
+            inc_cognee_capture_failure(
+                "canonicalize_preload", gateway_id=self._gateway_id,
+            )
+        logger.warning(
+            "Preload of cognee_data_id failed for member %s "
+            "(superseded-cascade will skip this member): %s",
+            fact_id, exc,
+        )
+        if self._trace is not None:
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.DEGRADED_OPERATION,
+                    payload={
+                        "component": "consolidation_canonicalize",
+                        "operation": "canonicalize_preload",
+                        "failure": "get_entity_exception",
                         "fact_id": str(fact_id),
                         "exception_type": type(exc).__name__,
                         "exception": str(exc),
