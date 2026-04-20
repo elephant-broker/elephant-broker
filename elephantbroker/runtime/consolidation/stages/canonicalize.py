@@ -504,6 +504,11 @@ class CanonicalizationStage:
             "— Cognee-side document may be orphaned",
             fact_id, cognee_data_id,
         )
+        # TODO-5-2202: trace-None guard intentionally kept here (vs facade
+        # `_emit_cascade_failure`, which calls `self._trace.append_event`
+        # unguarded) — the consolidation stage is instantiated in unit
+        # tests with `TraceLedger=None`; the facade always has one. Do
+        # not "fix" this asymmetry by dropping the guard.
         if self._trace is not None:
             await self._trace.append_event(
                 TraceEvent(
