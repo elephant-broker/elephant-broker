@@ -328,10 +328,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             )
             return {rec["eb_id"]: rec.get("cognee_data_id") for rec in records}
         except Exception as exc:
-            logger.warning(
-                "Batch fetch of cognee_data_ids failed "
-                "(gateway=%s, count=%d): %s",
-                self._gateway_id, len(ids_as_str), exc,
+            self._log.warning(
+                "Batch fetch of cognee_data_ids failed (count=%d): %s",
+                len(ids_as_str), exc,
             )
             return {}
 
@@ -534,7 +533,12 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             if text_changed:
                 fact.token_size = count_tokens(fact.text)
                 fact.embedding_ref = f"FactDataPoint_text:{fact.id}"
-                await self._embeddings.embed_text(fact.text)
+                # TODO-5-612 / TODO-5-701: no standalone embed_text() call on
+                # the update path — the subsequent cognee.add() re-embeds
+                # internally via Cognee's ingest pipeline, and the update
+                # path (unlike store()) has no dedup pre-check to consume
+                # an external embedding. A second embed_text() here was
+                # pure waste.
                 # Re-ingest the new text into Cognee and refresh the data_id
                 # BEFORE persisting. Without this, the graph node keeps
                 # pointing at the pre-update document and the cognee-side
@@ -636,9 +640,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         while keeping them distinguishable in audit.
         """
         if self._metrics:
-            self._metrics.inc_fact_delete_cascade_failure(step)
+            self._metrics.inc_fact_delete_cascade_failure(step, operation=operation)
         else:
-            inc_fact_delete_cascade_failure(step, gateway_id=self._gateway_id)
+            inc_fact_delete_cascade_failure(
+                step, operation=operation, gateway_id=self._gateway_id,
+            )
         await self._trace.append_event(
             TraceEvent(
                 event_type=TraceEventType.DEGRADED_OPERATION,

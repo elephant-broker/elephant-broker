@@ -520,14 +520,19 @@ class TestMemoryStoreFacadePhase4:
         result = await facade.update(fact.id, {"confidence": 0.5})
         assert result.confidence == 0.5
 
-    async def test_update_reembeds_when_text_changes(self, monkeypatch, mock_add_data_points, mock_cognee):
+    async def test_update_reingests_to_cognee_when_text_changes(self, monkeypatch, mock_add_data_points, mock_cognee):
+        # TODO-5-612 / TODO-5-701: update path no longer makes a standalone
+        # embed_text() call — cognee.add() re-embeds internally, and the
+        # update path has no dedup pre-check to consume an external
+        # embedding. Pin that: embed_text must NOT be called, but
+        # cognee.add must be called exactly once (the re-ingest path).
         facade, graph, vector, emb, _ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
         fact = make_fact_assertion()
         graph.get_entity = AsyncMock(return_value=self._fact_props(fact))
         await facade.update(fact.id, {"text": "new text"})
-        emb.embed_text.assert_called_once_with("new text")
+        emb.embed_text.assert_not_called()
         mock_cognee.add.assert_called_once()
 
     async def test_update_no_reembed_when_text_unchanged(self, monkeypatch, mock_add_data_points, mock_cognee):
@@ -937,8 +942,10 @@ class TestMemoryStoreFacadePhase4:
         vector.delete_embedding.assert_called_once_with("FactDataPoint_text", str(fact.id))
         cascade_spy.assert_called_once()
 
-        # Metric fired once with step=graph.
-        metrics.inc_fact_delete_cascade_failure.assert_called_once_with("graph")
+        # Metric fired once with step=graph, operation=delete.
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with(
+            "graph", operation="delete",
+        )
 
         from elephantbroker.schemas.trace import TraceEventType, TraceQuery
         degraded = await ledger.query_trace(
@@ -976,7 +983,9 @@ class TestMemoryStoreFacadePhase4:
 
         await facade.delete(fact.id)
 
-        metrics.inc_fact_delete_cascade_failure.assert_called_once_with("vector")
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with(
+            "vector", operation="delete",
+        )
         from elephantbroker.schemas.trace import TraceEventType, TraceQuery
         degraded = await ledger.query_trace(
             TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
@@ -1009,7 +1018,9 @@ class TestMemoryStoreFacadePhase4:
 
         await facade.delete(fact.id)
 
-        metrics.inc_fact_delete_cascade_failure.assert_called_once_with("cognee_data")
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with(
+            "cognee_data", operation="delete",
+        )
         from elephantbroker.schemas.trace import TraceEventType, TraceQuery
         degraded = await ledger.query_trace(
             TraceQuery(event_types=[TraceEventType.DEGRADED_OPERATION]),
@@ -1045,10 +1056,12 @@ class TestMemoryStoreFacadePhase4:
 
         await facade.delete(fact.id)
 
-        # Two metric increments, both step labels distinct.
+        # Two metric increments, both step labels distinct; both tagged delete.
         assert metrics.inc_fact_delete_cascade_failure.call_count == 2
-        called_steps = {c.args[0] for c in metrics.inc_fact_delete_cascade_failure.call_args_list}
+        calls = metrics.inc_fact_delete_cascade_failure.call_args_list
+        called_steps = {c.args[0] for c in calls}
         assert called_steps == {"graph", "vector"}
+        assert all(c.kwargs.get("operation") == "delete" for c in calls)
 
         from elephantbroker.schemas.trace import TraceEventType, TraceQuery
         degraded = await ledger.query_trace(
@@ -1216,6 +1229,41 @@ class TestMemoryStoreFacadePhase4:
         assert payload["step"] == "cognee_data"
         assert payload["fact_id"] == str(fact.id)
         assert payload["exception_type"] == "RuntimeError"
+
+    async def test_update_cascade_failure_metric_carries_operation_update_label(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-5-511: the shared cascade-failure counter must carry the
+        operation label so dashboards can split delete-path failures from
+        update-path failures. Pre-fix the metric had step only; a spike in
+        update-path cascade failures looked identical to a spike in the
+        delete-path cascade, masking the root cause."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+        facade, graph, _, _, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        metrics = MagicMock()
+        facade._metrics = metrics
+
+        old_data_id = uuid.uuid4()
+        new_data_id = uuid.uuid4()
+        fact = make_fact_assertion()
+        graph.get_entity = AsyncMock(return_value=self._fact_props(
+            fact, cognee_data_id=str(old_data_id),
+        ))
+        mock_cognee.add = AsyncMock(return_value=SimpleNamespace(
+            data_ingestion_info=[{"data_id": new_data_id}],
+        ))
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        monkeypatch.setattr(
+            facade, "_cascade_cognee_data", AsyncMock(return_value="failed"),
+        )
+
+        await facade.update(fact.id, {"text": "rewritten"})
+
+        metrics.inc_fact_delete_cascade_failure.assert_called_once_with(
+            "cognee_data", operation="update",
+        )
 
     async def test_update_cascade_ok_does_not_emit_degraded_operation(
         self, monkeypatch, mock_add_data_points, mock_cognee,

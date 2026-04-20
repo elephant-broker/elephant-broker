@@ -76,6 +76,13 @@ class UpdateFactRequest(BaseModel):
     token_size) via `PATCH /memory/{fact_id}`. Immutable fields (id,
     created_at, source_actor_id, gateway_id) are absent from the schema and
     also defended in depth by the facade.update() setattr block.
+
+    TODO-5-802 — `provenance_refs` is intentionally absent from the user-
+    editable surface: evidence references are stamped by the ingest/consolidation
+    pipeline (or explicit evidence-attachment endpoints), never by the PATCH
+    path. Allowing PATCH to rewrite provenance would let a caller detach a
+    claim from the receipts that justify it, defeating the evidence-required
+    invariant.
     """
 
     model_config = ConfigDict(extra="forbid")

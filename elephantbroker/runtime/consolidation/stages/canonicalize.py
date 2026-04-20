@@ -10,8 +10,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from elephantbroker.runtime.metrics import inc_cognee_capture_failure
-from elephantbroker.runtime.observability import traced
+from elephantbroker.runtime.metrics import (
+    inc_cognee_capture_failure,
+    inc_fact_delete_cascade_failure,
+)
+from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
 from elephantbroker.schemas.consolidation import CanonicalResult
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
@@ -81,6 +84,11 @@ class CanonicalizationStage:
         # the counter correctly. The wrapped MetricsContext path already
         # carries gateway_id internally; the bare path did not.
         self._gateway_id = gateway_id
+        # TODO-5-902: GatewayLoggerAdapter so the cascade_helper call site
+        # below emits `[gateway_id]`-prefixed logs (parity with facade's
+        # cascade path). Module logger is still used for non-cascade
+        # INFO/WARN lines in this stage.
+        self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
 
     @traced
     async def run(
@@ -325,10 +333,19 @@ class CanonicalizationStage:
 
         # Cascade superseded Cognee documents. Best-effort per-item — a
         # failure for one superseded id does not block the others.
+        # TODO-5-901: consume the CascadeStatus return value and emit the
+        # observability trio (metric + DEGRADED_OPERATION trace) on
+        # "failed", mirroring facade.delete / facade.update. Pre-fix the
+        # status was discarded — a failed superseded-doc cleanup left a
+        # Cognee orphan with no dashboard signal.
         for member_id, old_data_id in superseded_data_ids:
-            await self._cascade_superseded_data_id(
+            cascade_status = await self._cascade_superseded_data_id(
                 old_data_id, fact_id=member_id,
             )
+            if cascade_status == "failed":
+                await self._emit_superseded_cascade_failure(
+                    fact_id=member_id, cognee_data_id=old_data_id,
+                )
 
         return CanonicalResult(
             cluster_id=cluster.cluster_id,
@@ -455,5 +472,50 @@ class CanonicalizationStage:
             dataset_name=self._dataset_name,
             fact_id=fact_id,
             context="consolidation_canonicalize",
-            log=logger,
+            log=self._log,
         )
+
+    async def _emit_superseded_cascade_failure(
+        self, *, fact_id: uuid.UUID, cognee_data_id,
+    ) -> None:
+        """TODO-5-901: observability for a failed superseded-doc cascade.
+
+        Canonicalize's superseded-member loop calls the shared cascade
+        helper per archived fact; a "failed" status leaves the Cognee
+        document orphaned. Emits the same trio as facade._emit_cascade_
+        failure (WARNING log + `eb_fact_delete_cascade_failures_total`
+        metric + DEGRADED_OPERATION trace), tagged with
+        `operation="canonicalize"` so the per-op metric split (TODO-5-
+        511) separates canonicalize-path cascade failures from the
+        delete-path and update-path cascades. Best-effort: the cascade
+        helper already captured the underlying exception; this fires on
+        the returned status and never re-raises.
+        """
+        step = "cognee_data"
+        operation = "canonicalize"
+        if self._metrics:
+            self._metrics.inc_fact_delete_cascade_failure(step, operation=operation)
+        else:
+            inc_fact_delete_cascade_failure(
+                step, operation=operation, gateway_id=self._gateway_id,
+            )
+        self._log.warning(
+            "Canonicalize superseded-cascade failed (fact_id=%s, data_id=%s) "
+            "— Cognee-side document may be orphaned",
+            fact_id, cognee_data_id,
+        )
+        if self._trace is not None:
+            await self._trace.append_event(
+                TraceEvent(
+                    event_type=TraceEventType.DEGRADED_OPERATION,
+                    payload={
+                        "component": "consolidation_canonicalize",
+                        "operation": operation,
+                        "failure": "cascade_step",
+                        "step": step,
+                        "fact_id": str(fact_id),
+                        "cognee_data_id": str(cognee_data_id)
+                            if cognee_data_id is not None else None,
+                    },
+                )
+            )

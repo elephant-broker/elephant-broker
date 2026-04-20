@@ -658,3 +658,93 @@ class TestCanonicalize:
 
         assert ("canonicalize", "gw-5-509") in captured_calls
         assert ("canonicalize_preload", "gw-5-509") in captured_calls
+
+    async def test_emit_superseded_cascade_failure_emits_trio(self, monkeypatch):
+        """TODO-5-901: a "failed" return from the superseded-cognee-data
+        cascade must fire the observability trio on the bare-function metric
+        path — metric `eb_fact_delete_cascade_failures_total` with step=
+        cognee_data + operation=canonicalize (TODO-5-511 label), WARNING
+        log, and a DEGRADED_OPERATION trace event. Pre-fix the status was
+        silently discarded and an orphaned Cognee document produced no
+        dashboard signal."""
+        captured_metric_calls: list = []
+
+        def fake_inc(step, operation="delete", gateway_id=""):
+            captured_metric_calls.append((step, operation, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.consolidation.stages.canonicalize.inc_fact_delete_cascade_failure",
+            fake_inc,
+        )
+
+        trace_events: list = []
+
+        class FakeTrace:
+            async def append_event(self, event):
+                trace_events.append(event)
+
+        stage, *_ = _make_stage(
+            gateway_id="gw-5-901",
+            trace=FakeTrace(),
+            metrics=None,
+        )
+
+        fact_id = uuid.uuid4()
+        data_id = uuid.uuid4()
+        await stage._emit_superseded_cascade_failure(
+            fact_id=fact_id, cognee_data_id=data_id,
+        )
+
+        assert ("cognee_data", "canonicalize", "gw-5-901") in captured_metric_calls
+
+        from elephantbroker.schemas.trace import TraceEventType
+        degraded = [
+            e for e in trace_events
+            if e.event_type == TraceEventType.DEGRADED_OPERATION
+            and e.payload.get("failure") == "cascade_step"
+        ]
+        assert len(degraded) == 1
+        payload = degraded[0].payload
+        assert payload["component"] == "consolidation_canonicalize"
+        assert payload["operation"] == "canonicalize"
+        assert payload["step"] == "cognee_data"
+        assert payload["fact_id"] == str(fact_id)
+        assert payload["cognee_data_id"] == str(data_id)
+
+    async def test_superseded_cascade_failed_invokes_emit_helper(self, monkeypatch):
+        """TODO-5-901: end-to-end pin that the cascade loop in
+        `_canonicalize_cluster` consumes the return value of
+        `_cascade_superseded_data_id` and dispatches to the emit helper on
+        "failed". Pre-fix the status was discarded (return value unused)."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        fake_data_id = uuid.uuid4()
+        fake_result = _MagicMock()
+        fake_result.data_ingestion_info = [{"data_id": fake_data_id}]
+        monkeypatch.setattr("cognee.add", AsyncMock(return_value=fake_result))
+
+        stage, graph, *_ = _make_stage(llm_text="merged canonical text")
+        facts = [
+            make_fact_assertion(text="identical", session_key="s1"),
+            make_fact_assertion(text="identical", session_key="s2"),
+        ]
+        superseded_data_id = str(uuid.uuid4())
+        graph.get_entity = AsyncMock(
+            return_value={"cognee_data_id": superseded_data_id},
+        )
+
+        monkeypatch.setattr(
+            stage, "_cascade_superseded_data_id",
+            AsyncMock(return_value="failed"),
+        )
+        emit_spy = AsyncMock()
+        monkeypatch.setattr(stage, "_emit_superseded_cascade_failure", emit_spy)
+
+        cluster = _make_cluster(facts)
+        await stage.run([cluster], facts, "gw", _make_context())
+
+        assert emit_spy.await_count >= 1
+        assert all(
+            call.kwargs.get("cognee_data_id") == superseded_data_id
+            for call in emit_spy.await_args_list
+        )

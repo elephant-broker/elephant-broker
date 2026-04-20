@@ -256,6 +256,10 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         )
         records = await self._graph.query_cypher(cypher, params)
         candidates: list[RetrievalCandidate] = []
+        # TODO-5-801: read-path reconstructions here and in the vector / cognee
+        # helpers below (orchestrator.py:356, :377) rebuild a FactDataPoint from
+        # graph properties for schema projection only — they do NOT re-MERGE
+        # the node. Writes go through cognee's add_data_points() elsewhere.
         for rec in records:
             props = clean_graph_props(rec["props"])
             try:

@@ -44,12 +44,12 @@ try:
     )
     eb_fact_delete_cascade_failures_total = Counter(
         "eb_fact_delete_cascade_failures_total",
-        "TD-50 delete cascade step failures in facade.delete(). step=graph|vector|cognee_data identifies which layer threw. The EB-layer delete continues on each failure (best-effort cascade) so a step-level counter increment is compatible with an eventually-emitted GDPR_DELETE trace whose cascade_status marks that step as failed.",
-        ["gateway_id", "step"],
+        "TD-50 cascade step failures. step=graph|vector|cognee_data identifies which layer threw; operation=delete|update|canonicalize identifies the parent op so dashboards can split delete-path cascade failures from update-path (superseded-doc cleanup after text change, TODO-5-110) and consolidation canonicalize-path (superseded-member cleanup, TODO-5-901). The EB-layer operation continues on each failure (best-effort cascade) so a step-level counter increment is compatible with an eventually-emitted trace whose cascade_status marks that step as failed.",
+        ["gateway_id", "step", "operation"],
     )
     eb_memory_search_stage_failures_total = Counter(
         "eb_memory_search_stage_failures_total",
-        "MemoryStoreFacade.search() stage failures. stage=semantic|structural identifies which search stage raised. Search downgrades to partial results (still returns a list) rather than crashing; this counter makes the per-stage failure visible.",
+        "Search stage failures across memory read paths. stage label carries the failing source — for MemoryStoreFacade.search() Stage 1: semantic; for the 5-source RetrievalOrchestrator (TODO-5-508): structural|keyword|vector|graph|artifact. exception_type carries the Python exception class name. Search downgrades to partial results (still returns a list) rather than crashing; this counter makes the per-source failure visible.",
         ["gateway_id", "stage", "exception_type"],
     )
 
@@ -267,10 +267,12 @@ def inc_recent_facts_scrubbed(status: str, gateway_id: str = "") -> None:
         ).inc()
 
 
-def inc_fact_delete_cascade_failure(step: str, gateway_id: str = "") -> None:
+def inc_fact_delete_cascade_failure(
+    step: str, operation: str = "delete", gateway_id: str = "",
+) -> None:
     if METRICS_AVAILABLE:
         eb_fact_delete_cascade_failures_total.labels(
-            gateway_id=gateway_id, step=step,
+            gateway_id=gateway_id, step=step, operation=operation,
         ).inc()
 
 
@@ -368,8 +370,12 @@ class MetricsContext:
     def inc_recent_facts_scrubbed(self, status: str) -> None:
         inc_recent_facts_scrubbed(status, gateway_id=self._gw)
 
-    def inc_fact_delete_cascade_failure(self, step: str) -> None:
-        inc_fact_delete_cascade_failure(step, gateway_id=self._gw)
+    def inc_fact_delete_cascade_failure(
+        self, step: str, operation: str = "delete",
+    ) -> None:
+        inc_fact_delete_cascade_failure(
+            step, operation=operation, gateway_id=self._gw,
+        )
 
     def inc_search_stage_failure(self, stage: str, exception_type: str) -> None:
         inc_search_stage_failure(stage, exception_type, gateway_id=self._gw)

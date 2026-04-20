@@ -49,7 +49,12 @@ from cognee.modules.users.methods import get_default_user
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 CascadeStatus = Literal[
-    "ok", "ok_idempotent", "failed", "skipped_no_dataset", "skipped_bad_data_id",
+    "ok",
+    "ok_idempotent",
+    "failed",
+    "skipped_no_dataset",
+    "skipped_bad_data_id",
+    "skipped_no_data_id",
 ]
 
 
@@ -92,6 +97,14 @@ async def cascade_cognee_data(
                                because no Cognee call is even
                                attempted — nothing to retry at the
                                Cognee layer.
+      "skipped_no_data_id"   — TODO-5-700: fact carries no
+                               cognee_data_id (None/missing) — the
+                               capture step on store/update never ran
+                               or returned a shape we could not parse.
+                               Stamped by the facade caller before
+                               dispatch (no Cognee call attempted) and
+                               surfaced here on the alias so the audit
+                               cascade_status is statically typeable.
       "failed"               — Cognee raised; partial cleanup, the
                                step is reported via DEGRADED_OPERATION
                                trace + metric by the caller.

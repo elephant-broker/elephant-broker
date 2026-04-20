@@ -211,13 +211,14 @@ class TestCascadeStatusLiteral:
     must propagate the same alias — discarding it or widening to `str`
     defeats the static check."""
 
-    def test_cascade_status_is_literal_of_five_values(self):
+    def test_cascade_status_is_literal_of_six_values(self):
         from elephantbroker.runtime.memory.cascade_helper import CascadeStatus
 
         args = typing.get_args(CascadeStatus)
         assert set(args) == {
             "ok", "ok_idempotent", "failed",
             "skipped_no_dataset", "skipped_bad_data_id",
+            "skipped_no_data_id",
         }, f"CascadeStatus values drifted: {args}"
 
     def test_facade_cascade_wrapper_returns_cascade_status(self):
