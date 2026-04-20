@@ -1,4 +1,38 @@
 #!/bin/bash
+# ElephantBroker integration test driver.
+#
+# This script is the contract for running the integration / e2e / pipeline /
+# decision-domain test slices. It brings up the test infra
+# (infrastructure/docker-compose.test.yml), sets the test-only envvars, runs
+# the four pytest slices in order, and tears down the infra at the end.
+#
+# External prerequisites (operator-owned, NOT created by this script):
+#
+#   1. A LiteLLM proxy (or any OpenAI-compatible LLM endpoint) must be
+#      running at EB_LLM_ENDPOINT (default http://localhost:8811/v1) before
+#      this script is invoked. Cognee's cognify() pipeline and the embedding
+#      collection both call it. Without it, LiteLLM surfaces 401 / connection
+#      refused and the pipeline and domain-extraction slices fail fast.
+#
+#   2. The proxy must authenticate EB_EMBEDDING_API_KEY (default below).
+#      The default value is a dev-only secret meant for a local proxy — it
+#      is NOT a real cloud-provider credential. Operators can either (a)
+#      configure their local proxy to accept this value, or (b) export
+#      EB_LLM_API_KEY / EB_EMBEDDING_API_KEY to whatever their proxy
+#      requires before invoking this script.
+#
+#   3. The venv must be present and deps installed (`uv sync` preferred,
+#      or `pip install -e '.[dev]'` as a fallback). The script consumes
+#      a ready venv at .venv/ via `source .venv/bin/activate`; it does
+#      not create or repair one.
+#
+# Running `pytest tests/integration/...` directly bypasses this script's
+# env setup and will fail on missing envvars long before any assertion
+# runs — always use the script.
+#
+# See docs/DEPLOYMENT.md §"Integration test prerequisites" for the full
+# operator-side setup and fallback guidance.
+
 set -e
 cd "$(dirname "$0")/.."
 

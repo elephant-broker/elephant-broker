@@ -167,6 +167,44 @@ describe("before_agent_start hook (GF-02 + GF-06)", () => {
     const headers = searchCall![1]?.headers as Record<string, string>;
     expect(headers["X-EB-Actor-Id"]).toBe("user-456");
   });
+
+  // TODO-5-212 / TF-ER-001 BUG-1: auto-recall XML block MUST land in
+  // `prependSystemContext`, not `prependContext`. The context plugin's Surface B
+  // owns `prependContext` (Phase 6 AD-4) for per-turn working-set items; the
+  // memory plugin's cross-turn background belongs in the system-context slot.
+  it("returns prependSystemContext (not prependContext) when memories exist (BUG-1)", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/memory/search")) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              id: "00000000-0000-0000-0000-000000000001",
+              text: "user prefers Postgres over MySQL",
+              category: "preference",
+              confidence: 0.95,
+            },
+          ],
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    const { register } = await import("../src/index.js");
+    const { api, hooks } = createMockApi();
+    register(api);
+
+    const result = await hooks["before_agent_start"](
+      { prompt: "what database should I use?" },
+      { sessionKey: "agent:test:main" },
+    ) as Record<string, unknown>;
+
+    expect(result).toHaveProperty("prependSystemContext");
+    expect(result).not.toHaveProperty("prependContext");
+    expect(String(result.prependSystemContext)).toContain('<relevant-memories source="elephantbroker">');
+    expect(String(result.prependSystemContext)).toContain("Postgres");
+  });
 });
 
 describe("session_start hook (GF-08)", () => {

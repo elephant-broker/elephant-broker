@@ -1,4 +1,5 @@
 """Tests for runtime/redis_keys.py — gateway-scoped Redis key builder."""
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,6 +27,29 @@ def test_ws_snapshot_key_includes_gateway():
     keys = RedisKeyBuilder("gw-prod")
     result = keys.ws_snapshot("agent:main:main", "sid1")
     assert result == "eb:gw-prod:ws_snapshot:agent:main:main:sid1"
+
+
+def test_ws_snapshot_scan_pattern_includes_gateway_and_glob():
+    keys = RedisKeyBuilder("gw-prod")
+    result = keys.ws_snapshot_scan_pattern("sid1")
+    assert result == "eb:gw-prod:ws_snapshot:*:sid1"
+
+
+def test_ws_snapshot_scan_pattern_different_gateways_different_patterns():
+    keys_a = RedisKeyBuilder("gw-a")
+    keys_b = RedisKeyBuilder("gw-b")
+    assert keys_a.ws_snapshot_scan_pattern("sid") != keys_b.ws_snapshot_scan_pattern("sid")
+
+
+def test_guard_history_scan_pattern_includes_gateway_and_glob():
+    keys = RedisKeyBuilder("gw-prod")
+    assert keys.guard_history_scan_pattern() == "eb:gw-prod:guard_history:*"
+
+
+def test_guard_history_scan_pattern_different_gateways_different_patterns():
+    keys_a = RedisKeyBuilder("gw-a")
+    keys_b = RedisKeyBuilder("gw-b")
+    assert keys_a.guard_history_scan_pattern() != keys_b.guard_history_scan_pattern()
 
 
 def test_compact_state_key_includes_gateway():
@@ -63,6 +87,34 @@ def test_same_gateway_same_keys():
 def test_prefix_property():
     keys = RedisKeyBuilder("gw-test")
     assert keys.prefix == "eb:gw-test"
+
+
+# ---------------------------------------------------------------------------
+# 5-214: empty gateway_id warning — surfaces bootstrap bugs without breaking
+# legitimate empty-id paths (test conftests, buffer default-branch fallback).
+# ---------------------------------------------------------------------------
+
+
+def test_empty_gateway_id_emits_warning(caplog):
+    """An empty gateway_id must emit a WARNING log so a missed bootstrap
+    wiring surfaces in logs. The warning is non-fatal — the builder still
+    constructs — because some test/default paths legitimately pass "". """
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.runtime.redis_keys"):
+        keys = RedisKeyBuilder("")
+    # Key still builds (non-fatal warning).
+    assert keys.prefix == "eb:"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "empty gateway_id" in msg
+    assert "eb::" in msg  # Warning must name the surface symptom
+
+
+def test_non_empty_gateway_id_no_warning(caplog):
+    """Happy path: a non-empty gateway_id does NOT emit any warning."""
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.runtime.redis_keys"):
+        RedisKeyBuilder("gw-prod")
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
 # ---------------------------------------------------------------------------

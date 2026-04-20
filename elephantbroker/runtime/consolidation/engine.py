@@ -97,6 +97,7 @@ class ConsolidationEngine(IConsolidationEngine):
         procedure_audit_store: ProcedureAuditStore | None = None,
         session_goal_audit_store: SessionGoalAuditStore | None = None,
         gateway_id: str = "",
+        dataset_name: str = "elephantbroker",
         **kwargs,
     ) -> None:
         self._trace = trace_ledger
@@ -121,6 +122,7 @@ class ConsolidationEngine(IConsolidationEngine):
         self._proc_audit = procedure_audit_store
         self._goal_audit = session_goal_audit_store
         self._gateway_id = gateway_id
+        self._dataset_name = dataset_name
         self._log = GatewayLoggerAdapter(
             logging.getLogger("elephantbroker.runtime.consolidation.engine"),
             {"gateway_id": gateway_id},
@@ -154,6 +156,11 @@ class ConsolidationEngine(IConsolidationEngine):
             if self._graph and self._vector:
                 stages[2] = CanonicalizationStage(
                     self._graph, self._vector, self._llm, self._embeddings, consolidation_cfg,
+                    dataset_name=self._dataset_name,
+                    trace_ledger=self._trace, metrics=self._metrics,
+                    # TODO-5-509: thread engine's gateway_id so the stage's
+                    # bare-function metric paths carry the correct label.
+                    gateway_id=self._gateway_id,
                 )
         except Exception:
             pass
@@ -597,13 +604,48 @@ class ConsolidationEngine(IConsolidationEngine):
             return {}
 
     async def _apply_fact_upserts(self, facts: list, gateway_id: str) -> None:
-        """Batch upsert modified facts via add_data_points()."""
+        """Batch upsert modified facts via add_data_points().
+
+        TODO-5-008: fetch cognee_data_ids from the graph before MERGE. Input
+        is a list of FactAssertion (no storage-backend id in scope post-C21);
+        a bare FactDataPoint.from_schema(f) defaults cognee_data_id=None and
+        the MERGE wipes the graph pointer, re-orphaning TD-50 cascades for
+        any consolidation-touched fact on a later delete.
+        """
         try:
             from cognee.tasks.storage import add_data_points
 
             from elephantbroker.runtime.adapters.cognee.datapoints import FactDataPoint
 
-            dps = [FactDataPoint.from_schema(f) for f in facts if hasattr(f, "id")]
+            eligible = [f for f in facts if hasattr(f, "id")]
+            if not eligible:
+                return
+
+            data_id_map: dict[str, str | None] = {}
+            if self._graph is not None:
+                try:
+                    records = await self._graph.query_cypher(
+                        "MATCH (f:FactDataPoint) "
+                        "WHERE f.eb_id IN $ids AND f.gateway_id = $gw "
+                        "RETURN f.eb_id AS eb_id, f.cognee_data_id AS cognee_data_id",
+                        {"ids": [str(f.id) for f in eligible], "gw": gateway_id},
+                    )
+                    data_id_map = {
+                        rec["eb_id"]: rec.get("cognee_data_id") for rec in records
+                    }
+                except Exception as exc:
+                    self._log.warning(
+                        "Batch fetch of cognee_data_ids failed in consolidation "
+                        "upsert (gateway=%s, count=%d): %s",
+                        gateway_id, len(eligible), exc,
+                    )
+
+            dps = [
+                FactDataPoint.from_schema(
+                    f, cognee_data_id=data_id_map.get(str(f.id)),
+                )
+                for f in eligible
+            ]
             if dps:
                 await add_data_points(dps)
         except Exception:

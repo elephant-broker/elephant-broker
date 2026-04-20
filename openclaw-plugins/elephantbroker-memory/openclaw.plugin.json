@@ -4,7 +4,7 @@
   "name": "ElephantBroker Memory",
   "version": "0.1.0",
   "description": "ElephantBroker Memory Plugin — durable knowledge, actor-aware retrieval, session lifecycle",
-  "entry": "index.ts",
+  "entry": "./dist/index.js",
   "configSchema": {
     "type": "object",
     "properties": {

@@ -14,6 +14,7 @@ from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
 from elephantbroker.runtime.interfaces.retrieval import IRetrievalOrchestrator, RetrievalCandidate
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+from elephantbroker.runtime.metrics import inc_search_stage_failure
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 from elephantbroker.schemas.profile import IsolationLevel, IsolationScope, RetrievalPolicy
@@ -122,6 +123,17 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             _trace_gw = caller_gateway_id or self._gateway_id
             if isinstance(result, Exception):
                 logger.warning("Retrieval source %s failed: %s", source_name, result)
+                # TODO-5-508: wire eb_memory_search_stage_failures_total to
+                # per-source orchestrator failures. Pre-fix only facade.search
+                # Stage 1 was emitting this metric; the 5-source orchestrator
+                # (structural/keyword/vector/graph/artifact) was trace-only, so
+                # Prometheus never saw a source-level failure. Bare-function
+                # form because __init__ does not hold a MetricsContext — thread
+                # gateway_id explicitly from the same _trace_gw the adjacent
+                # trace event uses, keeping both signals in lockstep.
+                inc_search_stage_failure(
+                    source_name, type(result).__name__, gateway_id=_trace_gw,
+                )
                 if self._trace:
                     await self._trace.append_event(TraceEvent(
                         event_type=TraceEventType.RETRIEVAL_SOURCE_RESULT,
@@ -163,11 +175,14 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
             if key not in best or c.score > best[key].score:
                 best[key] = c
 
-        # Post-retrieval isolation filter
+        # Post-retrieval isolation filter. TD-61 semantics: auto_recall
+        # bypasses isolation-scope filters symmetrically for both
+        # SESSION_KEY and ACTOR scopes — explicit-search enforces, auto
+        # recall pulls cross-session/actor candidates.
         filtered = list(best.values())
-        if policy.isolation_scope == IsolationScope.SESSION_KEY and session_key:
+        if policy.isolation_scope == IsolationScope.SESSION_KEY and session_key and not auto_recall:
             filtered = [c for c in filtered if c.fact.session_key == session_key or c.fact.session_key is None]
-        elif policy.isolation_scope == IsolationScope.ACTOR and actor_id:
+        elif policy.isolation_scope == IsolationScope.ACTOR and actor_id and not auto_recall:
             filtered = [c for c in filtered
                         if (c.fact.source_actor_id and str(c.fact.source_actor_id) == actor_id)
                         or any(str(t) == actor_id for t in c.fact.target_actor_ids)]
@@ -186,6 +201,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
                 payload={
                     "action": "retrieve_candidates", "query": query[:100],
                     "sources": source_names, "results": len(capped),
+                    "auto_recall": auto_recall,
                 },
             )
         )
@@ -212,7 +228,13 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if scope:
             conditions.append("f.scope = $scope")
             params["scope"] = scope
-        if actor_id:
+        # TD-61 symmetry: session_key and actor_id are isolation-scope
+        # pre-filters. When auto_recall=True the caller wants cross-session
+        # / cross-actor candidates, so the pre-filter must bypass in lockstep
+        # with the post-retrieval isolation filter. Content selectors
+        # (scope, memory_class, goal_ids) are not isolation filters and
+        # remain applied regardless of auto_recall.
+        if actor_id and not auto_recall:
             conditions.append("f.source_actor_id = $actor_id")
             params["actor_id"] = actor_id
         if goal_ids:
@@ -221,7 +243,7 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         if memory_class:
             conditions.append("f.memory_class = $memory_class")
             params["memory_class"] = memory_class.value if hasattr(memory_class, "value") else str(memory_class)
-        if session_key:
+        if session_key and not auto_recall:
             conditions.append("f.session_key = $session_key")
             params["session_key"] = session_key
 
@@ -234,6 +256,10 @@ class RetrievalOrchestrator(IRetrievalOrchestrator):
         )
         records = await self._graph.query_cypher(cypher, params)
         candidates: list[RetrievalCandidate] = []
+        # TODO-5-801: read-path reconstructions here and in the vector / cognee
+        # helpers below (orchestrator.py:356, :377) rebuild a FactDataPoint from
+        # graph properties for schema projection only — they do NOT re-MERGE
+        # the node. Writes go through cognee's add_data_points() elsewhere.
         for rec in records:
             props = clean_graph_props(rec["props"])
             try:

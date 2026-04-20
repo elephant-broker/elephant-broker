@@ -1,6 +1,10 @@
 """Gateway-scoped Redis key builder — replaces all hardcoded ``f"eb:..."`` patterns."""
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger("elephantbroker.runtime.redis_keys")
+
 
 class RedisKeyBuilder:
     """Builds Redis keys namespaced by gateway_id.
@@ -10,6 +14,23 @@ class RedisKeyBuilder:
     """
 
     def __init__(self, gateway_id: str) -> None:
+        # 5-214: Empty gateway_id is a valid constructor argument (the turn-ingest
+        # buffer's default branch explicitly passes "" when the container hasn't
+        # injected a builder yet, and test conftests pass "" as a sentinel). But
+        # in a real runtime this produces `eb::...` double-colon keys that look
+        # nearly identical to real ones and silently bypass multi-gateway
+        # isolation — a bootstrap bug in which the container failed to wire
+        # gateway_id would go undetected. Emit a WARNING so the gap surfaces in
+        # logs without breaking legitimate empty-id paths (tests, default-branch
+        # fallback). The warning is intentionally non-fatal per team-lead
+        # direction ("least intrusive").
+        if gateway_id == "":
+            logger.warning(
+                "RedisKeyBuilder constructed with empty gateway_id — keys will "
+                "be prefixed 'eb::' which bypasses multi-gateway isolation. "
+                "This is expected in tests and the buffer's default branch, but "
+                "indicates a bootstrap gap if seen in production.",
+            )
         self._prefix = f"eb:{gateway_id}"
 
     @property
@@ -38,6 +59,14 @@ class RedisKeyBuilder:
 
     def ws_snapshot(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:ws_snapshot:{session_key}:{session_id}"
+
+    def ws_snapshot_scan_pattern(self, session_id: str) -> str:
+        """Glob pattern for scanning ws_snapshot keys across all session_keys.
+
+        Used by WorkingSetManager.get_working_set() when resolving a snapshot
+        from a session_id without knowing the routing session_key.
+        """
+        return f"{self._prefix}:ws_snapshot:*:{session_id}"
 
     def compact_state(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:compact_state:{session_key}:{session_id}"
@@ -69,6 +98,14 @@ class RedisKeyBuilder:
 
     def guard_history(self, session_key: str, session_id: str) -> str:
         return f"{self._prefix}:guard_history:{session_key}:{session_id}"
+
+    def guard_history_scan_pattern(self) -> str:
+        """Glob pattern for scanning all guard_history keys in this gateway.
+
+        Used by DomainDiscoveryTask to aggregate uncategorized action patterns
+        across every (session_key, session_id) pair.
+        """
+        return f"{self._prefix}:guard_history:*"
 
     def approval(self, agent_id: str, request_id: str) -> str:
         return f"{self._prefix}:{agent_id}:approval:{request_id}"

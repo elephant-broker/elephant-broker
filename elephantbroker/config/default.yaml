@@ -337,7 +337,7 @@ async_analysis:
 
 guards:
   enabled: true                         # env: EB_GUARDS_ENABLED — master switch for the 6-layer guard pipeline
-  builtin_rules_enabled: true           # ships with 12 builtin red-line patterns; disable to use only your own rules
+  builtin_rules_enabled: true           # ships with 16 builtin red-line patterns; disable to use only your own rules
   history_ttl_seconds: 86400            # how long guard event history stays in Redis per session
   max_history_events: 50                # max guard events kept per session before LRU eviction
   input_summary_max_chars: 500          # truncation length for guard input excerpts in trace events

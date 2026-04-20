@@ -67,4 +67,7 @@ async def artifact_store(graph_adapter, vector_adapter, embedding_service, trace
 
 @pytest_asyncio.fixture
 async def retrieval_orchestrator(vector_adapter, graph_adapter, embedding_service, trace_ledger):
-    return RetrievalOrchestrator(vector_adapter, graph_adapter, embedding_service, trace_ledger)
+    return RetrievalOrchestrator(
+        vector_adapter, graph_adapter, embedding_service, trace_ledger,
+        dataset_name="test_integration",
+    )

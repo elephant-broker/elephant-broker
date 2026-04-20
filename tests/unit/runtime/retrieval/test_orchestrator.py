@@ -1,12 +1,13 @@
 """Tests for RetrievalOrchestrator — dataset name fix (Fix #32)."""
 from __future__ import annotations
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from elephantbroker.runtime.retrieval.orchestrator import RetrievalOrchestrator
-from elephantbroker.schemas.profile import RetrievalPolicy
+from elephantbroker.schemas.profile import IsolationScope, RetrievalPolicy
 from elephantbroker.schemas.trace import TraceEventType
 
 
@@ -134,6 +135,34 @@ class TestRetrievalPerformedTraceEvent:
         assert len(events) == 1
         assert events[0].session_id is None
 
+    async def test_trace_event_payload_carries_auto_recall_true(self):
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+        await orch.retrieve_candidates(
+            "test query", policy=policy,
+            session_key="agent:main:main", auto_recall=True,
+        )
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert events[0].payload.get("auto_recall") is True
+
+    async def test_trace_event_payload_carries_auto_recall_false_default(self):
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            keyword_enabled=False, structural_enabled=False,
+            vector_enabled=False, graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+        # auto_recall defaults to False
+        await orch.retrieve_candidates("test query", policy=policy)
+        events = self._find_retrieval_performed(orch._trace)
+        assert len(events) == 1
+        assert events[0].payload.get("auto_recall") is False
+
 
 class TestMemorySearchSessionIdThreading:
     """TD-47 complete: session_id must reach retrieve_candidates from /memory/search."""
@@ -162,3 +191,249 @@ class TestMemorySearchSessionIdThreading:
         assert len(events) == 1
         assert str(events[0].session_id) == "11111111-1111-1111-1111-111111111111"
         assert events[0].session_key == "agent:main:main"
+
+
+def _fact_props(fact_id: str, *, session_key: str = "", actor_id: str = "") -> dict:
+    """Build FactDataPoint props dict for a Cypher-mock row."""
+    return {
+        "eb_id": fact_id, "text": "test fact", "category": "general",
+        "scope": "session", "confidence": 1.0, "memory_class": "episodic",
+        "eb_created_at": 0, "eb_updated_at": 0, "use_count": 0,
+        "successful_use_count": 0, "provenance_refs": [],
+        "target_actor_ids": [], "goal_ids": [],
+        "session_key": session_key, "source_actor_id": actor_id,
+        "gateway_id": "test-gw",
+    }
+
+
+class TestTD61GuardSymmetry:
+    """TD-61 completeness: auto_recall bypasses isolation filters symmetrically
+    for both SESSION_KEY and ACTOR scopes, across the structural Cypher
+    pre-filter and the post-retrieval filter. Explicit-search enforces."""
+
+    @staticmethod
+    def _structural_only_policy(
+        isolation_scope: IsolationScope = IsolationScope.SESSION_KEY,
+    ) -> RetrievalPolicy:
+        return RetrievalPolicy(
+            isolation_scope=isolation_scope,
+            structural_enabled=True,
+            keyword_enabled=False,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+    # --- Structural Cypher pre-filter: session_key ---
+
+    async def test_structural_session_key_prefilter_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=True,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert "session_key" not in params
+
+    async def test_structural_session_key_prefilter_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=False,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert params.get("session_key") == "sk-A"
+
+    # --- Structural Cypher pre-filter: actor_id ---
+
+    async def test_structural_actor_prefilter_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=str(uuid.uuid4()),
+            auto_recall=True,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert "actor_id" not in params
+
+    async def test_structural_actor_prefilter_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        orch._graph.query_cypher = AsyncMock(return_value=[])
+        actor = str(uuid.uuid4())
+        await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=actor,
+            auto_recall=False,
+        )
+        orch._graph.query_cypher.assert_called_once()
+        _, params = orch._graph.query_cypher.call_args[0]
+        assert params.get("actor_id") == actor
+
+    # --- Post-retrieval filter: SESSION_KEY scope ---
+
+    async def test_post_retrieval_session_key_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, session_key="sk-A"), "relations": []},
+            {"props": _fact_props(out_id, session_key="sk-B"), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=True,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id in ids, "auto_recall must surface cross-session candidates"
+
+    async def test_post_retrieval_session_key_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, session_key="sk-A"), "relations": []},
+            {"props": _fact_props(out_id, session_key="sk-B"), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.SESSION_KEY),
+            session_key="sk-A",
+            auto_recall=False,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id not in ids, "explicit-search must enforce session_key isolation"
+
+    # --- Post-retrieval filter: ACTOR scope ---
+
+    async def test_post_retrieval_actor_bypassed_on_auto_recall(self):
+        orch = _make_orchestrator()
+        target_actor = str(uuid.uuid4())
+        other_actor = str(uuid.uuid4())
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, actor_id=target_actor), "relations": []},
+            {"props": _fact_props(out_id, actor_id=other_actor), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=target_actor,
+            auto_recall=True,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id in ids, "auto_recall must surface cross-actor candidates"
+
+    async def test_post_retrieval_actor_applied_on_explicit_search(self):
+        orch = _make_orchestrator()
+        target_actor = str(uuid.uuid4())
+        other_actor = str(uuid.uuid4())
+        in_id = str(uuid.uuid4())
+        out_id = str(uuid.uuid4())
+        orch._graph.query_cypher = AsyncMock(return_value=[
+            {"props": _fact_props(in_id, actor_id=target_actor), "relations": []},
+            {"props": _fact_props(out_id, actor_id=other_actor), "relations": []},
+        ])
+        candidates = await orch.retrieve_candidates(
+            "q",
+            policy=self._structural_only_policy(IsolationScope.ACTOR),
+            actor_id=target_actor,
+            auto_recall=False,
+        )
+        ids = {str(c.fact.id) for c in candidates}
+        assert in_id in ids
+        assert out_id not in ids, "explicit-search must enforce actor isolation"
+
+
+class TestSourceFailureMetric:
+    """TODO-5-508: `eb_memory_search_stage_failures_total` wired to the
+    5-source orchestrator exception branch. Pre-fix only facade.search
+    Stage 1 was emitting this metric; the RetrievalOrchestrator's per-
+    source `return_exceptions=True` branch produced a RETRIEVAL_SOURCE_
+    RESULT trace but no counter increment — so dashboards could not
+    alert on a silently failing source."""
+
+    async def test_source_failure_increments_metric(self, monkeypatch):
+        """A single source raising inside the asyncio.gather must fire
+        `inc_search_stage_failure(source_name, exception_type, gateway_id=...)`
+        adjacent to the existing trace event."""
+        captured: list = []
+
+        def fake_inc(stage, exception_type, gateway_id=""):
+            captured.append((stage, exception_type, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.retrieval.orchestrator.inc_search_stage_failure",
+            fake_inc,
+        )
+
+        orch = _make_orchestrator()
+        # Structural-only policy so only one coroutine runs — keeps the
+        # test focused on the exception-branch contract.
+        policy = RetrievalPolicy(
+            structural_enabled=True,
+            keyword_enabled=False,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        async def boom(**kw):
+            raise RuntimeError("neo4j down")
+
+        with patch.object(orch, "get_structural_hits", new=boom):
+            candidates = await orch.retrieve_candidates("q", policy=policy)
+
+        assert candidates == []
+        assert captured == [("structural", "RuntimeError", "test-gw")]
+
+    async def test_source_failure_uses_caller_gateway_id_when_provided(self, monkeypatch):
+        """When retrieve_candidates is called with caller_gateway_id, that
+        value (not the orchestrator's configured gateway_id) must label
+        the metric — same gateway-scoping rule the adjacent trace event
+        already follows."""
+        captured: list = []
+
+        def fake_inc(stage, exception_type, gateway_id=""):
+            captured.append((stage, exception_type, gateway_id))
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.retrieval.orchestrator.inc_search_stage_failure",
+            fake_inc,
+        )
+
+        orch = _make_orchestrator()
+        policy = RetrievalPolicy(
+            structural_enabled=True,
+            keyword_enabled=False,
+            vector_enabled=False,
+            graph_expansion_enabled=False,
+            artifact_enabled=False,
+        )
+
+        async def boom(**kw):
+            raise ValueError("bad query")
+
+        with patch.object(orch, "get_structural_hits", new=boom):
+            await orch.retrieve_candidates(
+                "q", policy=policy, caller_gateway_id="caller-gw",
+            )
+
+        assert captured == [("structural", "ValueError", "caller-gw")]

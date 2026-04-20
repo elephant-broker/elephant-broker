@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from elephantbroker.api.deps import (
     get_artifact_ingest_pipeline,
@@ -68,7 +68,36 @@ class IngestMessagesRequest(BaseModel):
 
 
 class UpdateFactRequest(BaseModel):
-    updates: dict
+    """Whitelist of user-updatable FactAssertion fields.
+
+    TODO-5-610 — `extra="forbid"` blocks mass-assignment of internal/scoring
+    fields (use_count, successful_use_count, freshness_score, last_used_at,
+    updated_at, session_key, session_id, provenance_refs, embedding_ref,
+    token_size) via `PATCH /memory/{fact_id}`. Immutable fields (id,
+    created_at, source_actor_id, gateway_id) are absent from the schema and
+    also defended in depth by the facade.update() setattr block.
+
+    TODO-5-802 — `provenance_refs` is intentionally absent from the user-
+    editable surface: evidence references are stamped by the ingest/consolidation
+    pipeline (or explicit evidence-attachment endpoints), never by the PATCH
+    path. Allowing PATCH to rewrite provenance would let a caller detach a
+    claim from the receipts that justify it, defeating the evidence-required
+    invariant.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = Field(default=None, min_length=1)
+    category: str | None = None
+    scope: Scope | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    memory_class: MemoryClass | None = None
+    target_actor_ids: list[uuid.UUID] | None = None
+    goal_ids: list[uuid.UUID] | None = None
+    decision_domain: str | None = None
+    archived: bool | None = None
+    autorecall_blacklisted: bool | None = None
+    goal_relevance_tags: dict[str, str] | None = None
 
 
 # --- Existing Endpoints ---
@@ -289,7 +318,14 @@ async def get_fact(fact_id: uuid.UUID, request: Request):
     return fact.model_dump(mode="json")
 
 
-@router.delete("/{fact_id}")
+@router.delete(
+    "/{fact_id}",
+    responses={
+        204: {"description": "Fact deleted"},
+        403: {"description": "Caller gateway does not own this fact"},
+        404: {"description": "Fact not found"},
+    },
+)
 async def delete_fact(fact_id: uuid.UUID, request: Request):
     ms = get_memory_store(request)
     caller_gw = getattr(request.state, "gateway_id", "")
@@ -302,15 +338,27 @@ async def delete_fact(fact_id: uuid.UUID, request: Request):
         return JSONResponse(status_code=403, content={"detail": str(e)})
 
 
-@router.patch("/{fact_id}")
-async def update_fact(fact_id: uuid.UUID, body: dict, request: Request):
-    """Update fact fields. Body is a flat dict of fields to update (e.g., {"text": "new", "confidence": 0.5})."""
+@router.patch(
+    "/{fact_id}",
+    responses={
+        200: {"description": "Fact updated"},
+        403: {"description": "Caller gateway does not own this fact"},
+        404: {"description": "Fact not found"},
+        422: {"description": "Invalid or disallowed field in request body"},
+    },
+)
+async def update_fact(fact_id: uuid.UUID, body: UpdateFactRequest, request: Request):
+    """Update allowed fact fields. See `UpdateFactRequest` for the whitelist."""
     ms = get_memory_store(request)
+    caller_gw = getattr(request.state, "gateway_id", "")
+    updates = body.model_dump(exclude_unset=True, mode="python")
     try:
-        result = await ms.update(fact_id, body)
+        result = await ms.update(fact_id, updates, caller_gateway_id=caller_gw)
         return result.model_dump(mode="json")
     except KeyError:
         return JSONResponse(status_code=404, content={"detail": "Fact not found"})
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
 
 
 # --- Class promotion ---

@@ -28,6 +28,7 @@ from tests.fixtures.factories import (
 def _make_generator(
     *, retrieval=None, goal_manager=None, graph=None, redis=None,
     procedure_engine=None, config=None, embedding_service=None,
+    gateway_id="", redis_keys=None,
 ):
     """Build a CandidateGenerator with AsyncMock dependencies."""
     if retrieval is None:
@@ -41,7 +42,34 @@ def _make_generator(
         redis=redis,
         config=config,
         embedding_service=embedding_service,
+        gateway_id=gateway_id,
+        redis_keys=redis_keys,
     )
+
+
+# ---------------------------------------------------------------------------
+# C19: CandidateGenerator keys are gateway-scoped via RedisKeyBuilder
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayScopedKeys:
+    """After C19, CandidateGenerator always resolves session_goals through
+    a RedisKeyBuilder (auto-built from gateway_id if not supplied). The old
+    ``f"eb:session_goals:{sk}"`` fallback that bypassed the gateway prefix
+    is gone."""
+
+    def test_auto_builds_builder_when_redis_keys_not_supplied(self):
+        gen = _make_generator(gateway_id="gw-xyz", redis_keys=None)
+        assert gen._keys is not None
+        assert gen._keys.session_goals("agent:main:main") == (
+            "eb:gw-xyz:session_goals:agent:main:main"
+        )
+
+    def test_uses_supplied_builder_unchanged(self):
+        from elephantbroker.runtime.redis_keys import RedisKeyBuilder
+        external = RedisKeyBuilder("gw-external")
+        gen = _make_generator(gateway_id="gw-xyz", redis_keys=external)
+        assert gen._keys is external
 
 
 def _make_rc(text="fact text", source="structural", score=0.8, category="general", **fact_kw):

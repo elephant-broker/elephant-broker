@@ -95,3 +95,36 @@ class TestDomainDiscovery:
         task = DomainDiscoveryTask(AsyncMock(), None, RedisKeyBuilder("gw"))
         suggestions = await task.run("gw")
         assert suggestions == []
+
+
+class TestGatewayScopedScanPattern:
+    """C19b: scan pattern must route through RedisKeyBuilder, not a hardcoded
+    ``f"eb:{gateway_id}:guard_history:*"`` literal."""
+
+    async def test_scan_pattern_uses_builder(self):
+        captured = {}
+
+        async def capturing_scan(cursor, match=None, count=100):
+            captured["match"] = match
+            return (0, [])
+
+        redis = AsyncMock()
+        redis.scan = capturing_scan
+        redis.lrange = AsyncMock(return_value=[])
+
+        embeddings = AsyncMock()
+        embeddings.embed_batch = AsyncMock(return_value=[])
+
+        keys = RedisKeyBuilder("gw-alpha")
+        task = DomainDiscoveryTask(embeddings, redis, keys)
+        await task.run("gw-alpha")
+
+        assert captured["match"] == "eb:gw-alpha:guard_history:*"
+        assert captured["match"] == keys.guard_history_scan_pattern()
+
+    async def test_scan_pattern_distinct_per_gateway(self):
+        k1 = RedisKeyBuilder("gw-one")
+        k2 = RedisKeyBuilder("gw-two")
+        assert k1.guard_history_scan_pattern() == "eb:gw-one:guard_history:*"
+        assert k2.guard_history_scan_pattern() == "eb:gw-two:guard_history:*"
+        assert k1.guard_history_scan_pattern() != k2.guard_history_scan_pattern()

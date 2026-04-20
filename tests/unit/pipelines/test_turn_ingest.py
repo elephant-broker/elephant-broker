@@ -423,6 +423,58 @@ class _FakeRedis:
         if ex:
             self._ttls[key] = ex
 
+    async def delete(self, key):
+        existed = (key in self._kv) or (key in self._data)
+        self._kv.pop(key, None)
+        self._data.pop(key, None)
+        self._ttls.pop(key, None)
+        return 1 if existed else 0
+
+    async def eval(self, script, numkeys, *keys_and_args):
+        """Minimal Lua eval emulation for _SCRUB_LUA.
+
+        Redis Lua executes atomically server-side. This Python mock is
+        trivially "atomic" against concurrent coroutines because the body
+        contains zero `await` points — asyncio cannot interleave another
+        coroutine's eval() on the same key between the GET-like read and the
+        SET-like write, which is what 5-101's "no lost-update" guarantee
+        hinges on at the mock tier. (The Python GIL is about thread
+        scheduling; asyncio atomicity here comes from the absence of
+        suspension points, not the GIL.) The script is identified by
+        signature rather than parsed.
+        """
+        assert "tostring(e.id) == ARGV[1]" in script, "only _SCRUB_LUA is emulated"
+        key = keys_and_args[0]
+        target = keys_and_args[1]
+        ttl = int(keys_and_args[2])
+        data = self._kv.get(key)
+        if not data:
+            return 0
+        # 5-317: non-table decode results (JSON parse failure or non-array
+        # payload) DEL the corrupt key and return 0 — mirrors the Lua script's
+        # defense-in-depth branch so the mock cannot drift from prod behavior.
+        try:
+            entries = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            self._kv.pop(key, None)
+            self._ttls.pop(key, None)
+            return 0
+        if not isinstance(entries, list):
+            self._kv.pop(key, None)
+            self._ttls.pop(key, None)
+            return 0
+        filtered = [e for e in entries if not (isinstance(e, dict) and str(e.get("id")) == target)]
+        removed = len(entries) - len(filtered)
+        if removed == 0:
+            return 0
+        if filtered:
+            self._kv[key] = json.dumps(filtered)
+            self._ttls[key] = ttl
+        else:
+            self._kv.pop(key, None)
+            self._ttls.pop(key, None)
+        return removed
+
 
 class _FakePipeline:
     def __init__(self, redis: _FakeRedis):
@@ -571,6 +623,287 @@ class TestIngestBuffer:
         assert len(flushed) == 9
         assert flushed[0]["content"] == "msg3"  # oldest surviving message
         assert flushed[-1]["content"] == "msg11"  # newest message
+
+    # --- Gateway Identity: Redis key prefix (PR #5 TODOs 5-202, 5-310) ---
+    # Every Redis key MUST be built via RedisKeyBuilder so two gateways sharing
+    # Redis never collide. buffer.py previously fell back to hardcoded
+    # `f"eb:ingest_buffer:..."` / `f"eb:recent_facts:..."` strings when
+    # `redis_keys=None`, bypassing the gateway prefix. The three tests below
+    # pin the post-fix behavior.
+
+    async def test_ingest_buffer_key_carries_gateway_prefix(self):
+        """With an explicit RedisKeyBuilder(gateway_id=...), add/flush use the
+        gateway-prefixed key `eb:{gw}:ingest_buffer:{sk}`."""
+        from elephantbroker.runtime.redis_keys import RedisKeyBuilder
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=10)
+        keys = RedisKeyBuilder(gateway_id="gw-alpha")
+        buf = IngestBuffer(redis, config, redis_keys=keys)
+        await buf.add_messages("sk:test", [{"role": "user", "content": "hi"}])
+        # The gateway-prefixed key must exist on the fake Redis.
+        assert "eb:gw-alpha:ingest_buffer:sk:test" in redis._data
+        # And the legacy unprefixed key must NOT exist.
+        assert "eb:ingest_buffer:sk:test" not in redis._data
+
+    async def test_recent_facts_key_carries_gateway_prefix(self):
+        """update_recent_facts / load_recent_facts / scrub_fact_from_recent
+        all use `eb:{gw}:recent_facts:{sk}` when a RedisKeyBuilder is provided."""
+        from elephantbroker.runtime.redis_keys import RedisKeyBuilder
+        redis = _FakeRedis()
+        config = self._make_config()
+        keys = RedisKeyBuilder(gateway_id="gw-beta")
+        buf = IngestBuffer(redis, config, redis_keys=keys)
+        fact_id = str(uuid.uuid4())
+        await buf.update_recent_facts(
+            "sk:test", [{"id": fact_id, "text": "x", "category": "general"}],
+        )
+        assert "eb:gw-beta:recent_facts:sk:test" in redis._kv
+        assert "eb:recent_facts:sk:test" not in redis._kv
+        loaded = await buf.load_recent_facts("sk:test")
+        assert len(loaded) == 1 and loaded[0]["id"] == fact_id
+        removed = await buf.scrub_fact_from_recent("sk:test", fact_id)
+        assert removed == 1
+        # Scrub removed the only entry → key deleted under gateway prefix.
+        assert "eb:gw-beta:recent_facts:sk:test" not in redis._kv
+
+    async def test_redis_keys_none_defaults_to_empty_gateway_builder(self):
+        """When `redis_keys` is omitted or None, the buffer still routes all
+        keys through an internal RedisKeyBuilder (gateway_id="") — no
+        hardcoded fallback string reaches Redis."""
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=10)
+        buf = IngestBuffer(redis, config)  # redis_keys defaults to None
+        await buf.add_messages("sk:test", [{"role": "user", "content": "hi"}])
+        # Default builder produces `eb::ingest_buffer:sk:test` (empty gateway
+        # → double colon between `eb:` and the key name).
+        assert "eb::ingest_buffer:sk:test" in redis._data
+        # The legacy hardcoded fallback format must NOT be present anywhere.
+        assert "eb:ingest_buffer:sk:test" not in redis._data
+
+
+# ---------------------------------------------------------------------------
+# TODO 5-101: scrub_fact_from_recent is atomic (Lua eval). The previous
+# read-modify-write pattern could drop concurrent scrubs' results.
+# ---------------------------------------------------------------------------
+
+
+class TestIngestBufferAtomicScrub:
+    def _make_config(self, **overrides):
+        defaults = {
+            "ingest_batch_size": 10,
+            "ingest_buffer_ttl_seconds": 300,
+            "ingest_batch_timeout_seconds": 60.0,
+            "extraction_context_ttl_seconds": 3600,
+        }
+        defaults.update(overrides)
+        return LLMConfig(**defaults)
+
+    async def test_scrub_uses_redis_eval_not_get_set(self):
+        """5-101: scrub_fact_from_recent must route through redis.eval (Lua),
+        not a GET→SET RMW. Regression guard so the atomic path doesn't get
+        reverted to the lost-update pattern."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        await buf.update_recent_facts("s1", [{"id": "a", "text": "x"}])
+
+        eval_calls: list = []
+        orig_eval = redis.eval
+
+        async def _spy_eval(script, numkeys, *args):
+            eval_calls.append((script, numkeys, args))
+            return await orig_eval(script, numkeys, *args)
+
+        redis.eval = _spy_eval  # type: ignore[assignment]
+        await buf.scrub_fact_from_recent("s1", "a")
+        assert len(eval_calls) == 1
+        script = eval_calls[0][0]
+        assert "cjson.decode" in script  # Lua, not Python RMW
+        assert "redis.call('SET'" in script or 'redis.call("SET"' in script
+
+    async def test_concurrent_scrubs_disjoint_ids_no_lost_update(self):
+        """Two scrubs of distinct ids running concurrently must both succeed
+        and the final state must reflect BOTH removals. Under the old RMW
+        pattern one scrub's SET could overwrite the other's filtered list."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        initial = [
+            {"id": "a", "text": "fact a"},
+            {"id": "b", "text": "fact b"},
+            {"id": "c", "text": "fact c"},
+        ]
+        await buf.update_recent_facts("s1", initial)
+
+        import asyncio
+        results = await asyncio.gather(
+            buf.scrub_fact_from_recent("s1", "a"),
+            buf.scrub_fact_from_recent("s1", "b"),
+        )
+        assert results == [1, 1]
+        # Only "c" remains.
+        remaining = await buf.load_recent_facts("s1")
+        remaining_ids = {e["id"] for e in remaining}
+        assert remaining_ids == {"c"}
+
+    async def test_concurrent_scrubs_same_id_idempotent(self):
+        """Two scrubs of the same id: one sees removed=1, the other sees
+        removed=0. Neither corrupts the stored data."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        await buf.update_recent_facts("s1", [
+            {"id": "a", "text": "x"},
+            {"id": "b", "text": "y"},
+        ])
+
+        import asyncio
+        results = await asyncio.gather(
+            buf.scrub_fact_from_recent("s1", "a"),
+            buf.scrub_fact_from_recent("s1", "a"),
+        )
+        assert sorted(results) == [0, 1]
+        remaining = await buf.load_recent_facts("s1")
+        assert [e["id"] for e in remaining] == ["b"]
+
+    async def test_scrub_last_entry_deletes_key(self):
+        """Scrubbing the last remaining entry must DEL the key rather than
+        leaving an empty JSON object behind (cjson encodes empty tables as
+        {} not [], which would corrupt subsequent loads)."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        await buf.update_recent_facts("s1", [{"id": "only", "text": "x"}])
+        key = buf._keys.recent_facts("s1")
+        assert key in redis._kv
+        removed = await buf.scrub_fact_from_recent("s1", "only")
+        assert removed == 1
+        assert key not in redis._kv
+
+    async def test_scrub_missing_key_returns_zero(self):
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        result = await buf.scrub_fact_from_recent("s1", "nope")
+        assert result == 0
+
+    # --- 5-317: non-table branch DELs corrupt keys (defense-in-depth) ---
+
+    async def test_scrub_corrupt_json_dels_key(self):
+        """If the recent_facts key holds a non-JSON payload (corrupt write,
+        byte-order mangle, partial failure), the Lua scrub must DEL the key
+        rather than leave the bad value in place. Without DEL, every
+        subsequent scrub would re-hit the same corrupt blob until TTL expiry
+        and the extraction prompt would keep reading garbage."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        key = buf._keys.recent_facts("s1")
+        redis._kv[key] = "this-is-not-valid-json-{"
+        result = await buf.scrub_fact_from_recent("s1", "any-id")
+        assert result == 0
+        # 5-317: key must be DELed, not left in place.
+        assert key not in redis._kv
+
+    async def test_scrub_non_array_json_dels_key(self):
+        """If the recent_facts key holds a JSON object (not an array) — e.g.
+        a migration artifact or a writer that accidentally stored a dict —
+        the Lua scrub must DEL the key. Arrays are the only valid shape; any
+        other JSON top-level shape is treated as corruption and cleaned."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        key = buf._keys.recent_facts("s1")
+        redis._kv[key] = '{"not": "an array"}'
+        result = await buf.scrub_fact_from_recent("s1", "any-id")
+        assert result == 0
+        assert key not in redis._kv
+
+    async def test_scrub_corrupt_json_self_heals_before_next_update(self):
+        """After DEL on corruption, a subsequent update_recent_facts() can
+        seed clean state — the key re-appears with a valid array payload."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        key = buf._keys.recent_facts("s1")
+        redis._kv[key] = "}{not-json"
+        await buf.scrub_fact_from_recent("s1", "x")  # DELs corrupt key
+        assert key not in redis._kv
+        await buf.update_recent_facts("s1", [{"id": "fresh", "text": "t"}])
+        assert key in redis._kv
+        loaded = await buf.load_recent_facts("s1")
+        assert loaded == [{"id": "fresh", "text": "t"}]
+
+
+# ---------------------------------------------------------------------------
+# TODO 5-304 / 5-308: IngestBuffer conforms to IIngestBuffer contract.
+# The facade and turn-ingest pipeline both inject IngestBuffer — hoisting its
+# public surface into an ABC prevents silent duck-typed skew (e.g. renaming
+# scrub_fact_from_recent and breaking the facade.delete() scrub path).
+# ---------------------------------------------------------------------------
+
+
+class TestIngestBufferABCConformance:
+    def test_ingest_buffer_is_subclass_of_iingest_buffer(self):
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        assert issubclass(IngestBuffer, IIngestBuffer)
+
+    def test_iingest_buffer_declares_scrub_contract(self):
+        """5-308: scrub_fact_from_recent must be an abstract method on the ABC
+        so any future IngestBuffer implementation is forced to provide it —
+        facade.delete() relies on it to purge deleted facts from the
+        extraction-context window."""
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        scrub = IIngestBuffer.scrub_fact_from_recent
+        assert getattr(scrub, "__isabstractmethod__", False) is True
+
+    def test_iingest_buffer_is_abstract_cannot_instantiate(self):
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        with pytest.raises(TypeError):
+            IIngestBuffer()  # type: ignore[abstract]
+
+    def test_partial_impl_missing_scrub_raises_typeerror(self):
+        """A subclass that forgets scrub_fact_from_recent cannot be
+        instantiated — the ABC is load-bearing, not cosmetic."""
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+
+        class _Partial(IIngestBuffer):
+            async def add_messages(self, session_key, messages): return False
+            async def flush(self, session_key): return []
+            async def force_flush(self, session_key): return []
+            async def check_timeout_flush(self, session_key): return False
+            async def load_recent_facts(self, session_key): return []
+            async def update_recent_facts(self, session_key, new_facts, max_count=20): return None
+            # scrub_fact_from_recent deliberately omitted
+
+        with pytest.raises(TypeError):
+            _Partial()  # type: ignore[abstract]
+
+    async def test_mock_iingest_buffer_substitutes_in_facade(self):
+        """A minimal IIngestBuffer implementation can be passed as the
+        facade's ingest_buffer — the facade only depends on the ABC, not on
+        IngestBuffer concretely."""
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+        from elephantbroker.runtime.memory.facade import MemoryStoreFacade
+
+        class _StubBuffer(IIngestBuffer):
+            def __init__(self): self.scrubbed: list[tuple[str, str]] = []
+            async def add_messages(self, session_key, messages): return False
+            async def flush(self, session_key): return []
+            async def force_flush(self, session_key): return []
+            async def check_timeout_flush(self, session_key): return False
+            async def load_recent_facts(self, session_key): return []
+            async def update_recent_facts(self, session_key, new_facts, max_count=20): return None
+            async def scrub_fact_from_recent(self, session_key, fact_id):
+                self.scrubbed.append((session_key, fact_id))
+                return 1
+
+        stub = _StubBuffer()
+        facade = MemoryStoreFacade(
+            graph=MagicMock(), vector=MagicMock(), embeddings=MagicMock(),
+            trace_ledger=MagicMock(), ingest_buffer=stub,
+        )
+        assert facade._ingest_buffer is stub
 
 
 # ---------------------------------------------------------------------------

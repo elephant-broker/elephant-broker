@@ -28,6 +28,12 @@ import type {
   OCSubagentSpawnParams,
   SubagentSpawnResult,
 } from "./types.js";
+// Re-exported from the shared cross-plugin helper so the memory plugin and the
+// context plugin cannot drift: both import from `openclaw-plugins/shared`.
+// See that module for the extraction contract and the 5-102 RC-A hardening.
+import { stripOpenClawEnvelope } from "../../shared/envelope.js";
+
+export { stripOpenClawEnvelope };
 
 export interface ContextEngineOptions {
   batchSize?: number;
@@ -145,7 +151,7 @@ export class ContextEngineImpl {
       session_key: this.currentSessionKey,
       messages: params.messages || [],
       profile_name: this.profileName,
-      query: "",
+      query: stripOpenClawEnvelope(params.prompt ?? ""),
       token_budget: params.tokenBudget,
       context_window_tokens: this.contextWindowTokens,
       goal_ids: undefined,

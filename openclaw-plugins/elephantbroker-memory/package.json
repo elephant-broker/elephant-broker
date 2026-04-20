@@ -6,14 +6,14 @@
   "main": "dist/index.js",
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ]
   },
   "engines": {
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "esbuild index.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/index.js --external:@opentelemetry/* --external:openclaw",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "24.12.2",
+    "esbuild": "0.25.0",
     "typescript": "5.9.3",
     "vitest": "1.6.1"
   }

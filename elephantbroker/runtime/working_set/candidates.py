@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from elephantbroker.runtime.interfaces.retrieval import IRetrievalOrchestrator, RetrievalCandidate
 from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
+from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 from elephantbroker.schemas.working_set import WorkingSetItem
 
@@ -37,7 +38,7 @@ class CandidateGenerator:
         self._embedding_service = embedding_service
         self._procedure_candidate_config = procedure_candidate_config
         self._gateway_id = gateway_id
-        self._keys = redis_keys
+        self._keys = redis_keys or RedisKeyBuilder(gateway_id)
         self._metrics = metrics
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
 
@@ -193,7 +194,7 @@ class CandidateGenerator:
         if self._redis:
             try:
                 import json
-                key = self._keys.session_goals(session_key) if self._keys else f"eb:session_goals:{session_key}"
+                key = self._keys.session_goals(session_key)
                 raw = await self._redis.get(key)
                 if raw:
                     data = json.loads(raw)

@@ -72,6 +72,32 @@ def _build_args(**overrides):
 
 
 # ---------------------------------------------------------------------------
+# C19: WorkingSetManager keys are always gateway-scoped via RedisKeyBuilder
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayScopedKeys:
+    """After C19, WorkingSetManager always resolves Redis keys through a
+    RedisKeyBuilder — either the one handed in, or an auto-built one scoped
+    to the manager's own gateway_id. Hardcoded ``f"eb:ws_snapshot:..."``
+    fallbacks are gone, so every cache write and scan carries the
+    ``eb:{gateway_id}:`` prefix."""
+
+    def test_auto_builds_builder_when_redis_keys_not_supplied(self):
+        mgr = _make_manager(gateway_id="gw-xyz", redis_keys=None)
+        assert mgr._keys is not None
+        # Sample key confirms prefix wiring:
+        assert mgr._keys.ws_snapshot("sk", "sid") == "eb:gw-xyz:ws_snapshot:sk:sid"
+        assert mgr._keys.ws_snapshot_scan_pattern("sid") == "eb:gw-xyz:ws_snapshot:*:sid"
+
+    def test_uses_supplied_builder_unchanged(self):
+        from elephantbroker.runtime.redis_keys import RedisKeyBuilder
+        external = RedisKeyBuilder("gw-external")
+        mgr = _make_manager(gateway_id="gw-xyz", redis_keys=external)
+        assert mgr._keys is external
+
+
+# ---------------------------------------------------------------------------
 # Scoring context parallel precomputation (#526)
 # ---------------------------------------------------------------------------
 

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.runtime.working_set.session_goals import SessionGoalStore
 from elephantbroker.schemas.config import ScoringConfig
 from elephantbroker.schemas.goal import GoalState, GoalStatus
@@ -42,6 +43,42 @@ def _make_store(
 
 SESSION_KEY = "agent:main:main"
 SESSION_ID = uuid.uuid4()
+
+
+# ---------------------------------------------------------------------------
+# C19: key is always gateway-scoped via RedisKeyBuilder
+# ---------------------------------------------------------------------------
+
+
+class TestKeyBuilderRouting:
+    """After C19, _key() routes unconditionally through RedisKeyBuilder —
+    there is no hardcoded ``f"eb:..."`` fallback that bypasses the gateway
+    prefix. A SessionGoalStore constructed without an explicit builder
+    auto-builds one from its gateway_id, so every Redis key carries the
+    ``eb:{gateway_id}:`` namespace."""
+
+    async def test_set_goals_key_carries_gateway_prefix_when_builder_supplied(self):
+        redis = AsyncMock()
+        redis.setex = AsyncMock()
+        store = SessionGoalStore(
+            redis=redis,
+            gateway_id="gw-prod",
+            redis_keys=RedisKeyBuilder("gw-prod"),
+        )
+        await store.set_goals(SESSION_KEY, SESSION_ID, [make_goal_state()])
+        written_key = redis.setex.call_args[0][0]
+        assert written_key == "eb:gw-prod:session_goals:agent:main:main"
+
+    async def test_auto_builds_builder_from_gateway_id_when_not_supplied(self):
+        """If bootstrap forgets to pass redis_keys, the store still routes
+        through a RedisKeyBuilder constructed from its own gateway_id —
+        never through a hardcoded literal."""
+        redis = AsyncMock()
+        redis.setex = AsyncMock()
+        store = SessionGoalStore(redis=redis, gateway_id="gw-x")
+        await store.set_goals(SESSION_KEY, SESSION_ID, [make_goal_state()])
+        written_key = redis.setex.call_args[0][0]
+        assert written_key == "eb:gw-x:session_goals:agent:main:main"
 
 
 # ---------------------------------------------------------------------------
@@ -206,11 +243,20 @@ class TestRemoveGoal:
 
 class TestKeyPattern:
     def test_goals_use_session_key_key_pattern(self):
-        """Redis key follows eb:session_goals:{session_key} pattern (session_id excluded)."""
-        store, _ = _make_store()
+        """Redis key follows eb:{gateway_id}:session_goals:{session_key}
+        pattern (session_id excluded from the key). Since PR #5 C19 the key
+        always routes through RedisKeyBuilder, so the gateway prefix is
+        unconditional — no more hardcoded ``f"eb:session_goals:..."``
+        fallback that bypassed gateway scoping."""
+        redis = AsyncMock()
+        store = SessionGoalStore(
+            redis=redis,
+            gateway_id="gw-test",
+            redis_keys=RedisKeyBuilder("gw-test"),
+        )
         sid = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         key = store._key("agent:main:main", sid)
-        assert key == "eb:session_goals:agent:main:main"
+        assert key == "eb:gw-test:session_goals:agent:main:main"
 
 
 # ---------------------------------------------------------------------------

@@ -48,6 +48,11 @@ TRACE_EVENT_DESCRIPTIONS: dict[str, str] = {
     "handle_resolved": "Platform-qualified handle resolved to actor",
     "persistent_goal_created": "Persistent goal created with scope (GLOBAL/ORGANIZATION/TEAM/ACTOR)",
     "bootstrap_org_created": "Organization bootstrapped during first-run initialization",
+    # Phase 5 (session goal lifecycle)
+    "session_goal_created": "Session goal created — new goal tracked for the session",
+    "session_goal_updated": "Session goal updated (status/priority/target change)",
+    "session_goal_blocker_added": "Session goal blocker recorded — reason why the goal is stalled",
+    "session_goal_progress": "Session goal progress note — incremental progress recorded",
     # Phase 9
     "consolidation_started": "Consolidation (sleep) pipeline started for gateway",
     "consolidation_stage_completed": "Single consolidation stage completed (1 of 9)",

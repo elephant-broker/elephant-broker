@@ -417,3 +417,49 @@ describe("TestSessionIdentity", () => {
     expect(client.reportContextWindow).toHaveBeenCalledTimes(1);
   });
 });
+
+// --- Envelope stripping — assemble() wiring ---
+// RC-A (TD-54): OpenClaw wraps params.prompt in a sender-metadata envelope.
+// Retrieval needs the user's raw text, not the envelope. These tests assert
+// assemble() actually wires the shared stripOpenClawEnvelope helper onto
+// `query`. Pure-function behavior (regex, gate, 5-102 regression cases) lives
+// in openclaw-plugins/shared/envelope.test.ts and runs under both plugins.
+
+describe("assemble() envelope stripping", () => {
+  let client: ContextEngineClient;
+  let engine: ContextEngineImpl;
+
+  beforeEach(() => {
+    client = createMockClient();
+    engine = new ContextEngineImpl(client);
+    engine.setSessionContext("sk", "sid");
+  });
+
+  it("extracts user text from an OpenClaw envelope", async () => {
+    const envelope =
+      "Sender (untrusted metadata):\n" +
+      "```json\n" +
+      "{\"label\":\"cli\"}\n" +
+      "```\n" +
+      "\n" +
+      "[Sat 2026-04-18 15:30 UTC] what is X?";
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000, prompt: envelope });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "what is X?" }),
+    );
+  });
+
+  it("passes through plain text prompts unchanged", async () => {
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000, prompt: "what is X?" });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "what is X?" }),
+    );
+  });
+
+  it("handles empty prompt as empty query", async () => {
+    await engine.assemble({ sessionId: "sid", messages: [], tokenBudget: 8000 });
+    expect(client.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ query: "" }),
+    );
+  });
+});

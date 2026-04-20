@@ -50,10 +50,23 @@ class FactDataPoint(DataPoint):
     decision_domain: str | None = None
     archived: bool = False
     autorecall_blacklisted: bool = False
+    cognee_data_id: str | None = None
     metadata: dict[str, Any] = {"index_fields": ["text"]}
 
     @classmethod
-    def from_schema(cls, fact: FactAssertion) -> FactDataPoint:
+    def from_schema(
+        cls,
+        fact: FactAssertion,
+        *,
+        cognee_data_id: str | None = None,
+    ) -> FactDataPoint:
+        # TODO-5-307: cognee_data_id is a storage-backend identifier that does
+        # NOT live on FactAssertion. Callers that have captured an id (store
+        # after cognee.add(), update after re-ingest, canonicalize after merge)
+        # pass it explicitly; archive-style rewrites that need to preserve the
+        # existing node property pass the value fetched from the graph entity.
+        # Callers that omit it persist the node with cognee_data_id=None, which
+        # the cascade treats as "nothing to clean on the Cognee side."
         return cls(
             id=fact.id,
             text=fact.text,
@@ -78,6 +91,7 @@ class FactDataPoint(DataPoint):
             decision_domain=getattr(fact, "decision_domain", None),
             archived=getattr(fact, "archived", False),
             autorecall_blacklisted=getattr(fact, "autorecall_blacklisted", False),
+            cognee_data_id=cognee_data_id,
         )
 
     def to_schema(self) -> FactAssertion:

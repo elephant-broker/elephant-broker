@@ -7,7 +7,16 @@ from tests.scenarios.runner import register
 
 @register
 class MultiTurnMemoryScenario(Scenario):
-    """5-turn conversation: facts accumulate, search quality improves."""
+    """5-turn conversation exercising the explicit memory_search tool path.
+
+    Each turn calls ``simulate_tool_memory_search`` directly — this
+    scenario covers the on-demand memory retrieval path (tool invocation
+    from within a turn), NOT the before_agent_start auto-recall injection
+    path. Cross-session auto-recall is covered by
+    ``test_store_fact_then_auto_recall_returns_it`` in
+    ``tests/integration/runtime/test_memory_facade.py`` (TD-60 + TD-61
+    regression guard).
+    """
 
     name = "multi_turn_memory"
     required_phase = 5

@@ -375,13 +375,12 @@ git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbr
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies — use `npm ci` (NOT `npm install`).
-# `npm ci` is the lockfile-driven install: it reads package-lock.json and
-# installs EXACTLY those versions, errors out if the lockfile is missing or
-# out of sync with package.json. This is the npm equivalent of
-# `uv sync --frozen` on the DB VM.
-cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
-cd ~/.openclaw/extensions/elephantbroker-context && npm ci
+# Install dependencies + build the bundle. Both plugins use a bundle-dist
+# layout — esbuild compiles `index.ts` to `dist/index.js`, and that file is
+# what OpenClaw loads. `npm ci` is the lockfile-driven install (the npm
+# equivalent of `uv sync --frozen`); `npm run build` produces the bundle.
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci && npm run build
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci && npm run build
 ```
 
 > **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
@@ -516,14 +515,81 @@ dependency upgrade workflow.
 cd /opt/elephantbroker
 git pull origin main
 
-# Re-install npm deps from the committed lockfile (use `npm ci`, NOT
-# `npm install`, so the install is reproducible — same as the DB VM).
-cd openclaw-plugins/elephantbroker-memory && npm ci
-cd ../elephantbroker-context && npm ci
+# Re-install npm deps from the committed lockfile and rebuild the bundles.
+# `npm ci` is lockfile-driven (reproducible); `npm run build` regenerates
+# `dist/index.js`, which is what OpenClaw loads. Skipping the build leaves
+# the old bundle in place — the `git pull` changes won't take effect.
+cd openclaw-plugins/elephantbroker-memory && npm ci && npm run build
+cd ../elephantbroker-context && npm ci && npm run build
 
 # Restart gateway to reload plugins
 openclaw gateway restart
 ```
+
+## Integration test prerequisites
+
+Integration tests (`tests/integration/`, `tests/e2e/`, pipeline-marked tests,
+and the decision-domain extractor test) require live infrastructure and a
+live LLM endpoint. The one-shot entrypoint is:
+
+```bash
+bash scripts/run-integration-tests.sh
+```
+
+This script brings up ephemeral Neo4j, Qdrant, and Redis via
+`infrastructure/docker-compose.test.yml`, sets the test-only envvars, and
+runs the four pytest slices in order. **Do not invoke `pytest
+tests/integration/...` directly** — direct-pytest bypasses the script's
+environment setup and will fail with missing envvars (EB_NEO4J_URI,
+EB_EMBEDDING_API_KEY, EB_LLM_ENDPOINT, etc.) long before any assertion
+runs. The script is the contract.
+
+### External prerequisites (operator-owned, not set up by the script)
+
+1. **LiteLLM proxy (or OpenAI-compatible endpoint) reachable at
+   `http://localhost:8811/v1`** — the script's `EB_LLM_ENDPOINT` default.
+   This is **external infrastructure** — it lives outside this repo and
+   outside `docker-compose.test.yml`. Cognee's `cognify()` pipeline (entity
+   extraction, relationship extraction, triplet embedding) calls this
+   endpoint during pipeline-marked and domain-extraction tests; the
+   embedding collection also hits `EB_EMBEDDING_API_KEY` against the same
+   proxy for `openai/text-embedding-3-large`. Without a running proxy,
+   these tests surface as LiteLLM `AuthenticationError: 401` or connection
+   refused, depending on whether anything is bound to 8811.
+
+2. **The proxy must authenticate the key `EB_EMBEDDING_API_KEY`** — default
+   `sk-ofbTPUhKkRgDtKVRszsjvA` per the script. This is a dev-only value
+   meant to authenticate a local proxy; it is NOT a credential for a
+   cloud LLM provider. Operators can either (a) configure their local
+   LiteLLM to accept this value, or (b) export `EB_LLM_API_KEY` and
+   `EB_EMBEDDING_API_KEY` to whatever their proxy requires before
+   invoking the script.
+
+3. **Alternative proxies** — set `EB_LLM_ENDPOINT` / `EB_LLM_API_KEY`
+   before invoking the script to point at any compatible endpoint
+   (another LiteLLM instance on a different port, direct
+   OpenAI/Anthropic, an internal gateway). The script honors the
+   environment's existing values via `${VAR:-default}` expansion; it only
+   falls back to the localhost defaults when the caller has not set one.
+
+4. **Venv activated + deps installed BEFORE invoking the script.** The
+   script runs `source .venv/bin/activate` expecting a populated venv at
+   `.venv/`. If `.venv/` is missing or stale, first run `uv sync`
+   (supported path) or `pip install -e '.[dev]'` (fallback), then
+   re-invoke the script. The script does not create or repair the venv
+   — it consumes one.
+
+### When tests still fail after the prereqs are met
+
+- Port conflicts on 17687/17474/16333/16379 — the script detects these
+  pre-flight and refuses to proceed; see the error message for how to
+  stop the conflicting production compose stack.
+- Stale container volumes — the script runs `down -v` at both start and
+  end; a manual `docker compose -f infrastructure/docker-compose.test.yml
+  down -v` clears any leftover state.
+- Cognee async-teardown noise (pytest exit code 2 with 0 failures) — the
+  script treats exit 2 with no failures as harmless; see the header
+  comment inside the script for the reasoning.
 
 ## Known Deployment Gotchas
 

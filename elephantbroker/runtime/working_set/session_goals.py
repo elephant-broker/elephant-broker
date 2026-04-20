@@ -13,6 +13,7 @@ from redis.exceptions import WatchError
 from elephantbroker.runtime.adapters.cognee.datapoints import GoalDataPoint
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.observability import GatewayLoggerAdapter, traced
+from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.config import ScoringConfig
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
@@ -34,15 +35,12 @@ class SessionGoalStore:
         self._graph = graph
         self._dataset_name = dataset_name
         self._gateway_id = gateway_id
-        self._keys = redis_keys
+        self._keys = redis_keys or RedisKeyBuilder(gateway_id)
         self._metrics = metrics
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
 
     def _key(self, session_key: str, session_id: uuid.UUID | None = None) -> str:
-        if self._keys:
-            return self._keys.session_goals(session_key)
-        self._log.warning("RedisKeyBuilder not configured — using fallback key without gateway scoping")
-        return f"eb:session_goals:{session_key}"
+        return self._keys.session_goals(session_key)
 
     @traced
     async def get_goals(self, session_key: str, session_id: uuid.UUID) -> list[GoalState]:

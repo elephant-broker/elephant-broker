@@ -39,6 +39,9 @@ class TestCogneeDataPointStorage:
         dp = FactDataPoint.from_schema(fact)
         await add_data_points([dp])
         fact.text = "updated"
+        # TODO-5-800: re-constructs the DataPoint with the same eb_id — Cognee's
+        # add_data_points does MERGE-by-ID, so the second call is an update
+        # (same node, updated properties), not a duplicate insert.
         dp2 = FactDataPoint.from_schema(fact)
         await add_data_points([dp2])
         entity = await graph_adapter.get_entity(str(fact.id))

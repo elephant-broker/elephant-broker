@@ -74,6 +74,11 @@ class TestWorkingSetIntegration:
         assert snapshot is not None
         assert snapshot.session_id == session_id
         assert snapshot.tokens_used <= snapshot.token_budget
+        # 5 facts stored; the selector should surface at least 3. Without
+        # this lower bound the test is satisfied by a silent regression that
+        # drops all candidates (compare to test_empty_store_returns_empty
+        # which correctly asserts the zero case).
+        assert len(snapshot.items) >= 3
 
     async def test_empty_store_returns_empty_snapshot(self, container):
         """Building a working set against empty stores produces a valid snapshot."""
@@ -108,6 +113,9 @@ class TestWorkingSetIntegration:
             query="budget test",
         )
         assert snapshot.tokens_used <= snapshot.token_budget
+        # Zero items would also satisfy the budget bound — guard against a
+        # silent regression that drops every candidate before selection.
+        assert len(snapshot.items) > 0
 
     async def test_snapshot_weights_match_profile(self, container):
         """The snapshot's weights_used should reflect the resolved profile."""

@@ -108,7 +108,7 @@ class TestMemoryRoutes:
         container.memory_store.update = AsyncMock(return_value=fact)
         r = await client.patch(
             f"/memory/{fact.id}",
-            json={"updates": {"text": "updated text"}},
+            json={"text": "updated text"},
         )
         assert r.status_code == 200
         assert r.json()["text"] == "updated text"
@@ -117,9 +117,140 @@ class TestMemoryRoutes:
         container.memory_store.update = AsyncMock(side_effect=KeyError("not found"))
         r = await client.patch(
             f"/memory/{uuid.uuid4()}",
-            json={"updates": {"text": "nope"}},
+            json={"text": "nope"},
         )
         assert r.status_code == 404
+
+    # --- PR #5 TODO 5-601: PATCH /memory/{fact_id} cross-tenant security ---
+    # The PATCH route mirrors the DELETE route's gateway-ownership
+    # pre-check: the facade raises PermissionError on gateway mismatch,
+    # the route catches it and returns 403 with a structured detail body.
+    # These three tests pin the new branches (403 + gateway forwarding +
+    # 422 malformed-UUID) so a future regression on any branch is caught.
+    # The 200 success and 404 not-found branches are already covered by
+    # test_patch_updates_fact and test_patch_not_found_404 above.
+
+    async def test_patch_permission_error_returns_403(self, client, container):
+        """Cross-tenant mutation attempt: facade.update() raises
+        PermissionError (gateway mismatch) → route returns 403 with a
+        detail body matching the DELETE route shape."""
+        container.memory_store.update = AsyncMock(
+            side_effect=PermissionError(
+                "Fact abc belongs to gateway tenant-other, not tenant-local"
+            ),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"text": "attempted cross-tenant update"},
+            headers={"X-EB-Gateway-ID": "tenant-local"},
+        )
+        assert r.status_code == 403
+        assert "tenant-other" in r.json()["detail"]
+
+    async def test_patch_forwards_caller_gateway_id(self, client, container):
+        """The route threads request.state.gateway_id → facade.update()'s
+        caller_gateway_id kwarg, so the facade can distinguish owner from
+        attacker. Without this, the ownership check collapses to a no-op."""
+        captured: dict = {}
+
+        async def capture_update(fact_id, updates, *, caller_gateway_id=""):
+            captured["caller_gateway_id"] = caller_gateway_id
+            captured["fact_id"] = fact_id
+            return FactAssertion(text="updated", gateway_id=caller_gateway_id)
+
+        container.memory_store.update = AsyncMock(side_effect=capture_update)
+        fid = uuid.uuid4()
+        r = await client.patch(
+            f"/memory/{fid}",
+            json={"text": "ok"},
+            headers={"X-EB-Gateway-ID": "tenant-42"},
+        )
+        assert r.status_code == 200
+        assert captured["caller_gateway_id"] == "tenant-42"
+        assert captured["fact_id"] == fid
+
+    async def test_patch_malformed_uuid_returns_422(self, client):
+        """Malformed path param (not a UUID) must be rejected at the
+        FastAPI validation layer with 422, BEFORE the facade is called —
+        preserves the existing behaviour documented by fact_id: uuid.UUID
+        in the route signature."""
+        r = await client.patch(
+            "/memory/not-a-uuid",
+            json={"text": "anything"},
+        )
+        assert r.status_code == 422
+
+    # --- TODO-5-610: PATCH mass-assignment whitelist (extra="forbid") ---
+    # UpdateFactRequest declares an explicit whitelist of user-updatable
+    # fields. Pydantic rejects (a) internal/scoring fields like
+    # `use_count` / `freshness_score`, (b) immutable identity fields like
+    # `gateway_id`, and (c) typos/unknown keys — all with 422 at the
+    # FastAPI validation boundary, before the facade is called. This
+    # closes the mass-assignment hole where the facade setattr loop only
+    # blocked 4 fields and silently accepted everything else.
+
+    async def test_patch_whitelisted_field_allowed(self, client, container):
+        """Whitelisted user-facing field (confidence) passes validation
+        and reaches the facade. `extra="forbid"` must not reject legal
+        fields from the 11-field whitelist."""
+        captured: dict = {}
+
+        async def capture_update(fact_id, updates, *, caller_gateway_id=""):
+            captured.update(updates)
+            return FactAssertion(text="ok", confidence=0.42)
+
+        container.memory_store.update = AsyncMock(side_effect=capture_update)
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"confidence": 0.42},
+        )
+        assert r.status_code == 200
+        assert captured == {"confidence": 0.42}
+
+    async def test_patch_rejects_internal_scoring_field(self, client, container):
+        """Caller attempts to spoof `use_count` (internal scoring
+        counter) — the exact mass-assignment attack TODO-5-610 was
+        opened for. Must return 422 at the schema layer, NOT reach the
+        facade."""
+        container.memory_store.update = AsyncMock(
+            side_effect=AssertionError("facade must not be called"),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"use_count": 999},
+        )
+        assert r.status_code == 422
+        container.memory_store.update.assert_not_called()
+
+    async def test_patch_rejects_immutable_gateway_id(self, client, container):
+        """Caller attempts to rewrite `gateway_id` (tenant-isolation
+        boundary). The setattr loop blocks this defense-in-depth, but
+        the schema should reject it earlier with 422 since it's not in
+        the whitelist."""
+        container.memory_store.update = AsyncMock(
+            side_effect=AssertionError("facade must not be called"),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"gateway_id": "attacker-tenant"},
+        )
+        assert r.status_code == 422
+        container.memory_store.update.assert_not_called()
+
+    async def test_patch_rejects_unknown_field(self, client, container):
+        """Typo / unknown field (txet instead of text) must 422 rather
+        than silently no-op. Old `body: dict` + setattr `hasattr()`
+        check would drop the update without signal; the new schema
+        makes the error loud."""
+        container.memory_store.update = AsyncMock(
+            side_effect=AssertionError("facade must not be called"),
+        )
+        r = await client.patch(
+            f"/memory/{uuid.uuid4()}",
+            json={"txet": "typo"},
+        )
+        assert r.status_code == 422
+        container.memory_store.update.assert_not_called()
 
     async def test_promote_class(self, client, container):
         fact = FactAssertion(text="promoted", memory_class=MemoryClass.SEMANTIC)

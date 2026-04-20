@@ -32,6 +32,26 @@ try:
     eb_gdpr_deletes_total = Counter("eb_gdpr_deletes_total", "GDPR deletions", ["gateway_id"])
     eb_backend_health = Gauge("eb_backend_health", "Backend health 1=ok 0=down", ["gateway_id", "component"])
     eb_degraded_operations_total = Counter("eb_degraded_operations_total", "Degraded ops", ["gateway_id", "component", "operation"])
+    eb_cognee_data_id_capture_failures_total = Counter(
+        "eb_cognee_data_id_capture_failures_total",
+        "Times cognee.add() returned a shape the facade could not extract a data_id from — the fact is stored with cognee_data_id=None and the TD-50 delete cascade will skip Cognee cleanup",
+        ["gateway_id", "operation"],
+    )
+    eb_recent_facts_scrubbed_total = Counter(
+        "eb_recent_facts_scrubbed_total",
+        "recent_facts GDPR buffer scrub outcomes on delete (TF-ER-003 Tier A). status=scrubbed when the deleted fact was removed from the extraction-context window, noop when the fact was not present, failure when Redis raised.",
+        ["gateway_id", "status"],
+    )
+    eb_fact_delete_cascade_failures_total = Counter(
+        "eb_fact_delete_cascade_failures_total",
+        "TD-50 cascade step failures. step=graph|vector|cognee_data identifies which layer threw; operation=delete|update|canonicalize identifies the parent op so dashboards can split delete-path cascade failures from update-path (superseded-doc cleanup after text change, TODO-5-110) and consolidation canonicalize-path (superseded-member cleanup, TODO-5-901). The EB-layer operation continues on each failure (best-effort cascade) so a step-level counter increment is compatible with an eventually-emitted trace whose cascade_status marks that step as failed.",
+        ["gateway_id", "step", "operation"],
+    )
+    eb_memory_search_stage_failures_total = Counter(
+        "eb_memory_search_stage_failures_total",
+        "Search stage failures across memory read paths. stage label carries the failing source — for MemoryStoreFacade.search() Stage 1: semantic; for the 5-source RetrievalOrchestrator (TODO-5-508): structural|keyword|vector|graph|artifact. exception_type carries the Python exception class name. Search downgrades to partial results (still returns a list) rather than crashing; this counter makes the per-source failure visible.",
+        ["gateway_id", "stage", "exception_type"],
+    )
 
     # Phase 5 metrics
     eb_working_set_builds_total = Counter("eb_working_set_builds_total", "Working set builds", ["gateway_id", "profile_name", "status"])
@@ -233,6 +253,36 @@ def inc_ingest_gate_skip(reason: str, gateway_id: str = "") -> None:
         eb_ingest_gate_skips_total.labels(gateway_id=gateway_id, reason=reason).inc()
 
 
+def inc_cognee_capture_failure(operation: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_cognee_data_id_capture_failures_total.labels(
+            gateway_id=gateway_id, operation=operation,
+        ).inc()
+
+
+def inc_recent_facts_scrubbed(status: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_recent_facts_scrubbed_total.labels(
+            gateway_id=gateway_id, status=status,
+        ).inc()
+
+
+def inc_fact_delete_cascade_failure(
+    step: str, operation: str = "delete", gateway_id: str = "",
+) -> None:
+    if METRICS_AVAILABLE:
+        eb_fact_delete_cascade_failures_total.labels(
+            gateway_id=gateway_id, step=step, operation=operation,
+        ).inc()
+
+
+def inc_search_stage_failure(stage: str, exception_type: str, gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_memory_search_stage_failures_total.labels(
+            gateway_id=gateway_id, stage=stage, exception_type=exception_type,
+        ).inc()
+
+
 # --- Phase 5 safe helpers ---
 
 def inc_working_set_build(profile_name: str, status: str = "ok", gateway_id: str = "") -> None:
@@ -313,6 +363,22 @@ class MetricsContext:
 
     def inc_ingest_gate_skip(self, reason: str) -> None:
         inc_ingest_gate_skip(reason, gateway_id=self._gw)
+
+    def inc_cognee_capture_failure(self, operation: str) -> None:
+        inc_cognee_capture_failure(operation, gateway_id=self._gw)
+
+    def inc_recent_facts_scrubbed(self, status: str) -> None:
+        inc_recent_facts_scrubbed(status, gateway_id=self._gw)
+
+    def inc_fact_delete_cascade_failure(
+        self, step: str, operation: str = "delete",
+    ) -> None:
+        inc_fact_delete_cascade_failure(
+            step, operation=operation, gateway_id=self._gw,
+        )
+
+    def inc_search_stage_failure(self, stage: str, exception_type: str) -> None:
+        inc_search_stage_failure(stage, exception_type, gateway_id=self._gw)
 
     def inc_working_set_build(self, profile_name: str, status: str = "ok") -> None:
         inc_working_set_build(profile_name, status, gateway_id=self._gw)

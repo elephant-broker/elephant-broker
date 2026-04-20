@@ -1,5 +1,5 @@
 import { ElephantBrokerClient } from "./client.js";
-import { formatMemoryContext } from "./format.js";
+import { formatMemoryContext, stripOpenClawEnvelope } from "./format.js";
 import { createMemorySearchTool } from "./tools/memory_search.js";
 import { createMemoryGetTool } from "./tools/memory_get.js";
 import { createMemoryStoreTool } from "./tools/memory_store.js";
@@ -114,7 +114,7 @@ export function register(api: PluginAPI) {
       client.setActorId(actorId);
     }
 
-    const query = hookEvent.prompt || "";
+    const query = stripOpenClawEnvelope(hookEvent.prompt ?? "");
     if (!query) return {};
 
     console.info(`[EB] Hook before_agent_start: querying memories for session ${currentSessionKey}`);
@@ -131,7 +131,14 @@ export function register(api: PluginAPI) {
       if (results.length > 0) {
         const contextStr = formatMemoryContext(results);
         console.info(`[EB] Auto-recall: injecting ${results.length} memories into context`);
-        return { prependContext: contextStr };
+        // Slot: `prependSystemContext` (NOT `prependContext`). TF-ER-001 BUG-1 / TODO-5-212:
+        // Phase 6 AD-4 assigned `prependContext` to the context plugin's Surface B
+        // working-set overlay (per-turn assembled items). The memory plugin's
+        // auto-recall XML block is cross-turn background ("what we already know
+        // about this agent/user") and belongs in the system-context slot.
+        // Writing to `prependContext` here caused both plugins to land in the same
+        // OpenClaw merge slot on every turn. See local/KNOWN-BUGS.md §BUG-1.
+        return { prependSystemContext: contextStr };
       }
     } catch (err) {
       console.error(`[EB] Error: before_agent_start failed: ${err}`);
@@ -210,6 +217,6 @@ export function register(api: PluginAPI) {
   });
 }
 
-export { ElephantBrokerClient } from "./client.js";
+export { ElephantBrokerClient, HttpStatusError } from "./client.js";
 export { formatMemoryContext } from "./format.js";
 export type * from "./types.js";
