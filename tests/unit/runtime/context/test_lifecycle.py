@@ -1807,6 +1807,174 @@ class TestComputeRunningJaccard:
         assert score == 0.0
 
 
+class TestScannerCalibration:
+    """J-1: validate successful-use scanner threshold calibration + source_type widening.
+
+    Pre-calibration (DIAG-I1 verdict): the scanner returned method="ignored" on 21/21
+    candidates in a live test where the agent quoted stored facts verbatim. Two root
+    causes were identified:
+
+    - H-alt-2: S1/Jaccard/use_confidence gates were too strict (0.4 / 0.3 / 0.3).
+      A response that quoted a single canonical token (e.g., "TimescaleDB") out of a
+      multi-phrase fact could never clear 0.4 on S1. Lowered to 0.15 across the board
+      (S2 tool_correlation stays at 0.3 — different signal, different noise floor).
+
+    - H-alt-4: the `source_type == "fact"` guards at the assemble-time last_used_at
+      touch and in `_track_successful_use` excluded retrieval-sourced facts.
+      `WorkingSetItem.source_type` carries the retrieval path ("vector", "keyword",
+      "graph", "structural") for items discovered via Phase 4 retrieval — not the
+      DataPoint type. Widened to `FACT_SOURCE_TYPES` frozenset.
+    """
+
+    def test_s1_direct_quote_fires_at_lowered_threshold(self):
+        """S1 registers a single-phrase hit (ratio ~0.2) that would've been ignored at 0.4.
+
+        Pre-calibration, a fact with 5 extracted phrases whose response only contained
+        one matching bigram produced ratio=0.2 → method="ignored". Post-calibration,
+        the same input produces method="quote" with confidence=0.2.
+        """
+        lc = _make_lifecycle()
+        # text yields 5 phrases: (postgres timescaledb), (timescaledb compression),
+        # (compression hypertables), (postgres timescaledb compression),
+        # (timescaledb compression hypertables)
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+        )
+        msgs = [
+            AgentMessage(
+                role="assistant",
+                content="postgres timescaledb is the right answer here",
+            ),
+        ]
+        is_quote, confidence = lc._detect_direct_quote(item, msgs, 0)
+        assert is_quote is True, (
+            "S1 should register a single canonical-token quote post-calibration "
+            "(ratio 0.2 > new threshold 0.15)"
+        )
+        # Sanity: we're deliberately in the band the calibration unlocked.
+        assert 0.15 < confidence < 0.4, (
+            f"confidence={confidence} — expected in the (0.15, 0.4) band that "
+            f"the old 0.4 threshold used to reject"
+        )
+
+    async def test_vector_source_type_triggers_successful_use_update(self):
+        """Retrieval-sourced fact (source_type='vector') fires successful_use_count
+        increment after a matching response — validates FACT_SOURCE_TYPES widening.
+
+        Pre-widening, the `item.source_type == "fact"` guard at L1409 skipped this
+        item entirely regardless of scanner verdict, so successful_use_count stayed
+        at 0 even when the response quoted the fact verbatim.
+        """
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="vector",  # J-1: retrieval path, not literal "fact"
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(
+                    role="assistant",
+                    content=(
+                        "postgres timescaledb is the right answer — "
+                        "it handles hypertables natively."
+                    ),
+                ),
+            ],
+            pre_prompt_message_count=0,
+        )
+        await lc.after_turn(params)
+
+        # Extract any memory_store.update call carrying successful_use_count.
+        # Without J-1 widening this list is empty: the `== "fact"` guard skips the
+        # whole branch for source_type="vector".
+        success_updates = []
+        for c in memory_store.update.call_args_list:
+            if len(c.args) >= 2 and isinstance(c.args[1], dict):
+                if "successful_use_count" in c.args[1]:
+                    success_updates.append(c.args[1])
+        assert len(success_updates) >= 1, (
+            "Expected successful_use_count increment for source_type='vector' fact. "
+            "If this fails, J-1 source_type widening (FACT_SOURCE_TYPES) regressed."
+        )
+        assert success_updates[0]["successful_use_count"] == 1
+
+    async def test_unrelated_fact_still_ignored(self):
+        """Calibration must not cause false positives: a fact with no token overlap
+        with the response still yields method='ignored' and does NOT increment
+        successful_use_count (just last_used_at / use_count).
+        """
+        item = make_working_set_item(
+            text="redis sentinel failover cluster configuration",
+            source_type="vector",
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(
+                    role="assistant",
+                    content="postgres schemas and database connection pooling.",
+                ),
+            ],
+            pre_prompt_message_count=0,
+        )
+        await lc.after_turn(params)
+
+        for c in memory_store.update.call_args_list:
+            if len(c.args) >= 2 and isinstance(c.args[1], dict):
+                assert "successful_use_count" not in c.args[1], (
+                    f"Unrelated fact should not trigger successful_use_count "
+                    f"increment, got update payload: {c.args[1]}"
+                )
+
+
 # ======================================================================
 # Message transformation (AD-4)
 # ======================================================================

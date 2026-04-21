@@ -53,6 +53,14 @@ PROGRESS_SIGNALS: dict[str, list[str]] = {
     "progressing": [r"(?:working on|started|making progress|almost|nearly)"],
 }
 
+# J-1: source_type values that represent a fact-backed item.
+# RetrievalCandidate.source carries the retrieval PATH (structural/keyword/vector/graph),
+# not the DataPoint type — so retrieval-sourced facts arrive as "vector", "keyword", etc.
+# Any site that branches on "is this a fact" MUST use this set, not `== "fact"` alone.
+FACT_SOURCE_TYPES: frozenset[str] = frozenset({
+    "fact", "structural", "keyword", "vector", "graph",
+})
+
 
 class ContextLifecycle:
     """Central coordinator for the context engine lifecycle."""
@@ -616,10 +624,12 @@ class ContextLifecycle:
                     session_ctx.fact_last_injection_turn[item_id] = session_ctx.turn_count
 
         # Touch last_used_at on injected facts (Phase 9 forward-compat)
+        # J-1: widen source_type check — retrieval-sourced facts carry the retrieval
+        # path ("vector"/"keyword"/"graph"/"structural"), not literal "fact".
         if snapshot and self._memory_store:
             now_iso = datetime.now(UTC).isoformat()
             for item in snapshot.items:
-                if item.source_type == "fact":
+                if item.source_type in FACT_SOURCE_TYPES:
                     try:
                         await self._memory_store.update(item.source_id, {"last_used_at": now_iso})
                     except Exception:
@@ -936,7 +946,9 @@ class ContextLifecycle:
 
         # Emit injection effectiveness metrics (AD-26/T1-1)
         if snapshot and signals_by_item and self._metrics:
-            referenced = sum(1 for s in signals_by_item.values() if s.get("confidence", 0) > 0.3)
+            # J-1: aligns with use_confidence gate at L1412 for metric consistency —
+            # metric counts should track actual fact-update behavior, not a stricter subset.
+            referenced = sum(1 for s in signals_by_item.values() if s.get("confidence", 0) > 0.15)
             ignored = sum(1 for s in signals_by_item.values() if s.get("method") == "ignored")
             for item in snapshot.items:
                 item_id = str(item.id)
@@ -944,7 +956,7 @@ class ContextLifecycle:
                 cat = getattr(item, "category", "general")
                 mc = getattr(item, "memory_class", "episodic") if hasattr(item, "memory_class") else "episodic"
                 st = item.source_type or "fact"
-                if sig.get("confidence", 0) > 0.3:
+                if sig.get("confidence", 0) > 0.15:
                     self._metrics.inc_injection_referenced(cat, mc, st)
                 elif sig.get("method") == "ignored":
                     self._metrics.inc_injection_ignored(cat, mc, st)
@@ -1378,8 +1390,11 @@ class ContextLifecycle:
                 signals.append(("tool_correlation", tool_conf))
 
             # Running Jaccard
+            # J-1: threshold lowered from 0.3 → 0.15 for calibration (H-alt-2).
+            # Jaccard at 0.3 required near-complete token overlap to register; 0.15
+            # captures paraphrased references while still rejecting coincidental matches.
             jaccard_score = self._compute_running_jaccard(item, response_messages, injection_turn)
-            if jaccard_score > 0.3:
+            if jaccard_score > 0.15:
                 signals.append(("jaccard", jaccard_score))
                 if self._metrics:
                     self._metrics.observe_successful_use_jaccard(jaccard_score)
@@ -1396,7 +1411,7 @@ class ContextLifecycle:
                 "[EB-DIAG-I1] verdict eb_id=%s signals=%r use_confidence=%.3f method=%s "
                 "will_update_success=%s",
                 getattr(item, "eb_id", "?"), signals, use_confidence, method,
-                use_confidence > 0.3,
+                use_confidence > 0.15,
             )
             signal_entry: dict = {"confidence": use_confidence, "method": method}
             # S6: Track ignored_turns for Phase 9 weight tuning
@@ -1406,10 +1421,12 @@ class ContextLifecycle:
             signals_by_item[item_id] = signal_entry
 
             # Update fact
-            if self._memory_store and item.source_type == "fact":
+            # J-1: widen source_type check (see FACT_SOURCE_TYPES) and lower
+            # use_confidence gate 0.3 → 0.15 for scanner calibration (H-alt-2/H-alt-4).
+            if self._memory_store and item.source_type in FACT_SOURCE_TYPES:
                 now_iso = datetime.now(UTC).isoformat()
                 try:
-                    if use_confidence > 0.3:
+                    if use_confidence > 0.15:
                         new_suc = (item.successful_use_count or 0) + 1
                         new_use = (item.use_count or 0) + 1
                         await self._memory_store.update(item.source_id, {
@@ -1456,9 +1473,15 @@ class ContextLifecycle:
         ratio = matches / len(phrases) if phrases else 0.0
         self._log.info(
             "[EB-DIAG-I1] s1_match eb_id=%s ratio=%.3f matches=%d phrases=%r hit=%s",
-            getattr(item, "eb_id", "?"), ratio, matches, phrases, ratio > 0.4,
+            getattr(item, "eb_id", "?"), ratio, matches, phrases, ratio > 0.15,
         )
-        return ratio > 0.4, min(ratio, 1.0)
+        # J-1: S1 direct-quote threshold lowered from 0.4 → 0.15 for calibration (H-alt-2).
+        # At 0.4 the scanner required ~40% of a fact's extracted key-phrases to appear
+        # verbatim in the response to register — too strict given that agents often
+        # quote a single canonical token (e.g., TimescaleDB) rather than a phrase set.
+        # 0.15 registers a single-phrase hit on a ~7-phrase fact while still requiring
+        # at least one real match.
+        return ratio > 0.15, min(ratio, 1.0)
 
     def _detect_tool_correlation(self, item, messages) -> tuple[bool, float]:
         """S2: Check keyword overlap with tool message args, with alias expansion."""
