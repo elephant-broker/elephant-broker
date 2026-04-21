@@ -1445,24 +1445,8 @@ class ContextLifecycle:
             # retrieval path (structural/keyword/vector/graph) for fact items,
             # None for non-retrieval items.
             # J-1 heritage: use_confidence gate 0.3 → 0.15 (H-alt-2/H-alt-4).
-            # T-2: gate + S1/S3 thresholds per-profile. DIAG-M1 probe fires
-            # for ALL item types so the gate fields expose resolved values
-            # end-to-end.
-            self._log.info(
-                "[EB-DIAG-M1] update_branch eb_id=%s source_type=%s retrieval_source=%s "
-                "is_fact_semantic=%s confidence=%.3f use_confidence_gate=%.3f "
-                "s1_gate=%.3f s3_jaccard_gate=%.3f method=%s turn=%d",
-                getattr(item, "id", "?"),
-                item.source_type,
-                getattr(item, "retrieval_source", None),
-                item.source_type == "fact",  # T-3: clean DataPoint-type semantic
-                use_confidence,
-                t.use_confidence_gate,
-                t.s1_direct_quote_ratio,
-                t.s3_jaccard_score,
-                method,
-                session_ctx.turn_count,
-            )
+            # T-2: gate + S1/S3 thresholds resolved per-profile via the
+            # SuccessfulUseThresholds resolver.
             if self._memory_store and item.source_type == "fact":
                 now_iso = datetime.now(UTC).isoformat()
                 try:
@@ -1515,23 +1499,15 @@ class ContextLifecycle:
 
         combined = " ".join(content_as_text(m).lower() for m in post_injection)
         matches = sum(1 for p in phrases if p in combined)
-        import re as _diag_re  # local import so the module import hygiene stays clean
-        _diag_has_punct = any(
-            bool(_diag_re.search(r'[.,:;!?()"\']', p)) for p in phrases[:10]
-        )
-        self._log.info(
-            "[EB-DIAG-M1] s1_probe eb_id=%s phrases=%d matches=%d "
-            "phrases_sample=%r phrases_have_punct=%s",
-            getattr(item, "id", "?"), len(phrases), matches,
-            phrases[:5], _diag_has_punct,
-        )
         ratio = matches / len(phrases) if phrases else 0.0
         # J-1: S1 direct-quote threshold calibrated from 0.4 → 0.15 (H-alt-2).
         # At 0.4 the scanner required ~40% of a fact's extracted key-phrases to appear
         # verbatim in the response to register — too strict given that agents often
         # quote a single canonical token (e.g., TimescaleDB) rather than a phrase set.
         # 0.15 registers a single-phrase hit on a ~7-phrase fact while still requiring
-        # at least one real match. T-2: now per-profile (research 0.10 / PA 0.12).
+        # at least one real match. T-2: per-profile resolvable via
+        # ``ProfilePolicy.successful_use_thresholds`` (defaults to 0.15 across all
+        # presets after the Option C reset).
         return ratio > t.s1_direct_quote_ratio, min(ratio, 1.0)
 
     def _detect_tool_correlation(
