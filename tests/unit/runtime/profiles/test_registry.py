@@ -215,43 +215,26 @@ class TestEffectiveSuccessfulUseThresholds:
 
 
 class TestPresetSuccessfulUseThresholds:
-    """T-2: the 5 named profile presets carry the expected per-profile scanner
-    threshold overrides (or None to signal module defaults). Locks in the
-    M-1 design table against accidental preset drift.
+    """T-2 (Option C reset): all 5 named profile presets leave
+    successful_use_thresholds unset so module defaults (0.15/0.3/0.15/0.15/3)
+    apply uniformly via the resolver. Regression guard against accidental
+    re-introduction of speculative per-profile overrides — those were removed
+    after Q-2 live verification showed the tightened personal_assistant gate
+    (0.20) blocked realistic signal strengths (0.14-0.16 confidence).
+
+    The ProfilePolicy.successful_use_thresholds field and
+    ProfileRegistry.effective_successful_use_thresholds resolver remain
+    available for future per-profile tuning once telemetry justifies it.
     """
 
     async def test_preset_thresholds_match_design(self, trace):
-        from elephantbroker.schemas.profile import SuccessfulUseThresholds
-
         reg = ProfileRegistry(trace)
 
-        # base/coding/worker: leave successful_use_thresholds unset — module
+        # All 5 named presets: leave successful_use_thresholds unset — module
         # defaults (0.15/0.3/0.15/0.15/3) apply implicitly via the resolver.
-        for name in ("coding", "worker"):
+        for name in ("coding", "research", "managerial", "worker", "personal_assistant"):
             p = await reg.resolve_profile(name)
             assert p.successful_use_thresholds is None, (
                 f"{name} profile should leave thresholds None (implicit defaults); "
                 f"got {p.successful_use_thresholds}"
             )
-
-        # research: loose detection, default update-gate
-        research = await reg.resolve_profile("research")
-        assert research.successful_use_thresholds == SuccessfulUseThresholds(
-            s1_direct_quote_ratio=0.10,
-            s2_tool_correlation_overlap=0.25,
-            s3_jaccard_score=0.10,
-        )
-
-        # managerial: default detection, tighter update-gate (0.25)
-        managerial = await reg.resolve_profile("managerial")
-        assert managerial.successful_use_thresholds == SuccessfulUseThresholds(
-            use_confidence_gate=0.25,
-        )
-
-        # personal_assistant: mild loosening (S1/S3) + tight gate (0.20)
-        pa = await reg.resolve_profile("personal_assistant")
-        assert pa.successful_use_thresholds == SuccessfulUseThresholds(
-            s1_direct_quote_ratio=0.12,
-            s3_jaccard_score=0.12,
-            use_confidence_gate=0.20,
-        )

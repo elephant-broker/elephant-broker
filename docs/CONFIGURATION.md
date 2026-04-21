@@ -8065,7 +8065,37 @@ Previous passes documented WHAT parameters exist. This pass documents the VALUE 
 
 These names historically overlap because they were added at different phases, but they control independent pipeline stages. See `local/FIX-PLAN-Pre-Prompt-Ingest-Pipeline.md` "Naming overlap" for the rationale on why the rename is deferred.
 
-### 2.4 `llm.extraction_max_input_tokens`
+### 2.4 Successful-use scanner thresholds (T-2)
+
+The ContextLifecycle successful-use scanner (`_track_successful_use`) scores each injected working-set item against the agent's response-delta messages. It uses 3 scoring methods (S1 direct-quote, S2 tool-correlation, S3 jaccard overlap) plus an aggregation gate. All thresholds are configurable **per-profile** via `ProfilePolicy.successful_use_thresholds`, falling back to module-level defaults when unset.
+
+| Field | Default | Range | Controls |
+|-------|---------|-------|----------|
+| `s1_direct_quote_ratio` | 0.15 | [0.0, 1.0] | Min ratio of fact-phrase substring matches in the assistant response for S1 to fire. Lower = more lenient quote detection. |
+| `s2_tool_correlation_overlap` | 0.3 | [0.0, 1.0] | Min overlap between fact tokens and tool-message tokens for S2 to fire. |
+| `s3_jaccard_score` | 0.15 | [0.0, 1.0] | Min Jaccard overlap between fact tokens and response tokens for S3 to fire. |
+| `use_confidence_gate` | 0.15 | [0.0, 1.0] | Aggregated-signal threshold above which `FactDataPoint.successful_use_count` is incremented. Signals below this threshold still update `use_count` and `last_used_at` silently. |
+| `s6_ignored_turns_floor` | 3 | ≥1 | Turns-since-injection floor after which an ignored fact gets the "ignored_turns" tag for Phase 9 decay tuning. |
+
+All 5 built-in presets (base/coding/research/managerial/worker/personal_assistant) currently inherit the defaults above. Operators can override per-profile by adding a `successful_use_thresholds` block to their profile YAML:
+
+```yaml
+coding:
+  successful_use_thresholds:
+    s1_direct_quote_ratio: 0.20  # tighter quote detection
+    use_confidence_gate: 0.25    # only count very high-confidence uses
+```
+
+**Tuning guidance:**
+- Lower thresholds = more permissive = higher successful_use_count recall (risk: noise from weak matches).
+- Higher thresholds = stricter = higher precision (risk: losing legitimate usage signals from paraphrased responses).
+- Empirical observation (as of 2026-04-21): realistic agent paraphrases produce S1 ratios around 0.15–0.17 and Jaccard scores around 0.14–0.18. Setting `use_confidence_gate` above ~0.17 will cause most realistic successful uses to be tracked only via `use_count` (silent), not `successful_use_count` (Phase 9 strengthening input).
+
+**Distinct from `successful_use.*` (global config):** The per-profile `successful_use_thresholds` documented here gate the always-on per-turn scanner in `after_turn()`. The separate global `successful_use.*` YAML section (opt-in, default disabled) configures the RT-1 LLM-based batch evaluation pipeline (`SuccessfulUseReasoningTask`). Different mechanisms, different cost profiles — the per-profile thresholds are cheap and always active; the global RT-1 feature is expensive (LLM calls per turn) and opt-in.
+
+See `elephantbroker/schemas/profile.py::SuccessfulUseThresholds` for the schema definition.
+
+### 2.5 `llm.extraction_max_input_tokens`
 
 **Schema constraint:** `Field(default=4000, ge=100)`. Env: `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS`. Controls the user prompt truncation before sending to LLM. Truncation is by character ratio: if `prompt_tokens > max_input_tokens`, the prompt is sliced to `int(len(prompt) * max_input_tokens / prompt_tokens)`.
 

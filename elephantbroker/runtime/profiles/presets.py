@@ -18,7 +18,6 @@ from elephantbroker.schemas.profile import (
     IsolationScope,
     ProfilePolicy,
     RetrievalPolicy,
-    SuccessfulUseThresholds,
     VerificationPolicy,
 )
 from elephantbroker.schemas.working_set import ScoringWeights
@@ -203,15 +202,10 @@ RESEARCH_PROFILE = ProfilePolicy(
         goal_injection_cadence="smart", goal_reminder_interval=10,
         keep_last_n_tool_outputs=0, replace_tool_outputs=False,
     ),
-    # T-2: research loosens S1/S2/S3 detection thresholds (signal quality is
-    # noisier in exploratory work; we'd rather record weak use than miss it).
-    # use_confidence_gate stays at the base-default 0.15 — we don't want
-    # weak signals to actually update successful_use_count without evidence.
-    successful_use_thresholds=SuccessfulUseThresholds(
-        s1_direct_quote_ratio=0.10,
-        s2_tool_correlation_overlap=0.25,
-        s3_jaccard_score=0.10,
-    ),
+    # T-2: successful_use_thresholds intentionally left unset — Option C reset
+    # means all 5 presets inherit module defaults (0.15/0.3/0.15/0.15/3).
+    # Per-profile differentiation was removed after Q-2 live verification
+    # showed speculative overrides blocked realistic signal strengths.
 )
 
 # ---------------------------------------------------------------------------
@@ -284,12 +278,10 @@ MANAGERIAL_PROFILE = ProfilePolicy(
         goal_injection_cadence="always",
         keep_last_n_tool_outputs=1, replace_tool_outputs=True,
     ),
-    # T-2: managerial keeps scanner detection at base defaults but raises
-    # the use_confidence gate — decisions/delegations/blockers should only
-    # strengthen a fact's successful_use_count with high-confidence evidence.
-    successful_use_thresholds=SuccessfulUseThresholds(
-        use_confidence_gate=0.25,
-    ),
+    # T-2: successful_use_thresholds intentionally left unset — Option C reset
+    # means all 5 presets inherit module defaults (0.15/0.3/0.15/0.15/3).
+    # Per-profile differentiation was removed after Q-2 live verification
+    # showed speculative overrides blocked realistic signal strengths.
 )
 
 # ---------------------------------------------------------------------------
@@ -438,15 +430,10 @@ PERSONAL_ASSISTANT_PROFILE = ProfilePolicy(
         keep_last_n_tool_outputs=1, replace_tool_outputs=True,
         system_context_blockers=False,
     ),
-    # T-2: personal_assistant loosens S1/S3 slightly (personal reminders +
-    # preferences use varied phrasing across turns) but raises the
-    # use_confidence gate (0.20) — strengthen only on clearer signals,
-    # since preferences have long TTL and shouldn't drift from noise.
-    successful_use_thresholds=SuccessfulUseThresholds(
-        s1_direct_quote_ratio=0.12,
-        s3_jaccard_score=0.12,
-        use_confidence_gate=0.20,
-    ),
+    # T-2: successful_use_thresholds intentionally left unset — Option C reset
+    # means all 5 presets inherit module defaults (0.15/0.3/0.15/0.15/3).
+    # Per-profile differentiation was removed after Q-2 live verification
+    # showed speculative overrides blocked realistic signal strengths.
 )
 
 # ---------------------------------------------------------------------------
