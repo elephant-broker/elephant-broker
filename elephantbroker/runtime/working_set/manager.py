@@ -151,10 +151,19 @@ class WorkingSetManager(IWorkingSetManager):
                     item.evidence_ref_ids = [uuid.UUID(eid) for eid in eids if len(eid) == 36]
 
         # Metrics: observe candidate counts by source type
+        # T-3 (Option C): prefer retrieval_source when present
+        # (structural/keyword/vector/graph) so dashboards keep seeing
+        # per-retrieval-path breakdowns, fall back to the new DataPoint-type
+        # semantic source_type (fact/artifact/goal/…) for non-retrieval
+        # items. Preserves cardinality and dashboard compatibility.
         if self._metrics:
             source_counts: dict[str, int] = {}
             for item in all_items:
-                st = getattr(item, "source_type", "unknown")
+                st = (
+                    getattr(item, "retrieval_source", None)
+                    or getattr(item, "source_type", None)
+                    or "unknown"
+                )
                 source_counts[st] = source_counts.get(st, 0) + 1
             for st, cnt in source_counts.items():
                 self._metrics.observe_candidates(st, cnt)

@@ -54,14 +54,6 @@ PROGRESS_SIGNALS: dict[str, list[str]] = {
     "progressing": [r"(?:working on|started|making progress|almost|nearly)"],
 }
 
-# J-1: source_type values that represent a fact-backed item.
-# RetrievalCandidate.source carries the retrieval PATH (structural/keyword/vector/graph),
-# not the DataPoint type — so retrieval-sourced facts arrive as "vector", "keyword", etc.
-# Any site that branches on "is this a fact" MUST use this set, not `== "fact"` alone.
-FACT_SOURCE_TYPES: frozenset[str] = frozenset({
-    "fact", "structural", "keyword", "vector", "graph",
-})
-
 
 class ContextLifecycle:
     """Central coordinator for the context engine lifecycle."""
@@ -620,12 +612,14 @@ class ContextLifecycle:
                     session_ctx.fact_last_injection_turn[item_id] = session_ctx.turn_count
 
         # Touch last_used_at on injected facts (Phase 9 forward-compat)
-        # J-1: widen source_type check — retrieval-sourced facts carry the retrieval
-        # path ("vector"/"keyword"/"graph"/"structural"), not literal "fact".
+        # T-3: source_type is now clean DataPoint-type semantic; retrieval-
+        # sourced facts carry source_type="fact" with retrieval_source stamped
+        # on the separate field. Simple `== "fact"` check replaces the prior
+        # `FACT_SOURCE_TYPES` retrieval-path union.
         if snapshot and self._memory_store:
             now_iso = datetime.now(UTC).isoformat()
             for item in snapshot.items:
-                if item.source_type in FACT_SOURCE_TYPES:
+                if item.source_type == "fact":
                     try:
                         await self._memory_store.update(item.source_id, {"last_used_at": now_iso})
                     except Exception:
@@ -965,7 +959,17 @@ class ContextLifecycle:
                 sig = signals_by_item.get(item_id, {})
                 cat = getattr(item, "category", "general")
                 mc = getattr(item, "memory_class", "episodic") if hasattr(item, "memory_class") else "episodic"
-                st = item.source_type or "fact"
+                # T-3 (Option C): stamp retrieval_source when present
+                # (structural/keyword/vector/graph) so existing dashboards keep
+                # seeing per-retrieval-path breakdowns; fall back to the new
+                # DataPoint-type semantic source_type (fact/artifact/goal/…)
+                # for non-retrieval items. Preserves metric label cardinality
+                # and dashboard compatibility.
+                st = (
+                    getattr(item, "retrieval_source", None)
+                    or item.source_type
+                    or "fact"
+                )
                 if sig.get("confidence", 0) > thresholds.use_confidence_gate:
                     self._metrics.inc_injection_referenced(cat, mc, st)
                 elif sig.get("method") == "ignored":
@@ -1436,19 +1440,22 @@ class ContextLifecycle:
             signals_by_item[item_id] = signal_entry
 
             # Update fact
-            # J-1: widen source_type check (see FACT_SOURCE_TYPES) and calibrate
-            # use_confidence gate 0.3 → 0.15 (H-alt-2/H-alt-4).
-            # T-2: gate + S1/S3 thresholds now per-profile. DIAG-M1 probe
-            # fires for ALL item types (fact + goal + procedure) so the
-            # gate fields expose the resolved values end-to-end.
+            # T-3: source_type is now the DataPoint-type semantic; the gate
+            # fires for fact-class items only. retrieval_source exposes the
+            # retrieval path (structural/keyword/vector/graph) for fact items,
+            # None for non-retrieval items.
+            # J-1 heritage: use_confidence gate 0.3 → 0.15 (H-alt-2/H-alt-4).
+            # T-2: gate + S1/S3 thresholds per-profile. DIAG-M1 probe fires
+            # for ALL item types so the gate fields expose resolved values
+            # end-to-end.
             self._log.info(
                 "[EB-DIAG-M1] update_branch eb_id=%s source_type=%s retrieval_source=%s "
                 "is_fact_semantic=%s confidence=%.3f use_confidence_gate=%.3f "
                 "s1_gate=%.3f s3_jaccard_gate=%.3f method=%s turn=%d",
                 getattr(item, "id", "?"),
                 item.source_type,
-                getattr(item, "retrieval_source", None),  # None pre-T-3, populated post-T-3
-                item.source_type in FACT_SOURCE_TYPES,    # true if widening catches it
+                getattr(item, "retrieval_source", None),
+                item.source_type == "fact",  # T-3: clean DataPoint-type semantic
                 use_confidence,
                 t.use_confidence_gate,
                 t.s1_direct_quote_ratio,
@@ -1456,7 +1463,7 @@ class ContextLifecycle:
                 method,
                 session_ctx.turn_count,
             )
-            if self._memory_store and item.source_type in FACT_SOURCE_TYPES:
+            if self._memory_store and item.source_type == "fact":
                 now_iso = datetime.now(UTC).isoformat()
                 try:
                     if use_confidence > t.use_confidence_gate:

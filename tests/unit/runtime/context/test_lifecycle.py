@@ -1819,7 +1819,7 @@ class TestComputeRunningJaccard:
 
 
 class TestScannerCalibration:
-    """J-1: validate successful-use scanner threshold calibration + source_type widening.
+    """J-1: validate successful-use scanner threshold calibration.
 
     Pre-calibration (DIAG-I1 verdict): the scanner returned method="ignored" on 21/21
     candidates in a live test where the agent quoted stored facts verbatim. Two root
@@ -1830,11 +1830,17 @@ class TestScannerCalibration:
       multi-phrase fact could never clear 0.4 on S1. Lowered to 0.15 across the board
       (S2 tool_correlation stays at 0.3 — different signal, different noise floor).
 
-    - H-alt-4: the `source_type == "fact"` guards at the assemble-time last_used_at
-      touch and in `_track_successful_use` excluded retrieval-sourced facts.
-      `WorkingSetItem.source_type` carries the retrieval path ("vector", "keyword",
-      "graph", "structural") for items discovered via Phase 4 retrieval — not the
-      DataPoint type. Widened to `FACT_SOURCE_TYPES` frozenset.
+    - H-alt-4 heritage (now superseded by T-3): the ``source_type == "fact"``
+      guards at the assemble-time ``last_used_at`` touch and in
+      ``_track_successful_use`` originally excluded retrieval-sourced facts
+      because ``WorkingSetItem.source_type`` overloaded two semantics — both
+      DataPoint-type ("fact"/"artifact"/"goal"/…) AND retrieval path
+      ("vector"/"keyword"/"graph"/"structural"). J-1 shipped a tactical
+      widening via ``FACT_SOURCE_TYPES`` frozenset. T-3 superseded that by
+      splitting the two concerns into distinct fields: ``source_type`` now
+      carries only the DataPoint-type semantic, ``retrieval_source`` the
+      retrieval path. Fact-class items (regardless of retrieval path)
+      correctly hit the ``== "fact"`` check today.
     """
 
     def test_s1_direct_quote_fires_at_lowered_threshold(self):
@@ -1908,16 +1914,21 @@ class TestScannerCalibration:
         )
 
     async def test_vector_source_type_triggers_successful_use_update(self):
-        """Retrieval-sourced fact (source_type='vector') fires successful_use_count
-        increment after a matching response — validates FACT_SOURCE_TYPES widening.
+        """Retrieval-sourced fact fires successful_use_count increment after a
+        matching response — validates the T-3 source_type split.
 
-        Pre-widening, the `item.source_type == "fact"` guard at L1409 skipped this
-        item entirely regardless of scanner verdict, so successful_use_count stayed
-        at 0 even when the response quoted the fact verbatim.
+        Pre-J-1: ``item.source_type == "fact"`` guard skipped retrieval items
+        whose ``source_type`` carried the retrieval path ("vector", etc.).
+        J-1 widened via ``FACT_SOURCE_TYPES`` frozenset as a tactical fix.
+        T-3 split the two concerns — fact-class items now carry
+        ``source_type="fact"`` with ``retrieval_source`` on a separate
+        field — so the clean ``== "fact"`` check correctly covers all
+        fact-class items regardless of retrieval path.
         """
         item = make_working_set_item(
             text="postgres timescaledb compression hypertables",
-            source_type="vector",  # J-1: retrieval path, not literal "fact"
+            source_type="fact",           # T-3: DataPoint-type semantic
+            retrieval_source="vector",    # T-3: retrieval-path provenance
             successful_use_count=0,
             use_count=0,
         )
@@ -1959,16 +1970,22 @@ class TestScannerCalibration:
         await lc.after_turn(params)
 
         # Extract any memory_store.update call carrying successful_use_count.
-        # Without J-1 widening this list is empty: the `== "fact"` guard skips the
-        # whole branch for source_type="vector".
+        # T-3: fact-class items (source_type="fact") with retrieval_source
+        # stamped produce successful_use_count increments when the response
+        # quotes their text. Pre-T-3, the `FACT_SOURCE_TYPES` frozenset
+        # widened this check to cover retrieval-path-typed items; post-T-3
+        # the check is a clean `== "fact"` against the DataPoint-type
+        # semantic and retrieval_source lives on a separate field.
         success_updates = []
         for c in memory_store.update.call_args_list:
             if len(c.args) >= 2 and isinstance(c.args[1], dict):
                 if "successful_use_count" in c.args[1]:
                     success_updates.append(c.args[1])
         assert len(success_updates) >= 1, (
-            "Expected successful_use_count increment for source_type='vector' fact. "
-            "If this fails, J-1 source_type widening (FACT_SOURCE_TYPES) regressed."
+            "Expected successful_use_count increment for fact-class item "
+            "(source_type='fact', retrieval_source='vector'). "
+            "If this fails, the T-3 source_type split or the scanner's "
+            "fact-update gate regressed."
         )
         assert success_updates[0]["successful_use_count"] == 1
 
@@ -1979,7 +1996,8 @@ class TestScannerCalibration:
         """
         item = make_working_set_item(
             text="redis sentinel failover cluster configuration",
-            source_type="vector",
+            source_type="fact",           # T-3: DataPoint-type semantic
+            retrieval_source="vector",    # T-3: retrieval-path provenance
             successful_use_count=0,
             use_count=0,
         )
@@ -2049,7 +2067,8 @@ class TestScannerCalibration:
 
         item = make_working_set_item(
             text="postgres timescaledb compression hypertables",
-            source_type="vector",
+            source_type="fact",           # T-3: DataPoint-type semantic
+            retrieval_source="vector",    # T-3: retrieval-path provenance
             successful_use_count=0,
             use_count=0,
         )

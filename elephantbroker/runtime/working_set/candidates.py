@@ -299,11 +299,21 @@ class CandidateGenerator:
 
     @classmethod
     def retrieval_candidate_to_item(cls, rc: RetrievalCandidate) -> WorkingSetItem:
-        """Convert a reranked RetrievalCandidate to WorkingSetItem, carrying all metadata."""
+        """Convert a reranked RetrievalCandidate to WorkingSetItem, carrying all metadata.
+
+        T-3: split `rc.source` into two orthogonal fields —
+        `source_type` (DataPoint-type semantic) and `retrieval_source`
+        (retrieval-path provenance). Pattern (b1): artifacts are a distinct
+        DataPoint type, so they get `source_type="artifact"` with no
+        retrieval_source; fact-class items get `source_type="fact"` and
+        stamp `retrieval_source=rc.source` (structural/keyword/vector/graph).
+        """
         fact = rc.fact
+        is_artifact = rc.source == "artifact"
         return WorkingSetItem(
             id=str(fact.id),
-            source_type=rc.source,
+            source_type="artifact" if is_artifact else "fact",
+            retrieval_source=None if is_artifact else rc.source,
             source_id=fact.id,
             text=fact.text,
             token_size=fact.token_size or len(fact.text) // 4,

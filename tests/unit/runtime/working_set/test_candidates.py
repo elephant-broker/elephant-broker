@@ -411,7 +411,11 @@ class TestRetrievalCandidateToItem:
         item = CandidateGenerator.retrieval_candidate_to_item(rc)
 
         assert item.id == str(fact.id)
-        assert item.source_type == "vector"
+        # T-3: rc.source is retrieval-path provenance, split into its own field.
+        # source_type now carries the DataPoint-type semantic ("fact" for
+        # fact-class items).
+        assert item.source_type == "fact"
+        assert item.retrieval_source == "vector"
         assert item.source_id == fact.id
         assert item.text == "important fact"
         assert item.token_size == 42
@@ -445,6 +449,51 @@ class TestRetrievalCandidateToItem:
         rc = _make_rc(category="general")
         item = CandidateGenerator.retrieval_candidate_to_item(rc)
         assert item.system_prompt_eligible is False
+
+    def test_retrieval_candidate_to_item_splits_source_type(self):
+        """T-3: ``retrieval_candidate_to_item`` splits ``rc.source`` into two
+        orthogonal fields:
+
+        - ``source_type`` carries the DataPoint-type semantic.
+          Fact-class items → "fact" (regardless of retrieval path).
+          Artifact-class items → "artifact" (Pattern (b1): artifacts aren't
+          facts; they're a distinct DataPoint type that happens to flow
+          through the fact-retrieval pipeline).
+
+        - ``retrieval_source`` carries the retrieval-path provenance for
+          fact-class items only. Artifact items leave it None because
+          ``retrieval_source`` describes FACT retrieval paths.
+
+        Locks in the Pattern (b1) split for all 5 retrieval sources the
+        orchestrator can emit (structural/keyword/vector/graph/artifact).
+        Mirrors the orchestrator's source values 1:1.
+        """
+        fact = make_fact_assertion(text="candidate text")
+
+        # 4 fact-retrieval paths → source_type="fact" + retrieval_source stamped
+        for source in ("structural", "keyword", "vector", "graph"):
+            rc = RetrievalCandidate(fact=fact, source=source, score=0.5)
+            item = CandidateGenerator.retrieval_candidate_to_item(rc)
+            assert item.source_type == "fact", (
+                f"Fact-retrieval source={source!r} must produce "
+                f"source_type='fact', got {item.source_type!r}"
+            )
+            assert item.retrieval_source == source, (
+                f"Fact-retrieval source={source!r} must stamp "
+                f"retrieval_source={source!r}, got {item.retrieval_source!r}"
+            )
+
+        # Artifact retrieval → source_type="artifact" + retrieval_source=None
+        # (Pattern (b1): artifacts are a distinct DataPoint type; the
+        # retrieval_source field describes fact retrieval paths and is
+        # intentionally None for non-fact DataPoints.)
+        rc_art = RetrievalCandidate(fact=fact, source="artifact", score=0.5)
+        item_art = CandidateGenerator.retrieval_candidate_to_item(rc_art)
+        assert item_art.source_type == "artifact"
+        assert item_art.retrieval_source is None, (
+            "Artifact items must leave retrieval_source=None — the field "
+            "describes fact retrieval paths, and artifacts are not facts."
+        )
 
 
 # ---------------------------------------------------------------------------
