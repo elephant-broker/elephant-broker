@@ -1857,6 +1857,45 @@ class TestScannerCalibration:
             f"the old 0.4 threshold used to reject"
         )
 
+    def test_s1_fires_on_punct_heavy_fact_with_paraphrase(self):
+        """T-1 pipeline smoke test: realistic fact+paraphrase produces a
+        direct_quote signal ≥ 0.15 with punctuation stripping in effect.
+
+        The strict punctuation-stripping regression guarantees are covered by
+        `test_utils.py::TestExtractKeyPhrases` (the utility-level tests).
+        This is the scanner-level integration: once `_extract_key_phrases`
+        has been made punct-tolerant, `_detect_direct_quote` consuming it
+        must still produce a firing signal on a realistic agent paraphrase
+        (live DIAG-M1 baseline on a production TimescaleDB fact was ratio
+        ~0.067 pre-T-1).
+
+        The fact text has a trailing period (`"data."`). Post-T-1 strips
+        that period so phrases ending in `"data"` substring-match the
+        response `"time-series data in this project"`.
+        """
+        lc = _make_lifecycle()
+        item = make_working_set_item(
+            text="I use PostgreSQL with the TimescaleDB extension for time-series data.",
+        )
+        msgs = [
+            AgentMessage(
+                role="assistant",
+                content=(
+                    "You use PostgreSQL with the TimescaleDB extension "
+                    "for time-series data in this project."
+                ),
+            ),
+        ]
+        is_quote, confidence = lc._detect_direct_quote(item, msgs, 0)
+        assert is_quote is True, (
+            "S1 should fire post-T-1: trailing-punct phrases now match "
+            "paraphrased responses without the punctuation"
+        )
+        assert confidence > 0.15, (
+            f"confidence={confidence} — expected > 0.15 post-T-1 "
+            f"(pre-fix baseline was ~0.067)"
+        )
+
     async def test_vector_source_type_triggers_successful_use_update(self):
         """Retrieval-sourced fact (source_type='vector') fires successful_use_count
         increment after a matching response — validates FACT_SOURCE_TYPES widening.
