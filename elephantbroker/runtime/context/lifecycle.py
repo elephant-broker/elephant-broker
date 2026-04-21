@@ -444,7 +444,7 @@ class ContextLifecycle:
             try:
                 pipeline_result = await self._turn_ingest.run(
                     session_key=sk,
-                    messages=[msg.model_dump(mode="json") for msg in params.messages],
+                    messages=params.messages,
                     session_id=sid,
                     profile_name=params.profile_name,
                     gateway_id=self._gateway_id,

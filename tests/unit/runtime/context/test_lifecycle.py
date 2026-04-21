@@ -1916,8 +1916,9 @@ class TestIntegrationFlowThrough:
         assert turn_ingest.run.called
         call_kwargs = turn_ingest.run.call_args.kwargs
         assert "agent_key" in call_kwargs
-        # Regression guard: messages must be dicts, not AgentMessage objects
-        assert all(isinstance(m, dict) for m in call_kwargs["messages"])
+        # TD-28: pipeline accepts list[AgentMessage | dict]; lifecycle now forwards
+        # AgentMessage objects directly (pipeline normalizes internally).
+        assert all(isinstance(m, (dict, AgentMessage)) for m in call_kwargs["messages"])
 
     async def test_ingest_batch_result_has_facts_stored_on_success(self):
         """Pipeline facts_stored propagates to IngestBatchResult."""

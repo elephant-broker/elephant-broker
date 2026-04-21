@@ -13,11 +13,19 @@ from elephantbroker.runtime.adapters.cognee.tasks.resolve_actors import resolve_
 from elephantbroker.runtime.memory.facade import DedupSkipped
 from elephantbroker.runtime.metrics import inc_cognify, inc_pipeline
 from elephantbroker.runtime.observability import traced
+from elephantbroker.schemas.context import AgentMessage
 from elephantbroker.schemas.fact import FactAssertion
 from elephantbroker.schemas.pipeline import TurnIngestResult
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 logger = logging.getLogger("elephantbroker.pipelines.turn_ingest")
+
+
+def _to_dict(msg: AgentMessage | dict) -> dict:
+    """Normalize pipeline input. ``AgentMessage.model_dump(mode='json')`` preserves
+    extra fields (e.g. ``actor_id``) and stringifies any typed UUID fields, keeping
+    the ``uuid.UUID(msg['actor_id'])`` precondition downstream intact (TD-28)."""
+    return msg if isinstance(msg, dict) else msg.model_dump(mode="json")
 
 
 class TurnIngestPipeline:
@@ -62,11 +70,12 @@ class TurnIngestPipeline:
 
     @traced
     async def run(
-        self, session_key: str, messages: list[dict], session_id=None,
+        self, session_key: str, messages: list[AgentMessage | dict], session_id=None,
         profile_name: str = "coding", goal_ids=None,
         gateway_id: str | None = None, agent_key: str | None = None,
     ) -> TurnIngestResult:
         """Run the full turn ingest pipeline."""
+        messages = [_to_dict(m) for m in messages]
         gw = gateway_id or self._gateway_id
 
         if not messages:

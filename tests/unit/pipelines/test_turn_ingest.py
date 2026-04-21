@@ -11,6 +11,7 @@ from elephantbroker.pipelines.turn_ingest.buffer import IngestBuffer
 from elephantbroker.pipelines.turn_ingest.pipeline import TurnIngestPipeline
 from elephantbroker.runtime.memory.facade import DedupSkipped
 from elephantbroker.schemas.config import LLMConfig
+from elephantbroker.schemas.context import AgentMessage
 from elephantbroker.schemas.fact import MemoryClass
 from elephantbroker.schemas.pipeline import TurnIngestResult
 from elephantbroker.schemas.trace import TraceEventType
@@ -115,6 +116,33 @@ class TestTurnIngestPipeline:
         assert len(result.facts_extracted) > 0
         assert result.facts_stored > 0
         assert result.trace_event_id is not None
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_run_accepts_mixed_agent_message_and_dict_input(self, mock_cognee):
+        """TD-28: run() accepts list[AgentMessage | dict] and normalizes internally.
+
+        Mixed input exercises the fast path (lifecycle forwards AgentMessage objects
+        directly) alongside legacy callers that pass plain dicts. The pipeline must
+        normalize both to dicts before downstream .get()/subscript operations, and
+        extra fields (e.g. actor_id) must survive via model_dump(mode="json").
+        """
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        pipe = _make_pipeline()
+
+        actor_id = str(uuid.uuid4())
+        messages = [
+            AgentMessage(role="user", content="I prefer Python for all projects", actor_id=actor_id),
+            {"role": "assistant", "content": "Noted — Python it is."},
+        ]
+        result = await pipe.run("session:test", messages)
+
+        assert isinstance(result, TurnIngestResult)
+        # Pipeline did not crash on AgentMessage input — normalization worked.
+        assert len(result.facts_extracted) > 0
+        # Extra field preserved through normalization: the user fact's source_actor_id
+        # should resolve to the AgentMessage's actor_id (TD-28 precondition check).
+        assert result.facts_extracted[0].source_actor_id == uuid.UUID(actor_id)
 
     async def test_empty_messages_returns_zero(self):
         pipe = _make_pipeline()
