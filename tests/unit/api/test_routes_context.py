@@ -122,6 +122,53 @@ class TestContextRoutes:
         assert data["ingest_batch_size"] == 6
         assert data["ingest_batch_timeout_ms"] == 60000
 
+    async def test_get_config_returns_profile_resolved_ingest_batch_size_when_profile_param_provided(
+        self, client, container,
+    ):
+        """P6: GET /context/config?profile=X returns the profile-level
+        ingest_batch_size override; omitting the param returns the global value.
+
+        Exercises ProfileRegistry.effective_ingest_batch_size via the real
+        registry on the container (not mocked), with a monkey-patched
+        resolve_profile so the test doesn't depend on preset contents.
+        """
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+        from elephantbroker.schemas.profile import ProfilePolicy
+
+        container.config = ElephantBrokerConfig()  # global ingest_batch_size = 6
+        override_policy = ProfilePolicy(id="coding", name="Coding", ingest_batch_size=4)
+        container.profile_registry.resolve_profile = AsyncMock(return_value=override_policy)
+
+        # With ?profile=coding — profile override wins.
+        r = await client.get("/context/config?profile=coding")
+        assert r.status_code == 200
+        assert r.json()["ingest_batch_size"] == 4
+
+        # Without profile param — global LLMConfig default.
+        r2 = await client.get("/context/config")
+        assert r2.status_code == 200
+        assert r2.json()["ingest_batch_size"] == 6
+
+    async def test_get_config_falls_back_to_global_when_profile_resolution_fails(
+        self, client, container,
+    ):
+        """P6: /config must never 500 — any resolver exception falls back
+        silently to the global LLMConfig value."""
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+
+        container.config = ElephantBrokerConfig()
+        container.profile_registry.resolve_profile = AsyncMock(
+            side_effect=KeyError("Unknown profile: nonexistent"),
+        )
+
+        r = await client.get("/context/config?profile=nonexistent")
+        assert r.status_code == 200
+        assert r.json()["ingest_batch_size"] == 6  # global default
+
     async def test_subagent_rollback(self, client):
         body = {"parent_session_key": "p", "child_session_key": "c", "rollback_key": "k"}
         r = await client.post("/context/subagent/rollback", json=body)

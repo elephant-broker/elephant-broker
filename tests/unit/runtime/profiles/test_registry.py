@@ -147,3 +147,23 @@ class TestProfileRegistryCaching:
     async def test_configurable_cache_ttl(self, trace):
         reg = ProfileRegistry(trace, cache_ttl_seconds=60)
         assert reg._cache_ttl == 60
+
+
+class TestEffectiveIngestBatchSize:
+    """P6: ingest_batch_size resolver prefers profile override, else LLMConfig."""
+
+    def test_effective_ingest_batch_size_returns_profile_value_or_global(self, trace):
+        from elephantbroker.schemas.config import LLMConfig
+        from elephantbroker.schemas.profile import ProfilePolicy
+
+        reg = ProfileRegistry(trace)
+        llm = LLMConfig(ingest_batch_size=6)
+
+        # None override → fall back to global LLMConfig.
+        policy_default = ProfilePolicy(id="x", name="X")
+        assert policy_default.ingest_batch_size is None
+        assert reg.effective_ingest_batch_size(policy_default, llm) == 6
+
+        # Explicit override → profile value wins.
+        policy_override = ProfilePolicy(id="x", name="X", ingest_batch_size=4)
+        assert reg.effective_ingest_batch_size(policy_override, llm) == 4

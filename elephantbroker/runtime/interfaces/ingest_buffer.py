@@ -15,8 +15,20 @@ class IIngestBuffer(ABC):
     """Contract for the turn-ingest Redis buffer and recent-facts window."""
 
     @abstractmethod
-    async def add_messages(self, session_key: str, messages: list[dict]) -> bool:
-        """Append messages to the per-session buffer; return True if batch full."""
+    async def add_messages(
+        self,
+        session_key: str,
+        messages: list[dict],
+        *,
+        effective_batch_size: int | None = None,
+    ) -> bool:
+        """Append messages to the per-session buffer; return True if batch full.
+
+        ``effective_batch_size`` is an optional per-call override for the flush
+        threshold (and its 3x overflow guard). When ``None``, implementations
+        must fall back to their configured default so that existing deployments
+        see no behavior change.
+        """
         ...
 
     @abstractmethod

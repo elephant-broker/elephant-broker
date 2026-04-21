@@ -182,7 +182,7 @@ async def dispose(body: BuildOverlayRequest, request: Request):
 
 
 @router.get("/config")
-async def get_config(request: Request):
+async def get_config(request: Request, profile: str | None = None):
     from elephantbroker.api.deps import get_container
     container = get_container(request)
     config = getattr(container, "config", None)
@@ -191,6 +191,22 @@ async def get_config(request: Request):
         if hasattr(config, "context_assembly"):
             result.update(config.context_assembly.model_dump(mode="json"))
         if hasattr(config, "llm"):
-            result["ingest_batch_size"] = config.llm.ingest_batch_size
+            # P6: when ?profile=X is supplied, resolve the profile-level
+            # ingest_batch_size override via ProfileRegistry. On any failure
+            # (unknown profile, registry absent, resolve error) we silently
+            # fall back to the global LLMConfig value — /config must not 500.
+            effective_batch = config.llm.ingest_batch_size
+            if profile and getattr(container, "profile_registry", None):
+                try:
+                    policy = await container.profile_registry.resolve_profile(
+                        profile, org_id=None,
+                    )
+                    if policy is not None:
+                        effective_batch = container.profile_registry.effective_ingest_batch_size(
+                            policy, config.llm,
+                        )
+                except Exception:
+                    pass  # Fall back to global; never 500 the /config endpoint
+            result["ingest_batch_size"] = effective_batch
             result["ingest_batch_timeout_ms"] = int(config.llm.ingest_batch_timeout_seconds * 1000)
     return result

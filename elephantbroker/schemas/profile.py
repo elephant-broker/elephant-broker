@@ -192,3 +192,14 @@ class ProfilePolicy(BaseModel):
     # Phase 6 additions
     session_data_ttl_seconds: int = Field(default=86400, ge=3600)
     assembly_placement: AssemblyPlacementPolicy = Field(default_factory=AssemblyPlacementPolicy)
+    ingest_batch_size: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-profile override for the ingest buffer flush threshold "
+            "(messages). When None, falls back to LLMConfig.ingest_batch_size "
+            "(global EB_INGEST_BATCH_SIZE). Independent from "
+            "AutorecallPolicy.extraction_max_facts_per_batch_before_dedup "
+            "(which caps LLM extraction output, not the buffer flush)."
+        ),
+    )

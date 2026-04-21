@@ -652,6 +652,64 @@ class TestIngestBuffer:
         assert flushed[0]["content"] == "msg3"  # oldest surviving message
         assert flushed[-1]["content"] == "msg11"  # newest message
 
+    async def test_add_messages_uses_effective_batch_size_when_provided(self):
+        """P6: effective_batch_size override supersedes self._config.ingest_batch_size
+        for both the flush threshold and the 3x overflow guard.
+
+        Global is 6, override is 2: the third added message must return True
+        (threshold hit at 2 under the override, not 6 under the global).
+        """
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=6)
+        buf = IngestBuffer(redis, config)
+
+        # 1st message — below the override (2) → False.
+        r1 = await buf.add_messages(
+            "s1", [{"role": "user", "content": "m1"}], effective_batch_size=2,
+        )
+        assert r1 is False
+        # 2nd message — threshold reached under override → True.
+        r2 = await buf.add_messages(
+            "s1", [{"role": "user", "content": "m2"}], effective_batch_size=2,
+        )
+        assert r2 is True
+
+    async def test_add_messages_override_respects_overflow_guard(self):
+        """P6: the 3x overflow guard uses the override, not self._config.
+
+        With an override of 2, max_size must be 6 (not 18 from the global 6*3).
+        Adding 8 messages should trim down to 6.
+        """
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=6)  # global max_size would be 18
+        buf = IngestBuffer(redis, config)
+
+        for i in range(8):
+            await buf.add_messages(
+                "s1",
+                [{"role": "user", "content": f"msg{i}"}],
+                effective_batch_size=2,
+            )
+        flushed = await buf.flush("s1")
+        # Override max_size = 2 * 3 = 6 → only last 6 survive.
+        assert len(flushed) == 6
+        assert flushed[0]["content"] == "msg2"
+        assert flushed[-1]["content"] == "msg7"
+
+    async def test_add_messages_without_override_preserves_global_behavior(self):
+        """P6: when effective_batch_size is omitted (None), behavior is
+        byte-identical to the pre-P6 path (uses self._config.ingest_batch_size).
+        """
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=3)
+        buf = IngestBuffer(redis, config)
+
+        await buf.add_messages("s1", [{"role": "user", "content": "m1"}])
+        await buf.add_messages("s1", [{"role": "user", "content": "m2"}])
+        # 3rd triggers under the global (3), no override supplied.
+        result = await buf.add_messages("s1", [{"role": "user", "content": "m3"}])
+        assert result is True
+
     # --- Gateway Identity: Redis key prefix (PR #5 TODOs 5-202, 5-310) ---
     # Every Redis key MUST be built via RedisKeyBuilder so two gateways sharing
     # Redis never collide. buffer.py previously fell back to hardcoded

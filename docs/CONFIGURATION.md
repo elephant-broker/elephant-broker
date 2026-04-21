@@ -8054,6 +8054,17 @@ Previous passes documented WHAT parameters exist. This pass documents the VALUE 
 
 **Recommended production:** `6` (default). Lower to `3` for interactive assistants. Raise to `10-12` only if LLM cost is a concern and latency tolerance is high.
 
+#### Ingest-related batch/cap fields — distinct stages
+
+| Field | Location | Default | Stage it controls |
+|-------|----------|---------|-------------------|
+| `LLMConfig.ingest_batch_size` (env `EB_INGEST_BATCH_SIZE`) | Global | `6` | IngestBuffer flush threshold — how many buffered messages trigger the LLM extraction pipeline. |
+| `ProfilePolicy.ingest_batch_size` | Per-profile override (nullable) | `None` (inherit global) | Same stage as above, but tuned per profile. Set on `ProfilePolicy` in profile YAML. Resolved via `ProfileRegistry.effective_ingest_batch_size(policy, llm_config)`; exposed at `GET /context/config?profile=<name>`. |
+| `LLMConfig.extraction_max_facts_per_batch` | Global | `10` | LLM fact-extraction call — max facts per extraction output. |
+| `AutorecallPolicy.extraction_max_facts_per_batch_before_dedup` | Per-profile on `AutorecallPolicy` | `5` | Post-extraction dedup pre-filter — caps how many facts pass through dedup. |
+
+These names historically overlap because they were added at different phases, but they control independent pipeline stages. See `local/FIX-PLAN-Pre-Prompt-Ingest-Pipeline.md` "Naming overlap" for the rationale on why the rename is deferred.
+
 ### 2.4 `llm.extraction_max_input_tokens`
 
 **Schema constraint:** `Field(default=4000, ge=100)`. Env: `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS`. Controls the user prompt truncation before sending to LLM. Truncation is by character ratio: if `prompt_tokens > max_input_tokens`, the prompt is sliced to `int(len(prompt) * max_input_tokens / prompt_tokens)`.

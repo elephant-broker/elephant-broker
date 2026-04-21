@@ -115,6 +115,20 @@ class TestProfilePolicy:
         p = ProfilePolicy(id="x", name="X", graph_mode=GraphMode.GLOBAL)
         assert p.graph_mode == GraphMode.GLOBAL
 
+    def test_ingest_batch_size_defaults_to_none(self):
+        """P6: ProfilePolicy.ingest_batch_size defaults to None, meaning
+        'inherit from LLMConfig.ingest_batch_size'."""
+        p = ProfilePolicy(id="x", name="X")
+        assert p.ingest_batch_size is None
+
+    def test_ingest_batch_size_accepts_override(self):
+        """P6: ProfilePolicy.ingest_batch_size accepts positive ints;
+        zero and negatives are rejected (ge=1)."""
+        p = ProfilePolicy(id="x", name="X", ingest_batch_size=4)
+        assert p.ingest_batch_size == 4
+        with pytest.raises(ValidationError):
+            ProfilePolicy(id="x", name="X", ingest_batch_size=0)
+
 
 class TestIsolationLevel:
     def test_values(self):

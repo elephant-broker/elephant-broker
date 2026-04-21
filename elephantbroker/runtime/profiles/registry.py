@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
 from elephantbroker.runtime.interfaces.profile_registry import IProfileRegistry
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
@@ -22,6 +23,9 @@ from elephantbroker.runtime.profiles.presets import PROFILE_PRESETS
 from elephantbroker.schemas.profile import ProfilePolicy
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 from elephantbroker.schemas.working_set import ScoringWeights
+
+if TYPE_CHECKING:
+    from elephantbroker.schemas.config import LLMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +122,25 @@ class ProfileRegistry(IProfileRegistry):
         """Get resolved scoring weights for a profile."""
         policy = await self.resolve_profile(profile_name, org_id=org_id)
         return policy.scoring_weights
+
+    def effective_ingest_batch_size(
+        self,
+        policy: ProfilePolicy,
+        llm_config: "LLMConfig",
+    ) -> int:
+        """Resolve the effective ingest buffer flush threshold for a profile.
+
+        Returns ``policy.ingest_batch_size`` when set, otherwise
+        ``llm_config.ingest_batch_size`` (the global EB_INGEST_BATCH_SIZE).
+        Synchronous — takes the already-resolved policy so callers avoid a
+        re-resolve round-trip. Mirrors the ``get_scoring_weights`` precedent
+        of read-only convenience helpers that stay close to the registry.
+        """
+        return (
+            policy.ingest_batch_size
+            if policy.ingest_batch_size is not None
+            else llm_config.ingest_batch_size
+        )
 
     async def list_profiles(self) -> list[str]:
         """List all available profile IDs (excluding 'base')."""
