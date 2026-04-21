@@ -1400,6 +1400,18 @@ class ContextLifecycle:
             # Update fact
             # J-1: widen source_type check (see FACT_SOURCE_TYPES) and lower
             # use_confidence gate 0.3 → 0.15 for scanner calibration (H-alt-2/H-alt-4).
+            self._log.info(
+                "[EB-DIAG-M1] update_branch eb_id=%s source_type=%s retrieval_source=%s "
+                "is_fact_semantic=%s confidence=%.3f use_confidence_gate=%.3f method=%s turn=%d",
+                getattr(item, "id", "?"),
+                item.source_type,
+                getattr(item, "retrieval_source", None),  # None pre-T-3, populated post-T-3
+                item.source_type in FACT_SOURCE_TYPES,    # true if widening catches it
+                use_confidence,
+                0.15,                                      # literal for now; post-T-2 this reads from resolved profile
+                method,
+                session_ctx.turn_count,
+            )
             if self._memory_store and item.source_type in FACT_SOURCE_TYPES:
                 now_iso = datetime.now(UTC).isoformat()
                 try:
@@ -1440,6 +1452,16 @@ class ContextLifecycle:
 
         combined = " ".join(content_as_text(m).lower() for m in post_injection)
         matches = sum(1 for p in phrases if p in combined)
+        import re as _diag_re  # local import so the module import hygiene stays clean
+        _diag_has_punct = any(
+            bool(_diag_re.search(r'[.,:;!?()"\']', p)) for p in phrases[:10]
+        )
+        self._log.info(
+            "[EB-DIAG-M1] s1_probe eb_id=%s phrases=%d matches=%d "
+            "phrases_sample=%r phrases_have_punct=%s",
+            getattr(item, "id", "?"), len(phrases), matches,
+            phrases[:5], _diag_has_punct,
+        )
         ratio = matches / len(phrases) if phrases else 0.0
         # J-1: S1 direct-quote threshold lowered from 0.4 → 0.15 for calibration (H-alt-2).
         # At 0.4 the scanner required ~40% of a fact's extracted key-phrases to appear
