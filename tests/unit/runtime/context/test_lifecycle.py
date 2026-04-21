@@ -64,10 +64,21 @@ def _make_lifecycle(*, fresh_bootstrap: bool = False, **overrides):
         fresh_bootstrap: If True, session_store.get returns None so bootstrap
             creates a new SessionContext instead of reusing an existing one (GF-15).
     """
+    from elephantbroker.schemas.profile import SuccessfulUseThresholds
+
     profile = make_profile_policy()
 
     profile_reg = AsyncMock()
     profile_reg.resolve_profile = AsyncMock(return_value=profile)
+    # T-2: scanner threshold resolver is sync. AsyncMock's auto-generated
+    # attribute returns a MagicMock that doesn't behave as a real
+    # SuccessfulUseThresholds instance (its gate attrs are MagicMocks,
+    # not floats). Stub with a real default instance so every scanner
+    # path in after_turn / _track_successful_use works out-of-the-box.
+    # Individual tests can override by reassigning on the returned lc.
+    profile_reg.effective_successful_use_thresholds = MagicMock(
+        return_value=SuccessfulUseThresholds(),
+    )
 
     session_store = AsyncMock()
     session_store.get = AsyncMock(return_value=None if fresh_bootstrap else make_session_context())
@@ -2011,6 +2022,88 @@ class TestScannerCalibration:
                 assert "successful_use_count" not in c.args[1], (
                     f"Unrelated fact should not trigger successful_use_count "
                     f"increment, got update payload: {c.args[1]}"
+                )
+
+    async def test_uses_profile_thresholds(self):
+        """T-2: scanner respects per-profile `successful_use_thresholds`.
+
+        Uses the exact fact+response pair from
+        ``test_s1_direct_quote_fires_at_lowered_threshold`` (ratio ~0.2,
+        which fires at the default S1 threshold 0.15). With tightened
+        profile thresholds (S1=0.5, S3=0.5) the same input produces
+        ``method="ignored"`` and no ``successful_use_count`` increment.
+
+        Both S1 and S3 are tightened because the fact+response pair also
+        produces a Jaccard score (~0.29, from the 2-token intersection
+        ``{postgres, timescaledb}``) that would fire under the default
+        S3 gate of 0.15 — the test isolates scanner-level threshold flow,
+        not signal-specific semantics.
+
+        Covers end-to-end resolution: profile → registry resolver →
+        ``_track_successful_use`` → ``_detect_direct_quote`` +
+        ``_compute_running_jaccard``. Confirms the thresholds object flows
+        from the registry through the scanner helpers and is actually
+        consulted at each gate.
+        """
+        from elephantbroker.schemas.profile import SuccessfulUseThresholds
+
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="vector",
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+        # Override resolver to return tighter S1 + S3 thresholds (0.5 each)
+        # — the same input that fires at the default (0.15/0.15) must now
+        # get ignored on both signals, yielding method="ignored".
+        lc._profile_registry.effective_successful_use_thresholds = MagicMock(
+            return_value=SuccessfulUseThresholds(
+                s1_direct_quote_ratio=0.5,
+                s3_jaccard_score=0.5,
+            ),
+        )
+
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(
+                    role="assistant",
+                    content="postgres timescaledb is the right answer here",
+                ),
+            ],
+            pre_prompt_message_count=0,
+        )
+        await lc.after_turn(params)
+
+        # At tightened thresholds, neither the 0.2-ratio quote nor the
+        # 0.29-score jaccard fires. The memory_store should only see the
+        # plain use_count bump (last_used_at path), never successful_use_count.
+        for c in memory_store.update.call_args_list:
+            if len(c.args) >= 2 and isinstance(c.args[1], dict):
+                assert "successful_use_count" not in c.args[1], (
+                    f"Profile thresholds 0.5/0.5 should have ignored both "
+                    f"S1 and S3 signals — got update payload: {c.args[1]}"
                 )
 
 

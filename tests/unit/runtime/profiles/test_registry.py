@@ -167,3 +167,91 @@ class TestEffectiveIngestBatchSize:
         # Explicit override → profile value wins.
         policy_override = ProfilePolicy(id="x", name="X", ingest_batch_size=4)
         assert reg.effective_ingest_batch_size(policy_override, llm) == 4
+
+
+class TestEffectiveSuccessfulUseThresholds:
+    """T-2: successful_use_thresholds resolver returns the policy's override
+    when set, otherwise a fresh SuccessfulUseThresholds() with module defaults.
+    Mirrors the effective_ingest_batch_size precedent exactly.
+    """
+
+    def test_returns_defaults_when_unset(self, trace):
+        from elephantbroker.schemas.profile import ProfilePolicy, SuccessfulUseThresholds
+
+        reg = ProfileRegistry(trace)
+        policy = ProfilePolicy(id="x", name="X")
+        assert policy.successful_use_thresholds is None
+
+        result = reg.effective_successful_use_thresholds(policy)
+        assert isinstance(result, SuccessfulUseThresholds)
+        # Defaults (J-1 baseline) — caller must receive a usable instance,
+        # not None, even when the profile left the field unset.
+        assert result.s1_direct_quote_ratio == 0.15
+        assert result.s2_tool_correlation_overlap == 0.3
+        assert result.s3_jaccard_score == 0.15
+        assert result.use_confidence_gate == 0.15
+        assert result.s6_ignored_turns_floor == 3
+
+    def test_returns_override_when_set(self, trace):
+        from elephantbroker.schemas.profile import ProfilePolicy, SuccessfulUseThresholds
+
+        reg = ProfileRegistry(trace)
+        override = SuccessfulUseThresholds(
+            s1_direct_quote_ratio=0.05,
+            s2_tool_correlation_overlap=0.5,
+            s3_jaccard_score=0.22,
+            use_confidence_gate=0.42,
+            s6_ignored_turns_floor=7,
+        )
+        policy = ProfilePolicy(id="x", name="X", successful_use_thresholds=override)
+
+        result = reg.effective_successful_use_thresholds(policy)
+        # The resolver must return the exact policy override — not a copy
+        # with modified fields, not the defaults.
+        assert result is override
+        assert result.s1_direct_quote_ratio == 0.05
+        assert result.s2_tool_correlation_overlap == 0.5
+        assert result.use_confidence_gate == 0.42
+
+
+class TestPresetSuccessfulUseThresholds:
+    """T-2: the 5 named profile presets carry the expected per-profile scanner
+    threshold overrides (or None to signal module defaults). Locks in the
+    M-1 design table against accidental preset drift.
+    """
+
+    async def test_preset_thresholds_match_design(self, trace):
+        from elephantbroker.schemas.profile import SuccessfulUseThresholds
+
+        reg = ProfileRegistry(trace)
+
+        # base/coding/worker: leave successful_use_thresholds unset — module
+        # defaults (0.15/0.3/0.15/0.15/3) apply implicitly via the resolver.
+        for name in ("coding", "worker"):
+            p = await reg.resolve_profile(name)
+            assert p.successful_use_thresholds is None, (
+                f"{name} profile should leave thresholds None (implicit defaults); "
+                f"got {p.successful_use_thresholds}"
+            )
+
+        # research: loose detection, default update-gate
+        research = await reg.resolve_profile("research")
+        assert research.successful_use_thresholds == SuccessfulUseThresholds(
+            s1_direct_quote_ratio=0.10,
+            s2_tool_correlation_overlap=0.25,
+            s3_jaccard_score=0.10,
+        )
+
+        # managerial: default detection, tighter update-gate (0.25)
+        managerial = await reg.resolve_profile("managerial")
+        assert managerial.successful_use_thresholds == SuccessfulUseThresholds(
+            use_confidence_gate=0.25,
+        )
+
+        # personal_assistant: mild loosening (S1/S3) + tight gate (0.20)
+        pa = await reg.resolve_profile("personal_assistant")
+        assert pa.successful_use_thresholds == SuccessfulUseThresholds(
+            s1_direct_quote_ratio=0.12,
+            s3_jaccard_score=0.12,
+            use_confidence_gate=0.20,
+        )

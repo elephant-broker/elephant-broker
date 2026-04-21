@@ -36,6 +36,7 @@ from elephantbroker.schemas.context import (
     SubagentSpawnResult,
     SystemPromptOverlay,
 )
+from elephantbroker.schemas.profile import SuccessfulUseThresholds
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 TOOL_ALIASES: dict[str, str] = {
@@ -900,11 +901,27 @@ class ContextLifecycle:
         # The cheap heuristic path (S1/S2/Jaccard) always runs when we have
         # a snapshot and response messages.  The expensive LLM-based RT-1 batch
         # evaluation below is separately gated on config.successful_use.enabled.
+        #
+        # T-2 (2026-04-21): resolve per-profile scanner thresholds once per
+        # turn from `session_ctx.profile` (immutable per-session per
+        # CLAUDE.md). Per-turn resolve — not stashed on `self` — because a
+        # single ContextLifecycle instance serves multiple concurrent
+        # session_keys each with its own profile. See M-1/P-1 design.
+        #
+        # `getattr` (not direct attribute access) because some tests construct
+        # ContextLifecycle via `__new__` + manual attr injection without
+        # `_profile_registry` in the attr set; `session_ctx.profile is not None`
+        # guards against manually-mocked contexts missing the profile slot.
+        _registry = getattr(self, "_profile_registry", None)
+        if _registry is not None and session_ctx.profile is not None:
+            thresholds = _registry.effective_successful_use_thresholds(session_ctx.profile)
+        else:
+            thresholds = SuccessfulUseThresholds()
         updated_count = 0
         signals_by_item: dict[str, dict] = {}
         if snapshot and response_messages:
             updated_count, signals_by_item = await self._track_successful_use(
-                snapshot, response_messages, session_ctx,
+                snapshot, response_messages, session_ctx, thresholds,
             )
             if self._trace and signals_by_item:
                 await self._trace.append_event(TraceEvent(
@@ -935,9 +952,13 @@ class ContextLifecycle:
 
         # Emit injection effectiveness metrics (AD-26/T1-1)
         if snapshot and signals_by_item and self._metrics:
-            # J-1: aligns with use_confidence gate at L1412 for metric consistency —
-            # metric counts should track actual fact-update behavior, not a stricter subset.
-            referenced = sum(1 for s in signals_by_item.values() if s.get("confidence", 0) > 0.15)
+            # J-1 + T-2: aligns with the same use_confidence_gate used by
+            # the fact-update branch in _track_successful_use so metric
+            # counts track actual fact-update behavior per-profile.
+            referenced = sum(
+                1 for s in signals_by_item.values()
+                if s.get("confidence", 0) > thresholds.use_confidence_gate
+            )
             ignored = sum(1 for s in signals_by_item.values() if s.get("method") == "ignored")
             for item in snapshot.items:
                 item_id = str(item.id)
@@ -945,7 +966,7 @@ class ContextLifecycle:
                 cat = getattr(item, "category", "general")
                 mc = getattr(item, "memory_class", "episodic") if hasattr(item, "memory_class") else "episodic"
                 st = item.source_type or "fact"
-                if sig.get("confidence", 0) > 0.15:
+                if sig.get("confidence", 0) > thresholds.use_confidence_gate:
                     self._metrics.inc_injection_referenced(cat, mc, st)
                 elif sig.get("method") == "ignored":
                     self._metrics.inc_injection_ignored(cat, mc, st)
@@ -1351,8 +1372,22 @@ class ContextLifecycle:
                 return messages[idx + 1:]
         return list(messages)
 
-    async def _track_successful_use(self, snapshot, response_messages, session_ctx) -> tuple[int, dict]:
-        """Multi-signal successful-use tracking: S1+S2+S6+Jaccard."""
+    async def _track_successful_use(
+        self,
+        snapshot,
+        response_messages,
+        session_ctx,
+        thresholds: SuccessfulUseThresholds | None = None,
+    ) -> tuple[int, dict]:
+        """Multi-signal successful-use tracking: S1+S2+S6+Jaccard.
+
+        T-2 (2026-04-21): ``thresholds`` carries the per-profile scanner
+        thresholds (S1/S2/S3/use-confidence gate + S6 floor). Falls back
+        to ``SuccessfulUseThresholds()`` (module defaults = J-1 baseline
+        0.15/0.3/0.15/0.15/3) when caller didn't resolve them — keeps
+        direct-call unit tests backward-compatible.
+        """
+        t = thresholds or SuccessfulUseThresholds()
         updated = 0
         signals_by_item: dict[str, dict] = {}
 
@@ -1363,21 +1398,24 @@ class ContextLifecycle:
             signals: list[tuple[str, float]] = []
 
             # S1: Direct quote detection
-            is_quote, quote_conf = self._detect_direct_quote(item, response_messages, injection_turn)
+            is_quote, quote_conf = self._detect_direct_quote(
+                item, response_messages, injection_turn, t,
+            )
             if is_quote:
                 signals.append(("direct_quote", quote_conf))
 
             # S2: Tool correlation
-            is_tool, tool_conf = self._detect_tool_correlation(item, response_messages)
+            is_tool, tool_conf = self._detect_tool_correlation(item, response_messages, t)
             if is_tool:
                 signals.append(("tool_correlation", tool_conf))
 
             # Running Jaccard
-            # J-1: threshold lowered from 0.3 → 0.15 for calibration (H-alt-2).
-            # Jaccard at 0.3 required near-complete token overlap to register; 0.15
-            # captures paraphrased references while still rejecting coincidental matches.
+            # J-1: threshold calibrated from 0.3 → 0.15 (H-alt-2). Jaccard at
+            # 0.3 required near-complete token overlap to register; 0.15 captures
+            # paraphrased references while still rejecting coincidental matches.
+            # T-2: threshold now reads from resolved profile thresholds.
             jaccard_score = self._compute_running_jaccard(item, response_messages, injection_turn)
-            if jaccard_score > 0.15:
+            if jaccard_score > t.s3_jaccard_score:
                 signals.append(("jaccard", jaccard_score))
                 if self._metrics:
                     self._metrics.observe_successful_use_jaccard(jaccard_score)
@@ -1392,30 +1430,36 @@ class ContextLifecycle:
 
             signal_entry: dict = {"confidence": use_confidence, "method": method}
             # S6: Track ignored_turns for Phase 9 weight tuning
-            if method == "ignored" and turns_since >= 3:
+            if method == "ignored" and turns_since >= t.s6_ignored_turns_floor:
                 signal_entry["ignored_turns"] = turns_since
 
             signals_by_item[item_id] = signal_entry
 
             # Update fact
-            # J-1: widen source_type check (see FACT_SOURCE_TYPES) and lower
-            # use_confidence gate 0.3 → 0.15 for scanner calibration (H-alt-2/H-alt-4).
+            # J-1: widen source_type check (see FACT_SOURCE_TYPES) and calibrate
+            # use_confidence gate 0.3 → 0.15 (H-alt-2/H-alt-4).
+            # T-2: gate + S1/S3 thresholds now per-profile. DIAG-M1 probe
+            # fires for ALL item types (fact + goal + procedure) so the
+            # gate fields expose the resolved values end-to-end.
             self._log.info(
                 "[EB-DIAG-M1] update_branch eb_id=%s source_type=%s retrieval_source=%s "
-                "is_fact_semantic=%s confidence=%.3f use_confidence_gate=%.3f method=%s turn=%d",
+                "is_fact_semantic=%s confidence=%.3f use_confidence_gate=%.3f "
+                "s1_gate=%.3f s3_jaccard_gate=%.3f method=%s turn=%d",
                 getattr(item, "id", "?"),
                 item.source_type,
                 getattr(item, "retrieval_source", None),  # None pre-T-3, populated post-T-3
                 item.source_type in FACT_SOURCE_TYPES,    # true if widening catches it
                 use_confidence,
-                0.15,                                      # literal for now; post-T-2 this reads from resolved profile
+                t.use_confidence_gate,
+                t.s1_direct_quote_ratio,
+                t.s3_jaccard_score,
                 method,
                 session_ctx.turn_count,
             )
             if self._memory_store and item.source_type in FACT_SOURCE_TYPES:
                 now_iso = datetime.now(UTC).isoformat()
                 try:
-                    if use_confidence > 0.15:
+                    if use_confidence > t.use_confidence_gate:
                         new_suc = (item.successful_use_count or 0) + 1
                         new_use = (item.use_count or 0) + 1
                         await self._memory_store.update(item.source_id, {
@@ -1436,8 +1480,20 @@ class ContextLifecycle:
 
         return updated, signals_by_item
 
-    def _detect_direct_quote(self, item, messages, injection_turn) -> tuple[bool, float]:
-        """S1: Check if item's key phrases appear in post-injection assistant messages."""
+    def _detect_direct_quote(
+        self,
+        item,
+        messages,
+        injection_turn,
+        thresholds: SuccessfulUseThresholds | None = None,
+    ) -> tuple[bool, float]:
+        """S1: Check if item's key phrases appear in post-injection assistant messages.
+
+        T-2 (2026-04-21): ``thresholds`` carries the per-profile S1 ratio
+        threshold. Defaults to ``SuccessfulUseThresholds()`` (0.15) when
+        callers don't resolve — preserves direct-call unit-test ergonomics.
+        """
+        t = thresholds or SuccessfulUseThresholds()
         phrases = _extract_key_phrases(item.text)
         if not phrases:
             return False, 0.0
@@ -1463,16 +1519,27 @@ class ContextLifecycle:
             phrases[:5], _diag_has_punct,
         )
         ratio = matches / len(phrases) if phrases else 0.0
-        # J-1: S1 direct-quote threshold lowered from 0.4 → 0.15 for calibration (H-alt-2).
+        # J-1: S1 direct-quote threshold calibrated from 0.4 → 0.15 (H-alt-2).
         # At 0.4 the scanner required ~40% of a fact's extracted key-phrases to appear
         # verbatim in the response to register — too strict given that agents often
         # quote a single canonical token (e.g., TimescaleDB) rather than a phrase set.
         # 0.15 registers a single-phrase hit on a ~7-phrase fact while still requiring
-        # at least one real match.
-        return ratio > 0.15, min(ratio, 1.0)
+        # at least one real match. T-2: now per-profile (research 0.10 / PA 0.12).
+        return ratio > t.s1_direct_quote_ratio, min(ratio, 1.0)
 
-    def _detect_tool_correlation(self, item, messages) -> tuple[bool, float]:
-        """S2: Check keyword overlap with tool message args, with alias expansion."""
+    def _detect_tool_correlation(
+        self,
+        item,
+        messages,
+        thresholds: SuccessfulUseThresholds | None = None,
+    ) -> tuple[bool, float]:
+        """S2: Check keyword overlap with tool message args, with alias expansion.
+
+        T-2 (2026-04-21): ``thresholds`` carries the per-profile S2 overlap
+        threshold. Defaults to ``SuccessfulUseThresholds()`` (0.3) when
+        callers don't resolve — preserves direct-call unit-test ergonomics.
+        """
+        t = thresholds or SuccessfulUseThresholds()
         item_words = {w.lower() for w in item.text.split() if w.lower() not in STOP_WORDS and len(w) > 2}
         expanded = set(item_words)
         for word in item_words:
@@ -1497,7 +1564,7 @@ class ContextLifecycle:
             return False, 0.0
 
         overlap = len(expanded & tool_words) / len(expanded) if expanded else 0.0
-        return overlap > 0.3, min(overlap, 1.0)
+        return overlap > t.s2_tool_correlation_overlap, min(overlap, 1.0)
 
     def _compute_running_jaccard(self, item, messages, injection_turn) -> float:
         """Max Jaccard score across post-injection assistant messages."""

@@ -20,7 +20,7 @@ from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.profiles.inheritance import ProfileInheritanceEngine
 from elephantbroker.runtime.profiles.org_override_store import OrgOverrideStore
 from elephantbroker.runtime.profiles.presets import PROFILE_PRESETS
-from elephantbroker.schemas.profile import ProfilePolicy
+from elephantbroker.schemas.profile import ProfilePolicy, SuccessfulUseThresholds
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 from elephantbroker.schemas.working_set import ScoringWeights
 
@@ -141,6 +141,20 @@ class ProfileRegistry(IProfileRegistry):
             if policy.ingest_batch_size is not None
             else llm_config.ingest_batch_size
         )
+
+    def effective_successful_use_thresholds(
+        self,
+        policy: ProfilePolicy,
+    ) -> SuccessfulUseThresholds:
+        """Resolve the scanner thresholds for a profile.
+
+        Returns ``policy.successful_use_thresholds`` when set; otherwise a
+        fresh ``SuccessfulUseThresholds()`` with module defaults. Follows
+        the ``effective_ingest_batch_size`` precedent — sync, takes the
+        already-resolved policy, no LLM-config second input (module
+        defaults serve that role here).
+        """
+        return policy.successful_use_thresholds or SuccessfulUseThresholds()
 
     async def list_profiles(self) -> list[str]:
         """List all available profile IDs (excluding 'base')."""

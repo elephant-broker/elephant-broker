@@ -212,3 +212,44 @@ class TestProfilePolicyWithRetrieval:
         data = p.model_dump(mode="json")
         restored = ProfilePolicy.model_validate(data)
         assert restored.retrieval.structural_weight == 0.8
+
+
+class TestSuccessfulUseThresholds:
+    """T-2: scanner thresholds are per-profile-configurable via ``SuccessfulUseThresholds``.
+
+    Defaults match the J-1 calibration baseline (0.15/0.3/0.15/0.15/3) so
+    profiles that leave the field None keep the current behavior unchanged.
+    """
+
+    def test_defaults(self):
+        """Module defaults match the J-1 baseline exactly."""
+        from elephantbroker.schemas.profile import SuccessfulUseThresholds
+        t = SuccessfulUseThresholds()
+        assert t.s1_direct_quote_ratio == 0.15
+        assert t.s2_tool_correlation_overlap == 0.3
+        assert t.s3_jaccard_score == 0.15
+        assert t.use_confidence_gate == 0.15
+        assert t.s6_ignored_turns_floor == 3
+
+    def test_field_constraints(self):
+        """Ratios are clamped to [0.0, 1.0]; S6 floor must be >= 1."""
+        from elephantbroker.schemas.profile import SuccessfulUseThresholds
+        # Negative ratio rejected
+        with pytest.raises(ValidationError):
+            SuccessfulUseThresholds(s1_direct_quote_ratio=-0.1)
+        # Above-1.0 rejected
+        with pytest.raises(ValidationError):
+            SuccessfulUseThresholds(s2_tool_correlation_overlap=1.5)
+        # Zero S6 floor rejected (must be >= 1)
+        with pytest.raises(ValidationError):
+            SuccessfulUseThresholds(s6_ignored_turns_floor=0)
+
+
+class TestProfilePolicyThresholds:
+    """T-2: ``ProfilePolicy.successful_use_thresholds`` defaults to None,
+    signalling "use module defaults" to the registry resolver."""
+
+    def test_thresholds_field_default_none(self):
+        from elephantbroker.schemas.profile import ProfilePolicy
+        p = ProfilePolicy(id="test", name="Test")
+        assert p.successful_use_thresholds is None
