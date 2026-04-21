@@ -869,8 +869,22 @@ class ContextLifecycle:
             except Exception:
                 pass
 
-        # Determine response window
-        response_messages = params.messages[params.pre_prompt_message_count:] if params.messages else []
+        # Determine response window (P4: hybrid A+C)
+        # A: Honor plugin signal when OpenClaw emitted it (hot path, zero cost).
+        # C: Fall back to tail-walker when the plugin stayed silent — we scan
+        #    backward for the last user-role message and slice after it so that
+        #    downstream scanners (successful-use, goal-progress) only see the
+        #    response side. Tail-walker is defense-in-depth; OpenClaw should be
+        #    emitting the count in steady state.
+        if not params.messages:
+            response_messages = []
+            boundary_source = "empty"
+        elif params.pre_prompt_message_count is not None:
+            response_messages = params.messages[params.pre_prompt_message_count:]
+            boundary_source = "plugin"
+        else:
+            response_messages = self._extract_response_delta(params.messages)
+            boundary_source = "derived"
 
         # Successful-use tracking (AD-7)
         # The cheap heuristic path (S1/S2/Jaccard) always runs when we have
@@ -991,6 +1005,8 @@ class ContextLifecycle:
                     "turn_count": session_ctx.turn_count,
                     "updated_count": updated_count,
                     "response_messages": len(response_messages),
+                    "total_messages": len(params.messages),
+                    "boundary_source": boundary_source,
                     "snapshot_available": snapshot is not None,
                     "signals_summary": {
                         k: v.get("method", "none") for k, v in signals_by_item.items()
@@ -1308,6 +1324,20 @@ class ContextLifecycle:
                 }
 
         return filtered
+
+    @staticmethod
+    def _extract_response_delta(messages: list[AgentMessage]) -> list[AgentMessage]:
+        """P4 fallback: slice after the last user-role message.
+
+        Walks backward from the end to find the most recent user turn, then
+        returns everything after it (the model's response + any tool traffic).
+        If no user message is found — e.g. the plugin passed us a pure
+        response slice — the whole list is treated as response-side.
+        """
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].role == "user":
+                return messages[idx + 1:]
+        return list(messages)
 
     async def _track_successful_use(self, snapshot, response_messages, session_ctx) -> tuple[int, dict]:
         """Multi-signal successful-use tracking: S1+S2+S6+Jaccard."""

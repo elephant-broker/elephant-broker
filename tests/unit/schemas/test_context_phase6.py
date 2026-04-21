@@ -97,7 +97,9 @@ class TestCompactParams:
 class TestAfterTurnParams:
     def test_defaults(self):
         p = AfterTurnParams(session_id="sid", session_key="sk")
-        assert p.pre_prompt_message_count == 0
+        # P4: None = plugin silent; see AfterTurnParams comment. The runtime
+        # falls back to the tail-walker when this field is absent.
+        assert p.pre_prompt_message_count is None
         assert p.is_heartbeat is False
 
 

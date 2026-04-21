@@ -995,6 +995,125 @@ class TestAfterTurn:
 
 
 # ======================================================================
+# P4: response-delta boundary (hybrid A+C)
+# ======================================================================
+
+
+class TestAfterTurnP4:
+    """P4 tests: honor OpenClaw pre_prompt_message_count when emitted;
+    derive response delta via tail-walker when the plugin is silent."""
+
+    def _after_turn_trace_payload(self, trace: AsyncMock) -> dict:
+        """Extract AFTER_TURN_COMPLETED payload from the trace mock."""
+        matches = [
+            c for c in trace.append_event.call_args_list
+            if c[0][0].event_type == TraceEventType.AFTER_TURN_COMPLETED
+        ]
+        assert matches, "Expected AFTER_TURN_COMPLETED trace event"
+        return matches[-1][0][0].payload
+
+    async def test_honors_plugin_explicit_zero(self):
+        """An explicit pre_prompt_message_count=0 (plugin emitted) means
+        'all messages are response-side' — honored verbatim, not derived."""
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        msgs = [
+            AgentMessage(role="assistant", content="greetings"),
+            AgentMessage(role="assistant", content="more reply"),
+        ]
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=msgs, pre_prompt_message_count=0,
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "plugin"
+        assert payload["response_messages"] == 2
+        assert payload["total_messages"] == 2
+
+    async def test_honors_plugin_nonzero(self):
+        """pre_prompt_message_count=2 on 5 messages slices to 3 response msgs,
+        regardless of where the user messages sit — plugin signal wins."""
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        msgs = [
+            AgentMessage(role="user", content="q1"),
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="user", content="q2"),
+            AgentMessage(role="assistant", content="a2a"),
+            AgentMessage(role="assistant", content="a2b"),
+        ]
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=msgs, pre_prompt_message_count=2,
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "plugin"
+        assert payload["response_messages"] == 3
+        assert payload["total_messages"] == 5
+
+    async def test_derives_response_delta_when_plugin_silent(self):
+        """When OpenClaw doesn't emit pre_prompt_message_count (None), the
+        runtime walks backward from the tail to the last user message and
+        slices after it — defense-in-depth for plugins that haven't wired
+        the signal yet."""
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        msgs = [
+            AgentMessage(role="user", content="old q"),
+            AgentMessage(role="assistant", content="old a"),
+            AgentMessage(role="user", content="current q"),
+            AgentMessage(role="assistant", content="current a"),
+            AgentMessage(role="tool", content="tool output"),
+        ]
+        # pre_prompt_message_count omitted → defaults to None
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK, messages=msgs,
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "derived"
+        # Everything after index 2 (the last user message) is response-side.
+        assert payload["response_messages"] == 2
+        assert payload["total_messages"] == 5
+
+    def test_extract_response_delta_unit(self):
+        """_extract_response_delta walks backward to the last user-role
+        message and returns everything after it. If no user message is
+        present, the entire list is treated as response-side."""
+        # No user message at all → whole list is response.
+        only_assistant = [
+            AgentMessage(role="assistant", content="a"),
+            AgentMessage(role="assistant", content="b"),
+        ]
+        assert ContextLifecycle._extract_response_delta(only_assistant) == only_assistant
+
+        # Single user in the middle → slice after it.
+        mixed = [
+            AgentMessage(role="assistant", content="old"),
+            AgentMessage(role="user", content="q"),
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="tool", content="t1"),
+        ]
+        delta = ContextLifecycle._extract_response_delta(mixed)
+        assert len(delta) == 2
+        assert delta[0].role == "assistant"
+        assert delta[1].role == "tool"
+
+        # Multiple users → slice after the LAST one (not the first).
+        multi_user = [
+            AgentMessage(role="user", content="first"),
+            AgentMessage(role="assistant", content="reply1"),
+            AgentMessage(role="user", content="latest"),
+            AgentMessage(role="assistant", content="reply2"),
+        ]
+        delta = ContextLifecycle._extract_response_delta(multi_user)
+        assert len(delta) == 1
+        assert delta[0].content == "reply2"
+
+        # Empty input → empty output.
+        assert ContextLifecycle._extract_response_delta([]) == []
+
+
+# ======================================================================
 # PR #11 R1: Additional after_turn tests
 # ======================================================================
 

@@ -196,7 +196,11 @@ export class ContextEngineImpl {
       session_id: this.currentSessionId,
       session_key: this.currentSessionKey,
       messages,
-      pre_prompt_message_count: params.prePromptMessageCount || 0,
+      // P4: use `in` (not `||`) so 0 is preserved and "absent" stays absent.
+      // `|| 0` would collapse 0/undefined into the same wire value, hiding
+      // whether OpenClaw sent the signal — the Python side uses has-key to
+      // decide whether to trust the plugin or derive via tail-walker.
+      ...('prePromptMessageCount' in params ? { pre_prompt_message_count: params.prePromptMessageCount } : {}),
       is_heartbeat: false,
     });
   }
