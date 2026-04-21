@@ -4,6 +4,14 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 dist/
+# Committed plugin dist bundles — see TODO-6-501 / PR #6.
+# OpenClaw loads openclaw-plugins/*/dist/index.js at runtime; committed dist
+# is the source of truth; .github/workflows/verify-plugin-dist.yml enforces
+# src↔dist parity on every PR.
+!openclaw-plugins/elephantbroker-context/dist/
+!openclaw-plugins/elephantbroker-context/dist/**
+!openclaw-plugins/elephantbroker-memory/dist/
+!openclaw-plugins/elephantbroker-memory/dist/**
 build/
 .env
 .ruff_cache/
