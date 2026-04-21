@@ -393,11 +393,6 @@ class ContextLifecycle:
         if session_ctx:
             for msg in params.messages:
                 msg.metadata["eb_turn"] = str(session_ctx.turn_count)
-            self._log.info(
-                "[EB-DIAG-I1] ingest_batch_stamped session_key=%s turn=%d msg_count=%d "
-                "called_from_after_turn=%s",
-                sk, session_ctx.turn_count, len(params.messages), _called_from_after_turn,
-            )
             # NOTE: turn_count is incremented ONLY in after_turn(), which is the
             # canonical "turn completed" signal in both live and simulation modes.
             # ingest_batch() annotates messages with the current turn_count but does
@@ -907,12 +902,6 @@ class ContextLifecycle:
         # evaluation below is separately gated on config.successful_use.enabled.
         updated_count = 0
         signals_by_item: dict[str, dict] = {}
-        self._log.info(
-            "[EB-DIAG-I1] after_turn_state session_key=%s snapshot_present=%s "
-            "snapshot_items=%d response_msg_count=%d boundary_source=%s last_snapshot_id=%s",
-            sk, snapshot is not None, len(snapshot.items) if snapshot else 0,
-            len(response_messages), boundary_source, session_ctx.last_snapshot_id,
-        )
         if snapshot and response_messages:
             updated_count, signals_by_item = await self._track_successful_use(
                 snapshot, response_messages, session_ctx,
@@ -1371,12 +1360,6 @@ class ContextLifecycle:
             item_id = str(item.id)
             injection_turn = session_ctx.fact_last_injection_turn.get(item_id, 0)
             turns_since = session_ctx.turn_count - injection_turn
-            self._log.info(
-                "[EB-DIAG-I1] scanner_enter item_id=%s eb_id=%s source_type=%s "
-                "turn_count=%d injection_turn=%d turns_since=%d response_msg_count=%d",
-                item_id, getattr(item, "eb_id", "?"), item.source_type,
-                session_ctx.turn_count, injection_turn, turns_since, len(response_messages),
-            )
             signals: list[tuple[str, float]] = []
 
             # S1: Direct quote detection
@@ -1407,12 +1390,6 @@ class ContextLifecycle:
                 use_confidence = 0.0
                 method = "ignored"
 
-            self._log.info(
-                "[EB-DIAG-I1] verdict eb_id=%s signals=%r use_confidence=%.3f method=%s "
-                "will_update_success=%s",
-                getattr(item, "eb_id", "?"), signals, use_confidence, method,
-                use_confidence > 0.15,
-            )
             signal_entry: dict = {"confidence": use_confidence, "method": method}
             # S6: Track ignored_turns for Phase 9 weight tuning
             if method == "ignored" and turns_since >= 3:
@@ -1458,23 +1435,12 @@ class ContextLifecycle:
             m for m in messages
             if m.role == "assistant" and int(m.metadata.get("eb_turn", "0")) >= injection_turn
         ]
-        self._log.info(
-            "[EB-DIAG-I1] s1_filter eb_id=%s phrases=%d messages_in=%d post_injection=%d "
-            "eb_turns_seen=%s injection_turn=%d",
-            getattr(item, "eb_id", "?"), len(phrases), len(messages), len(post_injection),
-            [m.metadata.get("eb_turn", "MISSING") for m in messages if m.role == "assistant"],
-            injection_turn,
-        )
         if not post_injection:
             return False, 0.0
 
         combined = " ".join(content_as_text(m).lower() for m in post_injection)
         matches = sum(1 for p in phrases if p in combined)
         ratio = matches / len(phrases) if phrases else 0.0
-        self._log.info(
-            "[EB-DIAG-I1] s1_match eb_id=%s ratio=%.3f matches=%d phrases=%r hit=%s",
-            getattr(item, "eb_id", "?"), ratio, matches, phrases, ratio > 0.15,
-        )
         # J-1: S1 direct-quote threshold lowered from 0.4 → 0.15 for calibration (H-alt-2).
         # At 0.4 the scanner required ~40% of a fact's extracted key-phrases to appear
         # verbatim in the response to register — too strict given that agents often
@@ -1532,12 +1498,6 @@ class ContextLifecycle:
             union = item_tokens | msg_tokens
             score = len(intersection) / len(union) if union else 0.0
             max_score = max(max_score, score)
-            self._log.info(
-                "[EB-DIAG-I1] jaccard eb_id=%s msg_turn=%d injection_turn=%d "
-                "score=%.3f intersection=%d union=%d",
-                getattr(item, "eb_id", "?"), msg_turn, injection_turn,
-                score, len(intersection), len(union),
-            )
 
         return max_score
 
