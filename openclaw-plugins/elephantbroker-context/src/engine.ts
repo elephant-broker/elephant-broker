@@ -186,6 +186,12 @@ export class ContextEngineImpl {
     if (messages.length === 0) {
       console.warn("[EB] afterTurn: no messages available (params.messages and lastTurnMessages both empty)");
     }
+    // [DIAG-P4] Probe: does OpenClaw emit prePromptMessageCount? `in` operator
+    // distinguishes "key absent" from "key present with 0/undefined" — JS `||`
+    // below erases that distinction and hides the answer. Removed in follow-up commit.
+    console.warn(
+      `[EB-DIAG-P4] afterTurn params: hasKey=${'prePromptMessageCount' in params} value=${params.prePromptMessageCount} type=${typeof params.prePromptMessageCount} messagesLen=${params.messages?.length ?? 0}`,
+    );
     await this.client.afterTurn({
       session_id: this.currentSessionId,
       session_key: this.currentSessionKey,
