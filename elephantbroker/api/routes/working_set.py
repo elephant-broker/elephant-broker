@@ -27,7 +27,7 @@ async def build_working_set(body: BuildWorkingSetRequest, request: Request):
 
     T-3: each returned item carries two orthogonal fields:
     - ``source_type``: DataPoint-type semantic. One of
-      "fact", "artifact", "goal", "persistent_goal", "procedure", "compact_state".
+      "fact", "artifact", "goal", "persistent_goal", "procedure".
     - ``retrieval_source``: retrieval-path provenance for fact-class items.
       One of "structural", "keyword", "vector", "graph", or None (for
       non-retrieval items: goals, procedures, artifacts).

@@ -90,7 +90,7 @@ class WorkingSetItem(BaseModel):
     """
     id: str
     source_type: Literal[
-        "fact", "artifact", "goal", "persistent_goal", "procedure", "compact_state",
+        "fact", "artifact", "goal", "persistent_goal", "procedure",
     ]
     retrieval_source: Literal["structural", "keyword", "vector", "graph"] | None = None
     source_id: uuid.UUID

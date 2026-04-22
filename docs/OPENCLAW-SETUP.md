@@ -342,8 +342,8 @@ schema split separates them into two constrained `Literal` fields.
 
 | Field | Type | Purpose |
 |---|---|---|
-| `source_type` | `Literal["fact", "artifact", "goal", "persistent_goal", "procedure", "compact_state"]` | DataPoint-type semantic. Always populated. |
-| `retrieval_source` | `Literal["structural", "keyword", "vector", "graph"] \| None = None` | Retrieval-path semantic. `None` for non-fact items (goals, procedures, artifacts, compact-states). |
+| `source_type` | `Literal["fact", "artifact", "goal", "persistent_goal", "procedure"]` | DataPoint-type semantic. Always populated. |
+| `retrieval_source` | `Literal["structural", "keyword", "vector", "graph"] \| None = None` | Retrieval-path semantic. `None` for non-fact items (goals, procedures, artifacts). |
 
 **Migration note for plugin/SDK consumers:** previously `source_type`
 carried retrieval-path values (`"vector"` / `"keyword"` / `"structural"`

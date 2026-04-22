@@ -9135,13 +9135,13 @@ meanings ad hoc.
 
 **After (PR #6):** two fields, each a constrained `Literal`:
 
-- `source_type: Literal["fact", "artifact", "goal", "persistent_goal", "procedure", "compact_state"]`
+- `source_type: Literal["fact", "artifact", "goal", "persistent_goal", "procedure"]`
   — the DataPoint-type semantic. Always populated. For retrieval-sourced
   items this is always `"fact"`.
 - `retrieval_source: Literal["structural", "keyword", "vector", "graph"] | None = None`
   — the retrieval-path semantic. `None` for non-fact items (goals,
-  procedures, artifacts, compact-states) that flow through the pipeline
-  without a retrieval source.
+  procedures, artifacts) that flow through the pipeline without a
+  retrieval source.
 
 **Migration for API consumers:**
 
