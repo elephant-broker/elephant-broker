@@ -1371,18 +1371,37 @@ class ContextLifecycle:
 
         return filtered
 
-    @staticmethod
-    def _extract_response_delta(messages: list[AgentMessage]) -> list[AgentMessage]:
+    def _extract_response_delta(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """P4 fallback: slice after the last user-role message.
 
         Walks backward from the end to find the most recent user turn, then
         returns everything after it (the model's response + any tool traffic).
-        If no user message is found — e.g. the plugin passed us a pure
-        response slice — the whole list is treated as response-side.
+
+        No-user-role fallback (TODO-6-105 / TODO-6-306,
+        cluster C-response-delta-no-user): if the envelope contains no
+        ``role=="user"`` message — e.g. a heartbeat/sweep turn, a subagent
+        delta, a malformed buffer replay, or a future OpenClaw shape that
+        omits user echoes — the whole list is returned as response delta.
+        Scanner blast radius is bounded (S1/S3 filter to
+        ``role=="assistant"`` downstream) but the semantic inversion is
+        quiet, so this branch additionally emits a WARN log and increments
+        ``eb_response_delta_no_user_total{gateway_id}`` for operator
+        visibility (trace: journalctl, alertmanager: ``rate(...) > 0``).
         """
         for idx in range(len(messages) - 1, -1, -1):
             if messages[idx].role == "user":
                 return messages[idx + 1:]
+        # No user-role message found — return the full list as a defensive
+        # fallback so downstream scanners still have something to iterate,
+        # but surface the incident on both observability channels.
+        self._log.warning(
+            "P4 _extract_response_delta: no user-role message in %d-message "
+            "envelope — treating entire list as response delta (potential "
+            "scanner over-attribution)",
+            len(messages),
+        )
+        if self._metrics:
+            self._metrics.inc_response_delta_no_user_boundary()
         return list(messages)
 
     async def _track_successful_use(

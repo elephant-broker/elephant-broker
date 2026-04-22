@@ -1089,13 +1089,22 @@ class TestAfterTurnP4:
     def test_extract_response_delta_unit(self):
         """_extract_response_delta walks backward to the last user-role
         message and returns everything after it. If no user message is
-        present, the entire list is treated as response-side."""
+        present, the entire list is treated as response-side.
+
+        TODO-6-105 / TODO-6-306: ``_extract_response_delta`` is now an
+        instance method (not ``@staticmethod``) so it can emit a WARN log
+        and increment ``inc_response_delta_no_user_boundary`` on the
+        no-user-role fallback branch. Direct unit calls go through an
+        instance built with the shared ``_make_lifecycle()`` helper.
+        """
+        lc = _make_lifecycle()
+
         # No user message at all → whole list is response.
         only_assistant = [
             AgentMessage(role="assistant", content="a"),
             AgentMessage(role="assistant", content="b"),
         ]
-        assert ContextLifecycle._extract_response_delta(only_assistant) == only_assistant
+        assert lc._extract_response_delta(only_assistant) == only_assistant
 
         # Single user in the middle → slice after it.
         mixed = [
@@ -1104,7 +1113,7 @@ class TestAfterTurnP4:
             AgentMessage(role="assistant", content="a1"),
             AgentMessage(role="tool", content="t1"),
         ]
-        delta = ContextLifecycle._extract_response_delta(mixed)
+        delta = lc._extract_response_delta(mixed)
         assert len(delta) == 2
         assert delta[0].role == "assistant"
         assert delta[1].role == "tool"
@@ -1116,12 +1125,64 @@ class TestAfterTurnP4:
             AgentMessage(role="user", content="latest"),
             AgentMessage(role="assistant", content="reply2"),
         ]
-        delta = ContextLifecycle._extract_response_delta(multi_user)
+        delta = lc._extract_response_delta(multi_user)
         assert len(delta) == 1
         assert delta[0].content == "reply2"
 
         # Empty input → empty output.
-        assert ContextLifecycle._extract_response_delta([]) == []
+        assert lc._extract_response_delta([]) == []
+
+    def test_extract_response_delta_no_user_warns_and_increments(self, caplog):
+        """TODO-6-105 (Business Logic, LOW) + TODO-6-306 (Blind Spot, LOW):
+        when the envelope contains no ``role=="user"`` message, the
+        tail-walker returns the full list as a defensive fallback AND
+        emits both observability signals:
+
+        - WARN log on ``elephantbroker.runtime.context.lifecycle`` with
+          the envelope size so operators tailing journalctl can detect
+          the no-user-boundary branch firing.
+        - ``MetricsContext.inc_response_delta_no_user_boundary()``
+          increment on the ``eb_response_delta_no_user_total{gateway_id}``
+          counter so alertmanager can fire on ``rate(...) > 0``.
+
+        The return value is intentionally NOT changed to ``[]`` — preserving
+        the defensive fallback (``list(messages)``) keeps downstream scanners
+        running; the observability surface is what closes the gap.
+        """
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+
+        envelope = [
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="tool", content="t1"),
+            AgentMessage(role="assistant", content="a2"),
+        ]
+
+        with caplog.at_level(
+            logging.WARNING, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            delta = lc._extract_response_delta(envelope)
+
+        # 1. Fallback return value is the full list (resilience preserved).
+        assert delta == envelope
+        assert len(delta) == 3
+
+        # 2. Counter incremented exactly once (no labels beyond gateway_id).
+        metrics.inc_response_delta_no_user_boundary.assert_called_once_with()
+
+        # 3. WARN log emitted on the lifecycle logger.
+        warn_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "_extract_response_delta" in rec.getMessage()
+            and "no user-role message" in rec.getMessage()
+        ]
+        assert len(warn_records) == 1, (
+            f"expected exactly one WARN on no-user fallback, got {len(warn_records)}"
+        )
+        assert "3-message envelope" in warn_records[0].getMessage()
 
 
 # ======================================================================

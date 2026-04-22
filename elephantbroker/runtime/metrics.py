@@ -34,6 +34,18 @@ try:
         "P4 response-boundary source per after_turn",
         ["gateway_id", "source"],
     )
+    # TODO-6-105 / TODO-6-306 (cluster C-response-delta-no-user): surface
+    # the `_extract_response_delta` no-user-role fallback branch. When the
+    # tail-walker finds no role="user" message, the whole envelope is
+    # returned as "response delta" — bounded blast radius (downstream
+    # scanners filter to role="assistant") but silent until now. Operators
+    # can alert on `rate(...) > 0` to catch malformed/heartbeat/subagent
+    # envelopes reaching after_turn.
+    eb_response_delta_no_user_total = Counter(
+        "eb_response_delta_no_user_total",
+        "P4 _extract_response_delta no-user-role fallback fires per after_turn",
+        ["gateway_id"],
+    )
     eb_session_active = Gauge("eb_session_active", "Active sessions", ["gateway_id", "profile_name"])
     eb_edges_created_total = Counter("eb_edges_created_total", "Graph edges created", ["gateway_id", "edge_type"])
     eb_edges_failed_total = Counter("eb_edges_failed_total", "Failed edges", ["gateway_id", "edge_type"])
@@ -276,6 +288,18 @@ def inc_after_turn_boundary_source(source: str, gateway_id: str = "") -> None:
         ).inc()
 
 
+def inc_response_delta_no_user(gateway_id: str = "") -> None:
+    """Increment the P4 _extract_response_delta no-user-role fallback counter.
+
+    Fires when the tail-walker in ``ContextLifecycle._extract_response_delta``
+    cannot find a ``role=="user"`` message in the envelope — the whole list
+    is returned as response delta (defensive fallback). Single bounded label
+    (``gateway_id``); the counter is a pure incident signal.
+    """
+    if METRICS_AVAILABLE:
+        eb_response_delta_no_user_total.labels(gateway_id=gateway_id).inc()
+
+
 def inc_cognee_capture_failure(operation: str, gateway_id: str = "") -> None:
     if METRICS_AVAILABLE:
         eb_cognee_data_id_capture_failures_total.labels(
@@ -389,6 +413,9 @@ class MetricsContext:
 
     def inc_after_turn_boundary_source(self, source: str) -> None:
         inc_after_turn_boundary_source(source, gateway_id=self._gw)
+
+    def inc_response_delta_no_user_boundary(self) -> None:
+        inc_response_delta_no_user(gateway_id=self._gw)
 
     def inc_cognee_capture_failure(self, operation: str) -> None:
         inc_cognee_capture_failure(operation, gateway_id=self._gw)
