@@ -151,23 +151,61 @@ class TestContextRoutes:
         assert r2.status_code == 200
         assert r2.json()["ingest_batch_size"] == 6
 
-    async def test_get_config_falls_back_to_global_when_profile_resolution_fails(
+    async def test_get_config_unknown_profile_returns_404(
         self, client, container,
     ):
-        """P6: /config must never 500 — any resolver exception falls back
-        silently to the global LLMConfig value."""
+        """TODO-6-702: ProfileRegistry.resolve_profile raises KeyError on
+        unknown profile names; this must surface as HTTP 404 with a
+        diagnosable ``detail`` so operator typos don't silently fall back
+        to matching-default values."""
         from unittest.mock import AsyncMock
 
         from elephantbroker.schemas.config import ElephantBrokerConfig
 
         container.config = ElephantBrokerConfig()
         container.profile_registry.resolve_profile = AsyncMock(
-            side_effect=KeyError("Unknown profile: nonexistent"),
+            side_effect=KeyError("Unknown profile: codnig"),
         )
 
-        r = await client.get("/context/config?profile=nonexistent")
+        r = await client.get("/context/config?profile=codnig")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Unknown profile: codnig"
+
+    async def test_get_config_transient_exception_warns_and_falls_back(
+        self, client, container, caplog,
+    ):
+        """TODO-6-202 / TODO-6-304: non-KeyError resolver exceptions (transient
+        registry/DB faults) must (a) NOT 500 — endpoint stays up with global
+        fallback, (b) emit a WARNING so the silent fallback is observable in
+        logs. KeyError-specific branch is covered by the 404 test above."""
+        import logging
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+
+        container.config = ElephantBrokerConfig()
+        container.profile_registry.resolve_profile = AsyncMock(
+            side_effect=RuntimeError("transient-db-hiccup"),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.api.routes.context"):
+            r = await client.get("/context/config?profile=coding")
+
         assert r.status_code == 200
         assert r.json()["ingest_batch_size"] == 6  # global default
+
+        warning_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and rec.name == "elephantbroker.api.routes.context"
+            and "profile resolution failed" in rec.getMessage()
+        ]
+        assert len(warning_records) == 1, (
+            f"expected exactly one WARNING on transient-fallback branch, got {len(warning_records)}"
+        )
+        msg = warning_records[0].getMessage()
+        assert "'coding'" in msg
+        assert "transient-db-hiccup" in msg
 
     async def test_subagent_rollback(self, client):
         body = {"parent_session_key": "p", "child_session_key": "c", "rollback_key": "k"}

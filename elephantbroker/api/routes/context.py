@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -192,9 +192,15 @@ async def get_config(request: Request, profile: str | None = None):
             result.update(config.context_assembly.model_dump(mode="json"))
         if hasattr(config, "llm"):
             # P6: when ?profile=X is supplied, resolve the profile-level
-            # ingest_batch_size override via ProfileRegistry. On any failure
-            # (unknown profile, registry absent, resolve error) we silently
-            # fall back to the global LLMConfig value — /config must not 500.
+            # ingest_batch_size override via ProfileRegistry.
+            #
+            # TODO-6-702 / TODO-6-202 / TODO-6-304 (cluster C-config-swallow):
+            # KeyError → 404 (unknown profile is a client error and MUST be
+            # diagnosable — silent fallback hides typos behind matching-default
+            # values). Other exceptions → WARNING log + global fallback (never
+            # 500 the /config endpoint; transient registry/DB faults stay
+            # observable via logs). Mirrors the warn-log pattern applied at
+            # /memory/ingest-messages in commit 7a095bf (TODO-6-701+6-401).
             effective_batch = config.llm.ingest_batch_size
             if profile and getattr(container, "profile_registry", None):
                 try:
@@ -205,8 +211,25 @@ async def get_config(request: Request, profile: str | None = None):
                         effective_batch = container.profile_registry.effective_ingest_batch_size(
                             policy, config.llm,
                         )
-                except Exception:
-                    pass  # Fall back to global; never 500 the /config endpoint
+                except KeyError:
+                    # Unknown profile name — give operators a diagnosable 404
+                    # instead of a silent fallback that's indistinguishable
+                    # from a matching-default value.
+                    raise HTTPException(
+                        status_code=404, detail=f"Unknown profile: {profile}",
+                    )
+                except Exception as exc:
+                    # Transient registry/DB errors — keep endpoint up (don't
+                    # 500), but log so operators can diagnose the silent
+                    # fallback when something actually broke. Inline
+                    # `import logging` matches the dispose() precedent above.
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "P6 /context/config: profile resolution failed for "
+                        "?profile=%r — falling back to global LLMConfig."
+                        "ingest_batch_size (%.60s)",
+                        profile, exc,
+                    )
             result["ingest_batch_size"] = effective_batch
             result["ingest_batch_timeout_ms"] = int(config.llm.ingest_batch_timeout_seconds * 1000)
     return result
