@@ -2300,6 +2300,230 @@ class TestScannerCalibration:
                     f"S1 and S3 signals — got update payload: {c.args[1]}"
                 )
 
+    async def test_successful_use_count_increments_exactly_once_on_delta(self):
+        """TODO-6-602: P4 `pre_prompt_message_count` single-fire regression.
+
+        Scenario: the agent framework re-sends the full conversation to
+        `after_turn()` — i.e. the `messages` list contains BOTH prior-turn
+        history messages AND the current-turn response. If the P4 boundary
+        is honored, the scanner sees only the delta (messages[N:]) and fires
+        exactly once on the fact. If the boundary regresses (e.g., plugin
+        signal dropped and tail-walker misidentifies the delta), the scanner
+        could potentially scan the entire history, producing a single
+        inflated update with `successful_use_count > 1` from repeated
+        matches, OR a duplicate update call.
+
+        This test pins the invariant: with `pre_prompt_message_count` set,
+        exactly one update with `successful_use_count == 1` is produced.
+
+        Regression this test catches: any future change that accidentally
+        ignores `params.pre_prompt_message_count` (e.g. reordering the
+        if/elif at lifecycle.py:884-892 such that the tail-walker branch
+        wins over the explicit plugin signal).
+        """
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="fact",
+            retrieval_source="vector",
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        # Envelope: 4 messages = [T1_user, T1_assistant (matches fact),
+        # T2_user, T2_assistant (matches fact)]. With pre_prompt_message_count=3,
+        # only T2_assistant falls into the response delta — T1 history stays
+        # outside the scanner window.
+        messages = [
+            AgentMessage(role="user", content="tell me about postgres tuning"),
+            AgentMessage(
+                role="assistant",
+                content=(
+                    "postgres timescaledb is great for hypertables and "
+                    "compression at scale."
+                ),
+            ),
+            AgentMessage(role="user", content="follow-up question"),
+            AgentMessage(
+                role="assistant",
+                content=(
+                    "postgres timescaledb compression works well on "
+                    "hypertables when tuned properly."
+                ),
+            ),
+        ]
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=messages,
+            pre_prompt_message_count=3,
+        )
+        await lc.after_turn(params)
+
+        # Collect every memory_store.update call that carried a
+        # successful_use_count key. Invariant: exactly one such call, and
+        # its payload value is 1 (starting from 0 + 1 = 1).
+        success_updates = [
+            c.args[1]
+            for c in memory_store.update.call_args_list
+            if len(c.args) >= 2
+            and isinstance(c.args[1], dict)
+            and "successful_use_count" in c.args[1]
+        ]
+        assert len(success_updates) == 1, (
+            f"P4 boundary-respecting scanner should fire exactly once per "
+            f"after_turn call, got {len(success_updates)} updates with "
+            f"successful_use_count key: {success_updates}"
+        )
+        assert success_updates[0]["successful_use_count"] == 1, (
+            f"successful_use_count should be exactly 1 (0 + 1), got "
+            f"{success_updates[0]['successful_use_count']} — this would "
+            f"indicate the scanner is inflating counts (e.g., double-"
+            f"counting matches on history messages)."
+        )
+
+    async def test_successful_use_fires_exactly_once_across_turns(self):
+        """TODO-6-603: P4 state-progression regression across sequential turns.
+
+        Scenario: two sequential `after_turn()` calls on the same fact.
+        T1 response does not match the fact (no signal); T2 response does
+        match. Invariant: no successful_use_count update fires in T1, and
+        exactly one fires in T2 with count==1.
+
+        This exercises the same P4 boundary logic as
+        `test_successful_use_count_increments_exactly_once_on_delta` but
+        across *separate* after_turn invocations rather than within a single
+        call. Together they pin the "exactly once per matching response"
+        contract end-to-end.
+
+        Note on snapshot state: the WorkingSetItem loaded from Redis carries
+        `successful_use_count` as persisted. Here we keep the same snapshot
+        JSON on Redis across both turns (the live system would normally
+        refresh the snapshot between turns via assemble()); the T1 call
+        produces no update and the T2 call produces count=1. If either
+        turn's scanner fired spuriously, we'd see an extra update call.
+
+        Full-integration version (OpenClaw Gateway simulator + real Redis +
+        trace-probe on AFTER_TURN_COMPLETED) is tracked as a deferred TD
+        entry — see local/TECHNICAL-DEBT.md (TD-scanner-6).
+        """
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="fact",
+            retrieval_source="vector",
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        # T1: non-matching response (unrelated tokens). The scanner should
+        # not fire a successful_use_count update — only the plain use_count
+        # / last_used_at path would run (not asserted here, it's covered by
+        # test_unrelated_fact_still_ignored).
+        t1_params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(role="user", content="question one"),
+                AgentMessage(
+                    role="assistant",
+                    content="redis sentinel failover cluster configuration.",
+                ),
+            ],
+            pre_prompt_message_count=1,  # only assistant message in delta
+        )
+        await lc.after_turn(t1_params)
+        t1_success_updates = [
+            c.args[1]
+            for c in memory_store.update.call_args_list
+            if len(c.args) >= 2
+            and isinstance(c.args[1], dict)
+            and "successful_use_count" in c.args[1]
+        ]
+        assert len(t1_success_updates) == 0, (
+            f"T1 response is non-matching — scanner must not emit a "
+            f"successful_use_count update in this turn, got "
+            f"{len(t1_success_updates)}: {t1_success_updates}"
+        )
+
+        # Reset memory_store.update call history so T2 assertions are not
+        # polluted by T1's plain use_count bump. We only care about T2's
+        # scanner-emitted updates from here on.
+        memory_store.update.reset_mock()
+
+        # T2: matching response. The scanner should now fire exactly once
+        # with `successful_use_count == 1` (0 + 1, since the snapshot held
+        # on Redis still carries the original count=0 for this test).
+        t2_params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(role="user", content="question two"),
+                AgentMessage(
+                    role="assistant",
+                    content=(
+                        "postgres timescaledb compression handles "
+                        "hypertables natively."
+                    ),
+                ),
+            ],
+            pre_prompt_message_count=1,  # only assistant message in delta
+        )
+        await lc.after_turn(t2_params)
+        t2_success_updates = [
+            c.args[1]
+            for c in memory_store.update.call_args_list
+            if len(c.args) >= 2
+            and isinstance(c.args[1], dict)
+            and "successful_use_count" in c.args[1]
+        ]
+        assert len(t2_success_updates) == 1, (
+            f"T2 response is matching — scanner must emit exactly one "
+            f"successful_use_count update, got {len(t2_success_updates)}: "
+            f"{t2_success_updates}"
+        )
+        assert t2_success_updates[0]["successful_use_count"] == 1, (
+            f"T2 successful_use_count should be 1 (0 + 1), got "
+            f"{t2_success_updates[0]['successful_use_count']}"
+        )
+
 
 # ======================================================================
 # Message transformation (AD-4)
