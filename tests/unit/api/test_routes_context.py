@@ -88,6 +88,87 @@ class TestContextRoutes:
         r = await client.post("/context/after-turn", json=body)
         assert r.status_code == 200
 
+    # ------------------------------------------------------------------
+    # TODO-6-407 (Round 1 Architecture Reviewer, LOW): pin the 3-state
+    # pre_prompt_message_count wire contract through the FastAPI hop.
+    # Python-side branches (plugin/derived/empty) are covered by
+    # TestAfterTurnP4 in tests/unit/runtime/context/test_lifecycle.py;
+    # what this trio locks is that the HTTP JSON body correctly
+    # materializes into AfterTurnParams.pre_prompt_message_count with
+    # the None / 0 / N distinction preserved across the hop. A
+    # regression that collapsed 0 → None (or N → 0, or drifted the
+    # field name) would be caught here without waiting for live-traffic
+    # behavior divergence.
+    # ------------------------------------------------------------------
+
+    async def test_after_turn_pre_prompt_message_count_absent_passes_none(
+        self, client, container,
+    ):
+        """Absent `pre_prompt_message_count` in the HTTP body → lifecycle
+        receives `AfterTurnParams(pre_prompt_message_count=None)` →
+        runtime takes the tail-walker 'derived' branch."""
+        body = {"session_key": "agent:main:main", "session_id": str(uuid.uuid4())}
+        r = await client.post("/context/after-turn", json=body)
+        assert r.status_code == 200
+        container.context_lifecycle.after_turn.assert_called_once()
+        params = container.context_lifecycle.after_turn.call_args.args[0]
+        assert params.pre_prompt_message_count is None, (
+            f"absent body field must surface as None to the lifecycle; "
+            f"got {params.pre_prompt_message_count!r}"
+        )
+
+    async def test_after_turn_pre_prompt_message_count_zero_honored(
+        self, client, container,
+    ):
+        """Explicit `pre_prompt_message_count=0` in the HTTP body →
+        lifecycle receives `AfterTurnParams(pre_prompt_message_count=0)`
+        (int zero, NOT None) → runtime takes the 'plugin' branch honoring
+        the zero verbatim. Regression that falsy-collapsed 0 → None would
+        silently route to 'derived' and break the P4 first-turn contract."""
+        body = {
+            "session_key": "agent:main:main",
+            "session_id": str(uuid.uuid4()),
+            "pre_prompt_message_count": 0,
+        }
+        r = await client.post("/context/after-turn", json=body)
+        assert r.status_code == 200
+        container.context_lifecycle.after_turn.assert_called_once()
+        params = container.context_lifecycle.after_turn.call_args.args[0]
+        assert params.pre_prompt_message_count == 0
+        assert params.pre_prompt_message_count is not None, (
+            "explicit 0 must NOT collapse to None across the HTTP hop — "
+            "the P4 hybrid-A+C design distinguishes 'plugin emitted 0' "
+            "(honor) from 'plugin silent' (derive)"
+        )
+
+    async def test_after_turn_pre_prompt_message_count_positive_passes_through(
+        self, client, container,
+    ):
+        """Positive `pre_prompt_message_count=3` in the HTTP body →
+        lifecycle receives `AfterTurnParams(pre_prompt_message_count=3)`
+        with the full `messages` list → runtime slices `messages[3:]` as
+        the response delta. Pins the positive-integer path end-to-end."""
+        body = {
+            "session_key": "agent:main:main",
+            "session_id": str(uuid.uuid4()),
+            "pre_prompt_message_count": 3,
+            "messages": [
+                {"role": "user", "content": "hist q1"},
+                {"role": "assistant", "content": "hist a1"},
+                {"role": "user", "content": "current q"},
+                {"role": "assistant", "content": "current a"},
+            ],
+        }
+        r = await client.post("/context/after-turn", json=body)
+        assert r.status_code == 200
+        container.context_lifecycle.after_turn.assert_called_once()
+        params = container.context_lifecycle.after_turn.call_args.args[0]
+        assert params.pre_prompt_message_count == 3
+        assert len(params.messages) == 4, (
+            "full messages envelope must survive the hop intact — the "
+            "runtime's slice arithmetic depends on it"
+        )
+
     async def test_subagent_spawn(self, client):
         body = {"parent_session_key": "parent", "child_session_key": "child"}
         r = await client.post("/context/subagent/spawn", json=body)

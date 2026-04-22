@@ -954,7 +954,12 @@ class TestIngestBufferABCConformance:
         from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
 
         class _Partial(IIngestBuffer):
-            async def add_messages(self, session_key, messages): return False
+            # TODO-6-406: `effective_batch_size` kwarg must match the ABC
+            # signature (post TODO-6-701/401) — otherwise any caller that
+            # passes it TypeErrors on this stub. See
+            # `test_ingest_buffer_signature_matches_abc` below for the
+            # generalized drift guard.
+            async def add_messages(self, session_key, messages, *, effective_batch_size: int | None = None): return False
             async def flush(self, session_key): return []
             async def force_flush(self, session_key): return []
             async def check_timeout_flush(self, session_key): return False
@@ -974,7 +979,8 @@ class TestIngestBufferABCConformance:
 
         class _StubBuffer(IIngestBuffer):
             def __init__(self): self.scrubbed: list[tuple[str, str]] = []
-            async def add_messages(self, session_key, messages): return False
+            # TODO-6-406: `effective_batch_size` kwarg synced with ABC.
+            async def add_messages(self, session_key, messages, *, effective_batch_size: int | None = None): return False
             async def flush(self, session_key): return []
             async def force_flush(self, session_key): return []
             async def check_timeout_flush(self, session_key): return False
@@ -990,6 +996,44 @@ class TestIngestBufferABCConformance:
             trace_ledger=MagicMock(), ingest_buffer=stub,
         )
         assert facade._ingest_buffer is stub
+
+    def test_ingest_buffer_signature_matches_abc(self):
+        """TODO-6-406 (Round 1 Architecture Reviewer, LOW): the concrete
+        IngestBuffer must match the IIngestBuffer ABC's per-method signature,
+        not merely the method-name set. @abstractmethod only enforces name
+        presence; a signature drift (e.g. the ABC adding `effective_batch_size`
+        while a subclass forgets it) wouldn't trip the subclass check, but
+        would TypeError at the first caller that passes the new kwarg.
+
+        Parity assertion: for every abstract method on IIngestBuffer, the
+        parameter list (name, kind, default, annotation) on the real
+        IngestBuffer method must match the ABC's. Catches future kwarg /
+        default / star-arg drift without waiting for a caller to TypeError.
+
+        Matches the existing pattern at `tests/unit/runtime/interfaces/
+        test_contracts.py::test_iscrub_buffer_method_signature_matches_
+        iingestbuffer` which compares `.parameters` (not the full
+        Signature). Narrower comparison sidesteps any non-material
+        divergence that async/decorator machinery might introduce around
+        return-type annotations while still catching every material drift
+        class (added/removed kwargs, changed defaults, re-kinded params).
+        """
+        import inspect
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+
+        abstract_methods = IIngestBuffer.__abstractmethods__
+        mismatches: list[str] = []
+        for name in sorted(abstract_methods):
+            abc_params = inspect.signature(getattr(IIngestBuffer, name)).parameters
+            impl_params = inspect.signature(getattr(IngestBuffer, name)).parameters
+            if abc_params != impl_params:
+                mismatches.append(
+                    f"{name}: ABC={dict(abc_params)}  impl={dict(impl_params)}",
+                )
+        assert not mismatches, (
+            "IngestBuffer parameter drift vs IIngestBuffer ABC:\n  "
+            + "\n  ".join(mismatches)
+        )
 
 
 # ---------------------------------------------------------------------------

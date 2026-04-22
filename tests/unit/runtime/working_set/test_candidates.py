@@ -495,6 +495,35 @@ class TestRetrievalCandidateToItem:
             "describes fact retrieval paths, and artifacts are not facts."
         )
 
+    def test_retrieval_candidate_to_item_rejects_unknown_source(self):
+        """TODO-6-303 (Round 1 Blind Spot Reviewer, LOW):
+        ``retrieval_candidate_to_item`` must reject any ``rc.source`` value
+        outside the ``{structural, keyword, vector, graph, artifact}`` set
+        at the conversion boundary, failing loud-and-early rather than
+        silently constructing a ``WorkingSetItem`` whose ``retrieval_source``
+        fails deep Pydantic Literal validation.
+
+        Pins the guard against two real-world vectors:
+
+        1. ``/rerank`` producer (``source="api"``) accidentally piped into
+           the working-set converter — the exact scenario the reviewer
+           flagged as a latent landmine.
+        2. A typo or new retrieval path slipping into the orchestrator
+           without updating the Literal or the converter guard.
+        """
+        import pytest
+        fact = make_fact_assertion(text="candidate text")
+
+        # /rerank-style producer value — must be rejected.
+        rc_api = RetrievalCandidate(fact=fact, source="api", score=0.5)
+        with pytest.raises(ValueError, match="unknown RetrievalCandidate.source"):
+            CandidateGenerator.retrieval_candidate_to_item(rc_api)
+
+        # Generic typo — must be rejected.
+        rc_typo = RetrievalCandidate(fact=fact, source="vectoor", score=0.5)
+        with pytest.raises(ValueError, match="expected one of"):
+            CandidateGenerator.retrieval_candidate_to_item(rc_typo)
+
 
 # ---------------------------------------------------------------------------
 # Goal rendering
