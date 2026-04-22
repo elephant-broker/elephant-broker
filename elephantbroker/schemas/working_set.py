@@ -77,8 +77,9 @@ class WorkingSetItem(BaseModel):
     Previously both semantics were overloaded into the single freeform
     `source_type: str`, with retrieval items taking values like "vector" /
     "keyword" / "graph" / "structural" — causing consumers to branch on
-    "is this a fact?" via ad-hoc unions (see the removed `FACT_SOURCE_TYPES`
-    constant). The split makes both questions answerable independently:
+    "is this a fact?" via ad-hoc unions (tactical union constant; see
+    TD-scanner-3 closure in local/IMPLEMENTED-PR-6-merge.md for the T-3
+    history). The split makes both questions answerable independently:
     - `source_type == "fact"`  → is it fact-class?
     - `retrieval_source`       → which retrieval path produced it? (None for
       non-retrieval items: goals, procedures, artifacts)

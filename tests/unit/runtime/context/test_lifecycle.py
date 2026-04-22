@@ -2011,8 +2011,10 @@ class TestScannerCalibration:
       because ``WorkingSetItem.source_type`` overloaded two semantics — both
       DataPoint-type ("fact"/"artifact"/"goal"/…) AND retrieval path
       ("vector"/"keyword"/"graph"/"structural"). J-1 shipped a tactical
-      widening via ``FACT_SOURCE_TYPES`` frozenset. T-3 superseded that by
-      splitting the two concerns into distinct fields: ``source_type`` now
+      widening via a frozenset union (see TD-scanner-3 in
+      local/IMPLEMENTED-PR-6-merge.md for the T-3 history). T-3 superseded
+      that by splitting the two concerns into distinct fields:
+      ``source_type`` now
       carries only the DataPoint-type semantic, ``retrieval_source`` the
       retrieval path. Fact-class items (regardless of retrieval path)
       correctly hit the ``== "fact"`` check today.
@@ -2094,8 +2096,9 @@ class TestScannerCalibration:
 
         Pre-J-1: ``item.source_type == "fact"`` guard skipped retrieval items
         whose ``source_type`` carried the retrieval path ("vector", etc.).
-        J-1 widened via ``FACT_SOURCE_TYPES`` frozenset as a tactical fix.
-        T-3 split the two concerns — fact-class items now carry
+        J-1 widened via a tactical frozenset union (see TD-scanner-3 in
+        local/IMPLEMENTED-PR-6-merge.md for the T-3 history). T-3 split
+        the two concerns — fact-class items now carry
         ``source_type="fact"`` with ``retrieval_source`` on a separate
         field — so the clean ``== "fact"`` check correctly covers all
         fact-class items regardless of retrieval path.
@@ -2147,8 +2150,9 @@ class TestScannerCalibration:
         # Extract any memory_store.update call carrying successful_use_count.
         # T-3: fact-class items (source_type="fact") with retrieval_source
         # stamped produce successful_use_count increments when the response
-        # quotes their text. Pre-T-3, the `FACT_SOURCE_TYPES` frozenset
-        # widened this check to cover retrieval-path-typed items; post-T-3
+        # quotes their text. Pre-T-3, a tactical frozenset union widened
+        # this check to cover retrieval-path-typed items (see TD-scanner-3
+        # in local/IMPLEMENTED-PR-6-merge.md for the T-3 history); post-T-3
         # the check is a clean `== "fact"` against the DataPoint-type
         # semantic and retrieval_source lives on a separate field.
         success_updates = []

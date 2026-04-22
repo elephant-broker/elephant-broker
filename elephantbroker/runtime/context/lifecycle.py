@@ -615,7 +615,8 @@ class ContextLifecycle:
         # T-3: source_type is now clean DataPoint-type semantic; retrieval-
         # sourced facts carry source_type="fact" with retrieval_source stamped
         # on the separate field. Simple `== "fact"` check replaces the prior
-        # `FACT_SOURCE_TYPES` retrieval-path union.
+        # retrieval-path union (tactical frozenset removed under TD-scanner-3;
+        # see local/IMPLEMENTED-PR-6-merge.md for the T-3 history).
         if snapshot and self._memory_store:
             now_iso = datetime.now(UTC).isoformat()
             for item in snapshot.items:
@@ -973,11 +974,7 @@ class ContextLifecycle:
                 # `source_type` label union-semantics comment (at the
                 # eb_injection_referenced_total / eb_injection_ignored_total
                 # declarations) for the full rationale.
-                st = (
-                    getattr(item, "retrieval_source", None)
-                    or item.source_type
-                    or "fact"
-                )
+                st = item.retrieval_source or item.source_type
                 if sig.get("confidence", 0) > thresholds.use_confidence_gate:
                     self._metrics.inc_injection_referenced(cat, mc, st)
                 elif sig.get("method") == "ignored":

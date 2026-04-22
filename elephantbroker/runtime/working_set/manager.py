@@ -158,11 +158,7 @@ class WorkingSetManager(IWorkingSetManager):
         if self._metrics:
             source_counts: dict[str, int] = {}
             for item in all_items:
-                st = (
-                    getattr(item, "retrieval_source", None)
-                    or getattr(item, "source_type", None)
-                    or "unknown"
-                )
+                st = item.retrieval_source or item.source_type
                 source_counts[st] = source_counts.get(st, 0) + 1
             for st, cnt in source_counts.items():
                 self._metrics.observe_candidates(st, cnt)
