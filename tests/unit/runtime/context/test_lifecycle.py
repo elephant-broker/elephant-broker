@@ -1086,6 +1086,27 @@ class TestAfterTurnP4:
         assert payload["response_messages"] == 2
         assert payload["total_messages"] == 5
 
+    async def test_empty_messages_records_empty_boundary_source(self):
+        """TODO-6-605: `after_turn` called with `messages=[]` must emit an
+        AFTER_TURN_COMPLETED trace event whose payload pins the third P4
+        branch — `boundary_source="empty"`, `response_messages=0`.
+
+        Rounds out the payload-shape coverage for all 3 P4 boundary branches
+        (plugin/derived/empty). The observability sibling test in
+        `TestAfterTurnBoundarySourceObservability::test_empty_branch_logs_and_increments`
+        covers the DEBUG log + Prometheus counter; this pins the trace-event
+        payload contract that operators reading the trace stream rely on.
+        """
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK, messages=[],
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "empty"
+        assert payload["response_messages"] == 0
+        assert payload["total_messages"] == 0
+
     def test_extract_response_delta_unit(self):
         """_extract_response_delta walks backward to the last user-role
         message and returns everything after it. If no user message is

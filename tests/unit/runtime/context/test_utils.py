@@ -35,9 +35,18 @@ class TestExtractKeyPhrases:
         phrase — regardless of stop-word interactions.
         """
         phrases = _extract_key_phrases("use `TimescaleDB` in [production] code")
-        # Stop-word "in" is filtered, so the adjacency becomes
-        # use → timescaledb → production → code.
-        assert "timescaledb production" in phrases or "timescaledb code" in phrases
+        # Stop-word "in" is filtered, so the post-strip adjacency becomes
+        # use → timescaledb → production → code. The canonical bigram at
+        # the stripped-punctuation boundary is "timescaledb production"
+        # — assert exactly that. TODO-6-604 (Round 1, Testing Reviewer):
+        # the prior `or "timescaledb code"` disjunct was a dead fallback;
+        # adjacency-based bigramming never emits "timescaledb code" when
+        # "production" sits between them. If a future stop-word change
+        # legitimately produces "timescaledb code" instead, that deserves
+        # its own test of the new adjacency, not a loosened assertion here.
+        assert "timescaledb production" in phrases, (
+            f"expected canonical bigram 'timescaledb production' in phrases, got {phrases}"
+        )
         for p in phrases:
             assert "`" not in p, f"backtick leaked into phrase: {p!r}"
             assert "[" not in p, f"[ leaked into phrase: {p!r}"

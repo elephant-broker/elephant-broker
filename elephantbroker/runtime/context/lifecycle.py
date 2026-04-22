@@ -454,7 +454,26 @@ class ContextLifecycle:
             except Exception as exc:
                 self._log.warning("Turn ingest failed: %s", exc, exc_info=True)
 
-        # Save updated context (skip when called from after_turn to avoid double-save)
+        # Save updated context (skip when called from after_turn to avoid double-save).
+        #
+        # Contract note (TODO-6-107, Round 1 Business Logic Reviewer, LOW):
+        # When `_called_from_after_turn=True`, this code path skips the
+        # session save — the caller (`after_turn()`) is responsible for
+        # the save at its happy-path exit (currently `lifecycle.py:954`).
+        # If `after_turn()` raises between this `ingest_batch()` call and
+        # its own save, any session-context mutations made here — notably
+        # the auto-bootstrap at line ~378 and `eb_turn` stamping at line
+        # ~388 — are lost. Blast radius is small today because the fact-
+        # update branch inside `_track_successful_use` (line ~1403) wraps
+        # per-item updates in try/except and the auto-compaction precheck
+        # at `lifecycle.py:~1030` also catches locally, but the gap is
+        # real: scanner init, analyzer spawn, and other between-steps
+        # exceptions would propagate past this save. A future tightening
+        # would wrap `after_turn()`'s body in try/finally that always
+        # saves. For now: any caller that passes `_called_from_after_turn
+        # =True` MUST guarantee `self._session_store.save(session_ctx)` on
+        # every exit path (happy + exceptional). Today only `after_turn()`
+        # exercises this branch.
         if session_ctx and self._session_store and not _called_from_after_turn:
             await self._session_store.save(session_ctx)
 
