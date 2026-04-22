@@ -115,6 +115,19 @@ try:
     eb_budget_resolution_tokens = Histogram("eb_budget_resolution_tokens", "Budget resolution", ["gateway_id", "source"])
     eb_tool_replacements_total = Counter("eb_tool_replacements_total", "Tool replacements", ["gateway_id", "tool_name"])
     eb_tool_tokens_saved_total = Counter("eb_tool_tokens_saved_total", "Tool tokens saved", ["gateway_id"])
+    # `source_type` label union-semantics (T-3 compromise):
+    # For FACT rows (the majority) this label holds the retrieval-PATH value
+    # (structural / keyword / vector / graph) — preserves pre-T-3 dashboard
+    # cardinality so existing alerts/panels keep working.
+    # For NON-FACT rows (artifact / goal / persistent_goal / procedure) this
+    # label holds the DataPoint-TYPE value (the row HAS no retrieval_source;
+    # it was produced by the scoring pipeline, not a retrieval orchestrator).
+    # A clean T-3-aligned split would add a second `retrieval_source` label
+    # and have this label hold only DataPoint types — deferred because that
+    # would break every operator dashboard/alert keyed on the current union.
+    # See lifecycle.py:968-972 + manager.py:163-164 for the stamp sites.
+    # The same union-semantics applies to `eb_working_set_candidates` above
+    # (line 81), which is fed by the manager.py stamp site.
     eb_injection_referenced_total = Counter("eb_injection_referenced_total", "Items referenced", ["gateway_id", "category", "memory_class", "source_type"])
     eb_injection_ignored_total = Counter("eb_injection_ignored_total", "Items ignored", ["gateway_id", "category", "memory_class", "source_type"])
     eb_subagent_spawns_total = Counter("eb_subagent_spawns_total", "Subagent spawns", ["gateway_id"])

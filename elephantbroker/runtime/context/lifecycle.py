@@ -968,12 +968,11 @@ class ContextLifecycle:
                 sig = signals_by_item.get(item_id, {})
                 cat = getattr(item, "category", "general")
                 mc = getattr(item, "memory_class", "episodic") if hasattr(item, "memory_class") else "episodic"
-                # T-3 (Option C): stamp retrieval_source when present
-                # (structural/keyword/vector/graph) so existing dashboards keep
-                # seeing per-retrieval-path breakdowns; fall back to the new
-                # DataPoint-type semantic source_type (fact/artifact/goal/…)
-                # for non-retrieval items. Preserves metric label cardinality
-                # and dashboard compatibility.
+                # Option C stamping: `retrieval_source or source_type` preserves
+                # the pre-T-3 dashboard cardinality contract. See metrics.py
+                # `source_type` label union-semantics comment (at the
+                # eb_injection_referenced_total / eb_injection_ignored_total
+                # declarations) for the full rationale.
                 st = (
                     getattr(item, "retrieval_source", None)
                     or item.source_type

@@ -151,11 +151,10 @@ class WorkingSetManager(IWorkingSetManager):
                     item.evidence_ref_ids = [uuid.UUID(eid) for eid in eids if len(eid) == 36]
 
         # Metrics: observe candidate counts by source type
-        # T-3 (Option C): prefer retrieval_source when present
-        # (structural/keyword/vector/graph) so dashboards keep seeing
-        # per-retrieval-path breakdowns, fall back to the new DataPoint-type
-        # semantic source_type (fact/artifact/goal/…) for non-retrieval
-        # items. Preserves cardinality and dashboard compatibility.
+        # Option C stamping: `retrieval_source or source_type` preserves the
+        # pre-T-3 dashboard cardinality contract. See metrics.py `source_type`
+        # label union-semantics comment (at the eb_injection_referenced_total /
+        # eb_injection_ignored_total declarations) for the full rationale.
         if self._metrics:
             source_counts: dict[str, int] = {}
             for item in all_items:
