@@ -4423,6 +4423,7 @@ All metrics are defined in `elephantbroker/runtime/metrics.py`. Metrics are cond
 | `eb_llm_tokens_used` | Counter | `gateway_id`, `direction`, `model` | Token consumption |
 | `eb_ingest_buffer_flushes_total` | Counter | `gateway_id`, `trigger` | Buffer flushes |
 | `eb_ingest_gate_skips_total` | Counter | `gateway_id`, `reason` | Ingest gate skips (FULL mode — extraction via context engine) |
+| `eb_after_turn_boundary_source_total` | Counter | `gateway_id`, `source` | P4 response-boundary decision per `after_turn`. Bounded: `source ∈ {empty, plugin, derived}`. **Alert on `source="derived"`** — indicates OpenClaw has stopped emitting `prePromptMessageCount` and the runtime is falling back to tail-walker derivation (see §3 "`after_turn_completed` payload" below). |
 | `eb_session_active` | Gauge | `gateway_id`, `profile_name` | Active sessions |
 | `eb_edges_created_total` | Counter | `gateway_id`, `edge_type` | Graph edges created |
 | `eb_edges_failed_total` | Counter | `gateway_id`, `edge_type` | Failed edges |
@@ -4671,6 +4672,47 @@ Accessible via `GET /trace/event-types`.
 | 49 | `consolidation_started` | Consolidation (sleep) pipeline started for gateway |
 | 50 | `consolidation_stage_completed` | Single consolidation stage completed (1 of 9) |
 | 51 | `consolidation_completed` | Full consolidation pipeline completed (all 9 stages) |
+
+#### `after_turn_completed` payload — P4 hybrid-A+C boundary observability
+
+Added in PR #6 to surface the response-boundary decision made by
+`ContextLifecycle.after_turn`. The payload fields below are **additive**
+on top of the pre-PR-6 `after_turn_completed` shape (no keys removed or
+renamed — TODO-6-704 verification).
+
+| Field | Type | Description |
+|---|---|---|
+| `total_messages` | int | Count of messages in `params.messages` for the turn |
+| `response_messages` | int | Count of messages sliced as response-side after the boundary decision |
+| `boundary_source` | string | How the boundary was determined — one of `{empty, plugin, derived}` — see alert semantics below |
+
+**`boundary_source` values and alert semantics:**
+
+| Value | Meaning | Operator action |
+|---|---|---|
+| `empty` | No messages on the turn (heartbeat / idle). `response_messages == 0`. | Benign — **don't alert**. Expected on heartbeats or gated paths. |
+| `plugin` | OpenClaw emitted `prePromptMessageCount`; the runtime sliced accordingly. This is the steady-state hot path. | Normal operation — **don't alert**. |
+| `derived` | OpenClaw did not emit `prePromptMessageCount`; the runtime walked backward to the last user-role message and sliced after it (tail-walker fallback). | **Operator-actionable.** Either (a) a plugin version regressed and stopped emitting the field, or (b) a non-EB OpenClaw consumer is driving traffic. Investigate plugin manifest + OpenClaw hook registrations. |
+
+**Alerting channels** (TODO-6-204):
+
+The merge-doc phrase "operators can alert on `boundary_source=derived`"
+applies to **two independent channels**:
+
+- **Trace-query / ClickHouse alerting** — reads the `boundary_source`
+  field directly from the `after_turn_completed` event payload (detailed
+  per-turn provenance, supports ad-hoc drilldown by session_key /
+  session_id). Use when you need the turn-level context.
+- **Prometheus alertmanager** — reads the
+  `eb_after_turn_boundary_source_total{source="derived"}` counter
+  (documented in § Observability Configuration → Prometheus Metrics →
+  Core Memory & Storage). Aggregate rate, lower cardinality, suitable
+  for rate-of-change alerts. Use when you need a classic
+  `rate(...) > 0` SLO rule.
+
+Both channels observe the same underlying decision; pick based on the
+alerting stack. Dashboards typically combine: counter for the
+page-worthy SLO, trace query for the drill-in once paged.
 
 ---
 

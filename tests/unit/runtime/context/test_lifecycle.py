@@ -1125,6 +1125,120 @@ class TestAfterTurnP4:
 
 
 # ======================================================================
+# C-boundary-source cluster — DEBUG log + Prometheus counter for the
+# P4 hybrid-A+C boundary_source decision (TODO-6-201, TODO-6-302).
+# ======================================================================
+
+
+class TestAfterTurnBoundarySourceObservability:
+    """TODO-6-201 (DEBUG log) + TODO-6-302 (Prometheus counter): the P4
+    boundary-source decision (empty/plugin/derived) must be visible on
+    both the log channel (operator tailing journalctl) and the metric
+    channel (alertmanager rule on `source="derived"`)."""
+
+    async def test_empty_branch_logs_and_increments(self, caplog):
+        """No messages on the turn → `boundary_source="empty"` → one
+        DEBUG log line + one `inc_after_turn_boundary_source("empty")`
+        metric increment. Benign; operators should NOT alert on this."""
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+
+        with caplog.at_level(
+            logging.DEBUG, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            await lc.after_turn(AfterTurnParams(
+                session_id=SID, session_key=SK, messages=[],
+            ))
+
+        metrics.inc_after_turn_boundary_source.assert_called_once_with("empty")
+
+        debug_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.DEBUG
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "boundary_source=empty" in rec.getMessage()
+        ]
+        assert len(debug_records) == 1, (
+            f"expected exactly one DEBUG line for empty branch, got {len(debug_records)}"
+        )
+        msg = debug_records[0].getMessage()
+        assert "response_delta=0" in msg
+        assert "total=0" in msg
+
+    async def test_plugin_branch_logs_and_increments(self, caplog):
+        """OpenClaw emitted `pre_prompt_message_count` → `boundary_source="plugin"`
+        → one DEBUG log + one `inc_after_turn_boundary_source("plugin")`.
+        Steady-state hot path; operators should NOT alert on this."""
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+        msgs = [
+            AgentMessage(role="user", content="q1"),
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="user", content="q2"),
+            AgentMessage(role="assistant", content="a2"),
+        ]
+
+        with caplog.at_level(
+            logging.DEBUG, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            await lc.after_turn(AfterTurnParams(
+                session_id=SID, session_key=SK,
+                messages=msgs, pre_prompt_message_count=2,
+            ))
+
+        metrics.inc_after_turn_boundary_source.assert_called_once_with("plugin")
+
+        debug_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.DEBUG
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "boundary_source=plugin" in rec.getMessage()
+        ]
+        assert len(debug_records) == 1
+        msg = debug_records[0].getMessage()
+        assert "response_delta=2" in msg
+        assert "total=4" in msg
+
+    async def test_derived_branch_logs_and_increments(self, caplog):
+        """OpenClaw silent (no `pre_prompt_message_count`) → tail-walker
+        fallback → `boundary_source="derived"` → one DEBUG log + one
+        `inc_after_turn_boundary_source("derived")`. **Operator-actionable**
+        — this is the value dashboards alert on to catch plugin regressions."""
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+        msgs = [
+            AgentMessage(role="user", content="old q"),
+            AgentMessage(role="assistant", content="old a"),
+            AgentMessage(role="user", content="current q"),
+            AgentMessage(role="assistant", content="current a"),
+        ]
+
+        with caplog.at_level(
+            logging.DEBUG, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            await lc.after_turn(AfterTurnParams(
+                session_id=SID, session_key=SK, messages=msgs,
+            ))
+
+        metrics.inc_after_turn_boundary_source.assert_called_once_with("derived")
+
+        debug_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.DEBUG
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "boundary_source=derived" in rec.getMessage()
+        ]
+        assert len(debug_records) == 1
+        msg = debug_records[0].getMessage()
+        # Everything after index 2 (last user message) is response-side → 1 msg.
+        assert "response_delta=1" in msg
+        assert "total=4" in msg
+
+
+# ======================================================================
 # PR #11 R1: Additional after_turn tests
 # ======================================================================
 

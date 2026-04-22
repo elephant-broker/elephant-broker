@@ -891,6 +891,20 @@ class ContextLifecycle:
             response_messages = self._extract_response_delta(params.messages)
             boundary_source = "derived"
 
+        # TODO-6-201 / TODO-6-302 (cluster C-boundary-source): surface the
+        # branch decision on both the log channel (DEBUG — ephemeral, for
+        # operators tailing journalctl during a session) and the metric
+        # channel (Prometheus counter — for alertmanager rules). See
+        # CONFIGURATION.md §3 "after_turn_completed payload" for the
+        # observability semantics; `source="derived"` is operator-
+        # actionable (plugin stopped emitting prePromptMessageCount).
+        self._log.debug(
+            "P4 boundary_source=%s response_delta=%d total=%d",
+            boundary_source, len(response_messages), len(params.messages),
+        )
+        if self._metrics:
+            self._metrics.inc_after_turn_boundary_source(boundary_source)
+
         # Successful-use tracking (AD-7)
         # The cheap heuristic path (S1/S2/Jaccard) always runs when we have
         # a snapshot and response messages.  The expensive LLM-based RT-1 batch

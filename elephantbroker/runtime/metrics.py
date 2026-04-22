@@ -24,6 +24,16 @@ try:
     eb_llm_tokens_used = Counter("eb_llm_tokens_used", "Token consumption", ["gateway_id", "direction", "model"])
     eb_ingest_buffer_flushes_total = Counter("eb_ingest_buffer_flushes_total", "Buffer flushes", ["gateway_id", "trigger"])
     eb_ingest_gate_skips_total = Counter("eb_ingest_gate_skips_total", "Ingest gate skips (FULL mode)", ["gateway_id", "reason"])
+    # TODO-6-302 (cluster C-boundary-source): surface the P4 hybrid-A+C
+    # response-boundary decision as a Prometheus counter. Values bounded to
+    # {empty, plugin, derived} — stable cardinality. Operators can alert on
+    # `source="derived"` to catch OpenClaw silently stopping to emit
+    # prePromptMessageCount.
+    eb_after_turn_boundary_source_total = Counter(
+        "eb_after_turn_boundary_source_total",
+        "P4 response-boundary source per after_turn",
+        ["gateway_id", "source"],
+    )
     eb_session_active = Gauge("eb_session_active", "Active sessions", ["gateway_id", "profile_name"])
     eb_edges_created_total = Counter("eb_edges_created_total", "Graph edges created", ["gateway_id", "edge_type"])
     eb_edges_failed_total = Counter("eb_edges_failed_total", "Failed edges", ["gateway_id", "edge_type"])
@@ -253,6 +263,19 @@ def inc_ingest_gate_skip(reason: str, gateway_id: str = "") -> None:
         eb_ingest_gate_skips_total.labels(gateway_id=gateway_id, reason=reason).inc()
 
 
+def inc_after_turn_boundary_source(source: str, gateway_id: str = "") -> None:
+    """Increment the P4 hybrid-A+C boundary-source counter.
+
+    ``source`` is bounded to ``{"empty", "plugin", "derived"}`` by the
+    lifecycle code that calls this (see lifecycle.py:~884-892), so label
+    cardinality is stable at 3 per gateway_id.
+    """
+    if METRICS_AVAILABLE:
+        eb_after_turn_boundary_source_total.labels(
+            gateway_id=gateway_id, source=source,
+        ).inc()
+
+
 def inc_cognee_capture_failure(operation: str, gateway_id: str = "") -> None:
     if METRICS_AVAILABLE:
         eb_cognee_data_id_capture_failures_total.labels(
@@ -363,6 +386,9 @@ class MetricsContext:
 
     def inc_ingest_gate_skip(self, reason: str) -> None:
         inc_ingest_gate_skip(reason, gateway_id=self._gw)
+
+    def inc_after_turn_boundary_source(self, source: str) -> None:
+        inc_after_turn_boundary_source(source, gateway_id=self._gw)
 
     def inc_cognee_capture_failure(self, operation: str) -> None:
         inc_cognee_capture_failure(operation, gateway_id=self._gw)
