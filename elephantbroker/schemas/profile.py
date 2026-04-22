@@ -185,6 +185,21 @@ class SuccessfulUseThresholds(BaseModel):
     T-2 (2026-04-21) made these per-profile-configurable so profiles with
     different signal quality (research = looser, managerial = stricter)
     can tune independently without recompiling.
+
+    Design note (TODO-6-408, Round 1 Architecture Reviewer, INFO):
+    The fallback model here is intentionally asymmetric to
+    ``ProfilePolicy.ingest_batch_size`` / ``effective_ingest_batch_size``.
+    ``effective_ingest_batch_size`` falls back to ``LLMConfig.ingest_batch_size``
+    (ops-time-tunable via ``EB_LLM_INGEST_BATCH_SIZE``) because flush cadence
+    is an operator concern — load, latency, memory-pressure — that should be
+    tunable without a code change. The scanner thresholds here, by contrast,
+    are compile-time calibration baselines derived from signal-quality
+    experiments; they are not meant to be ops-tunable, so there is no
+    second ``LLMConfig``-style input. When ``policy.successful_use_thresholds``
+    is ``None``, ``ProfileRegistry.effective_successful_use_thresholds`` simply
+    returns a fresh ``SuccessfulUseThresholds()`` with these module defaults.
+    See ``local/TECHNICAL-DEBT.md`` → TD-scanner-7 for the "tune vs rip out"
+    decision gate pending telemetry.
     """
     s1_direct_quote_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
     s2_tool_correlation_overlap: float = Field(default=0.3, ge=0.0, le=1.0)

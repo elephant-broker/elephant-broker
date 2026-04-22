@@ -31,7 +31,28 @@ logger = logging.getLogger(__name__)
 
 
 class ProfileRegistry(IProfileRegistry):
-    """Resolves profiles with inheritance, org overrides, and TTL caching."""
+    """Resolves profiles with inheritance, org overrides, and TTL caching.
+
+    Sync-resolver convention (TODO-6-409, Round 1 Architecture Reviewer, INFO):
+    Methods prefixed ``effective_*`` (currently ``effective_ingest_batch_size``
+    and ``effective_successful_use_thresholds``) are **synchronous** and take
+    an already-resolved ``ProfilePolicy`` as input. They perform pure field
+    reads with a simple "policy override or default" fallback — no I/O, no
+    cache lookups, no org-override resolution — and therefore do not need
+    to be ``async``. Callers that already hold a resolved policy can use
+    these helpers directly; callers starting from a profile name should
+    first call ``resolve_profile(...)`` (which IS async — it touches the
+    cache, the preset table, and the optional SQLite org-override store)
+    and then pass the resolved policy into the sync resolver. This avoids
+    a redundant async round-trip on every effective-value lookup.
+
+    The ``get_scoring_weights`` precedent ships the other shape (async,
+    takes a profile name, re-resolves) and is retained for callers that
+    don't already hold a policy; new sync resolvers follow the
+    pre-resolved-policy shape because most callers at the lifecycle layer
+    resolve once per turn and then reuse the policy across multiple
+    effective-value lookups.
+    """
 
     def __init__(
         self,
