@@ -221,17 +221,22 @@ async def get_config(request: Request, profile: str | None = None):
                     raise HTTPException(
                         status_code=404, detail=f"Unknown profile: {profile}",
                     )
-                except Exception as exc:
+                except Exception:
                     # Transient registry/DB errors — keep endpoint up (don't
                     # 500), but log so operators can diagnose the silent
                     # fallback when something actually broke. Inline
                     # `import logging` matches the dispose() precedent above.
+                    # TODO-6-382 (Round 3, Blind Spot INFO): format aligned with
+                    # /memory/ingest-messages (profile_name=%s + exc_info=True)
+                    # so operators can grep both endpoints uniformly. exc_info
+                    # captures the stack trace for diagnosability without
+                    # inlining a truncated str(exc) in the format string.
                     import logging
                     logging.getLogger(__name__).warning(
-                        "P6 /context/config: profile resolution failed for "
-                        "?profile=%r — falling back to global LLMConfig."
-                        "ingest_batch_size (%.60s)",
-                        profile, exc,
+                        "context/config: profile resolution failed for profile_name=%s "
+                        "(transient error), falling back to global ingest_batch_size",
+                        profile,
+                        exc_info=True,
                     )
             result["ingest_batch_size"] = effective_batch
             result["ingest_batch_timeout_ms"] = int(config.llm.ingest_batch_timeout_seconds * 1000)

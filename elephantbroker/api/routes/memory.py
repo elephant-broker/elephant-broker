@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -422,11 +422,18 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
     # TODO-6-701 / TODO-6-401: wire per-profile ingest_batch_size from body.profile_name.
     # TODO-6-751 (Round 2, Feature MEDIUM): org_id now read from the gateway config so
     # admin-registered org overrides reach this site (was hardcoded to None).
-    # TODO-6-353 (Round 2, Blind Spot LOW): KeyError (unknown profile) now returns 404
-    # to match the /context/config precedent — operator typos must be diagnosable and
-    # not silently fall back to matching-default values. Other exceptions still log a
-    # WARNING and fall through to the global LLMConfig default (never 500 the endpoint
-    # on transient registry/DB faults).
+    # TODO-6-581 (Round 3, Interop MEDIUM): unlike GET /context/config (read-only,
+    # caller reads response; 404 = diagnosable client error), this endpoint is
+    # fire-and-forget write from the TS plugin client at
+    # openclaw-plugins/elephantbroker-memory/src/client.ts:171-183 — `await fetch()`
+    # with no status check, no response parsing, no throw. A 404 HTTP response would
+    # resolve the promise silently and drop messages. Fold KeyError (unknown profile)
+    # into the broader Exception fallback: WARN-log + use the global LLMConfig default
+    # so operators still see typos in logs without silently dropping messages. The
+    # Round 2 "mirror /context/config" rationale does not transfer across HTTP methods
+    # (GET read-only vs POST fire-and-forget-write).
+    # TODO-6-382 (Round 3, Blind Spot INFO): WARN log format aligned with /context/config
+    # (same format: profile_name=%s + exc_info=True).
     effective_batch_size: int | None = None
     try:
         if container.profile_registry is not None:
@@ -437,15 +444,10 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
                 effective_batch_size = container.profile_registry.effective_ingest_batch_size(
                     policy, container.config.llm,
                 )
-    except KeyError:
-        # Unknown profile name — diagnosable 404, mirrors /context/config (TODO-6-702).
-        raise HTTPException(
-            status_code=404, detail=f"Unknown profile: {body.profile_name}",
-        )
-    except Exception:
+    except Exception:  # covers KeyError (unknown profile) and transient registry/DB failures
         logger.warning(
-            "ingest-messages: profile resolution failed for profile_name=%s, "
-            "falling back to global ingest_batch_size",
+            "ingest-messages: profile resolution failed for profile_name=%s "
+            "(unknown profile or transient error), falling back to global ingest_batch_size",
             body.profile_name,
             exc_info=True,
         )

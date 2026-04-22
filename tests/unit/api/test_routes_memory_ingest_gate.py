@@ -215,14 +215,20 @@ class TestIngestMessagesProfileWireThrough:
         mock_buffer.add_messages.assert_awaited_once()
         assert mock_buffer.add_messages.call_args.kwargs["effective_batch_size"] is None
 
-    async def test_profile_resolution_key_error_returns_404(
-        self, client, container,
+    async def test_profile_resolution_key_error_warns_and_falls_back(
+        self, client, container, caplog,
     ):
-        """TODO-6-353 (Round 2, Blind Spot LOW): unknown profile names raise
-        ``KeyError`` from ``resolve_profile()``; the route must surface this
-        as HTTP 404 with a diagnosable ``detail`` so operator typos don't
-        silently fall back to matching-default values. Mirrors the
-        ``/context/config`` precedent (TODO-6-702)."""
+        """TODO-6-581 (Round 3, Interop MEDIUM): unknown profile names raise
+        ``KeyError`` from ``resolve_profile()``; this endpoint is
+        fire-and-forget-write from the TS plugin client (no status check on
+        the response — see client.ts:171-183), so surfacing 404 here would
+        silently drop messages. The handler now folds ``KeyError`` into the
+        broader Exception fallback: WARN-log + global-default
+        ``effective_batch_size``. This REPLACES the Round 2 404 behavior
+        introduced in 0c67977 (TODO-6-353); the "mirror /context/config"
+        rationale did not transfer across HTTP methods (GET read-only vs
+        POST fire-and-forget-write)."""
+        import logging
         from unittest.mock import AsyncMock
 
         mock_buffer, _ = self._arrange_memory_only(container)
@@ -230,31 +236,50 @@ class TestIngestMessagesProfileWireThrough:
             side_effect=KeyError("Unknown profile: missing"),
         )
 
-        r = await client.post(
-            "/memory/ingest-messages",
-            json={
-                "session_key": "agent:main:main",
-                "messages": [{"role": "user", "content": "hello"}],
-                "profile_name": "missing",
-            },
-        )
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.api.routes.memory"):
+            r = await client.post(
+                "/memory/ingest-messages",
+                json={
+                    "session_key": "agent:main:main",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "profile_name": "missing",
+                },
+            )
 
-        assert r.status_code == 404
-        assert r.json()["detail"] == "Unknown profile: missing"
-        # The buffer must NOT have been touched — the 404 aborts before the
-        # add_messages call. Operators rely on this to know the message was
-        # not silently accepted against a wrong profile.
-        mock_buffer.add_messages.assert_not_awaited()
+        # The buffer MUST have been awaited (messages not silently dropped),
+        # with effective_batch_size=None (global LLMConfig default applied at
+        # the buffer level).
+        assert r.status_code == 202, (
+            f"expected 202 (buffered with global fallback); got {r.status_code} — "
+            "the TS client is fire-and-forget and would silently drop messages on 404."
+        )
+        mock_buffer.add_messages.assert_awaited_once()
+        assert mock_buffer.add_messages.call_args.kwargs["effective_batch_size"] is None
+
+        warning_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and rec.name == "elephantbroker.api.routes.memory"
+            and "profile resolution failed" in rec.getMessage()
+        ]
+        assert len(warning_records) == 1, (
+            f"expected exactly one WARNING on the KeyError-fallback branch, got {len(warning_records)}"
+        )
+        msg = warning_records[0].getMessage()
+        assert "missing" in msg
+        # TODO-6-382: exc_info=True captures the stack trace for diagnosability.
+        assert warning_records[0].exc_info is not None
+        assert isinstance(warning_records[0].exc_info[1], KeyError)
 
     async def test_profile_resolution_transient_exception_warns_and_falls_back(
         self, client, container, caplog,
     ):
-        """TODO-6-353 (Round 2, Blind Spot LOW): non-``KeyError`` resolver
-        exceptions (transient registry/DB faults) must (a) NOT 500 — endpoint
-        stays up with global fallback, (b) emit a WARNING so the silent
-        fallback is observable in logs, (c) pass ``effective_batch_size=None``
-        to the buffer. KeyError-specific branch is covered by the 404 test
-        above. Mirrors the split done in ``72a5afc`` for ``/context/config``."""
+        """TODO-6-581 (Round 3, Interop MEDIUM): transient resolver exceptions
+        (e.g. registry/DB faults surfaced as ``RuntimeError``) fall through
+        the same ``except Exception`` branch as KeyError: WARN-log + global
+        fallback + buffered write. Exercises the transient-origin side of
+        the combined branch so regressions that split the handling back
+        apart are caught."""
         import logging
         from unittest.mock import AsyncMock
 

@@ -285,8 +285,13 @@ class TestContextRoutes:
             f"expected exactly one WARNING on transient-fallback branch, got {len(warning_records)}"
         )
         msg = warning_records[0].getMessage()
-        assert "'coding'" in msg
-        assert "transient-db-hiccup" in msg
+        assert "coding" in msg
+        # TODO-6-382 (Round 3, Blind Spot INFO): WARN format aligned with
+        # /memory/ingest-messages — exc_info=True carries the stack trace
+        # in LogRecord.exc_info, not in the formatted message string.
+        assert warning_records[0].exc_info is not None
+        assert isinstance(warning_records[0].exc_info[1], RuntimeError)
+        assert "transient-db-hiccup" in str(warning_records[0].exc_info[1])
 
     async def test_get_config_passes_gateway_org_id_to_resolve_profile(
         self, client, container,
