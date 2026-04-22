@@ -32,7 +32,19 @@ TRACE_EVENT_DESCRIPTIONS: dict[str, str] = {
     "procedure_completion_checked": "Procedure completion validation ran (all steps + proofs checked)",
     # Phase 6
     "bootstrap_completed": "Session bootstrap completed — context initialized",
-    "after_turn_completed": "After-turn processing completed (successful-use tracking, cleanup)",
+    "after_turn_completed": (
+        "After-turn processing completed (successful-use tracking, cleanup). "
+        "Payload fields: turn_count (int), updated_count (int — items whose "
+        "successful_use_count was incremented this turn), response_messages "
+        "(int — count of assistant messages in the delta), total_messages "
+        "(int — size of the full messages envelope received), boundary_source "
+        "('plugin' | 'derived' | 'empty' — how the response-message boundary "
+        "was resolved; 'derived' indicates plugin stopped emitting "
+        "prePromptMessageCount and the tail-walker fallback ran), "
+        "snapshot_available (bool), signals_summary (dict[item_id, "
+        "scanner_method]). See docs/CONFIGURATION.md §3 for observability "
+        "semantics."
+    ),
     "token_usage_reported": "Token usage reported by agent (input/output tokens)",
     "context_window_reported": "Context window size reported by agent",
     "successful_use_tracked": "Fact successful-use tracking updated (S1 quote, S2 tool, S6 ignored)",

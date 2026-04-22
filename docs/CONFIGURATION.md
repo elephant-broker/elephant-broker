@@ -8146,6 +8146,14 @@ The 0.15 default for `use_confidence_gate` (and for `s1_direct_quote_ratio` / `s
 
 Operators who need to bias for precision (research profiles, compliance-sensitive settings) can raise `use_confidence_gate` per-profile to 0.20–0.25; operators biasing for recall (exploratory coding, learning loops) can lower it to 0.10–0.12. Don't raise the global default.
 
+**S2 `tool_correlation_overlap` asymmetry (TODO-6-103, Round 1 Business Logic Reviewer, LOW):**
+
+S2 stays at `0.3` while S1 (`direct_quote_ratio`) and S3 (`jaccard_score`) dropped to `0.15` in the J-1 calibration. Because `use_confidence = max(all signals)` and the aggregate `use_confidence_gate` is `0.15`, any S2 hit trivially clears the aggregate gate once it fires. But S2's own `0.3` threshold itself rarely fires — empirical calibration data (DIAG-I1 + DIAG-M1 live-fire probes in 2026-04) only exercised *paraphrase* paths, not *tool-output quotation* paths, so there is no empirical basis to realign S2 alongside S1/S3.
+
+The per-scanner asymmetry is **intentional** pending tool-path telemetry. Raising or lowering S2 without tool-output-specific probes would be speculative — the signal S2 is designed to catch (fact tokens appearing in tool messages, e.g. shell output or API responses quoting a stored fact) has a different noise floor than paraphrase matching and warrants its own calibration cycle.
+
+Operators with a specific profile's tool-use pattern that justifies a different floor can override via `ProfilePolicy.successful_use_thresholds.s2_tool_correlation_overlap` per-profile (same mechanism as the S1/S3 knobs documented above). When tool-path signal-distribution telemetry becomes available, a follow-up calibration pass can realign the global S2 default with an empirical basis.
+
 **Distinct from `successful_use.*` (global config):** The per-profile `successful_use_thresholds` documented here gate the always-on per-turn scanner in `after_turn()`. The separate global `successful_use.*` YAML section (opt-in, default disabled) configures the RT-1 LLM-based batch evaluation pipeline (`SuccessfulUseReasoningTask`). Different mechanisms, different cost profiles — the per-profile thresholds are cheap and always active; the global RT-1 feature is expensive (LLM calls per turn) and opt-in.
 
 See `elephantbroker/schemas/profile.py::SuccessfulUseThresholds` for the schema definition.
