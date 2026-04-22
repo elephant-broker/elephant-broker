@@ -22,6 +22,7 @@
 15. [LLM Prompt Template Reference](#15-llm-prompt-template-reference)
 16. [Configuration Value Guide](#16-configuration-value-guide)
 17. [Production Security Hardening Guide](#17-production-security-hardening-guide)
+18. [API Changelog — Known Breaking Changes](#18-api-changelog--known-breaking-changes)
 
 ---
 
@@ -5484,8 +5485,8 @@ After reading every TypeScript file across both plugins (35 files total, with `s
 | 14 | `context/src/engine.ts:106` | `false` | Default `is_subagent` in bootstrap | No | No -- semantic default | `true` would treat primary session as subagent |
 | 15 | `context/src/engine.ts:130` | `false` | Default `is_heartbeat` in ingestBatch | No | No -- semantic default | `true` would mark all ingested messages as heartbeats |
 | 16 | `context/src/engine.ts:142` | `""` | Default `query` in assemble params | No | No -- empty query is valid | Non-empty would bias assembly toward a query |
-| 17 | `context/src/engine.ts:177` | `[]` | Empty `messages` array in afterTurn | No | No -- structural placeholder | OpenClaw passes no messages here; server ignores |
-| 18 | `context/src/engine.ts:178` | `0` | Default `pre_prompt_message_count` in afterTurn | No | No -- tracking disabled | Non-zero would skew successful-use tracking |
+| 17 | `context/src/engine.ts:184,192` | Resolved variable `(params.messages && params.messages.length > 0) ? params.messages : this.lastTurnMessages` | Turn `messages` forwarded in `afterTurn`. Post-PR-6 (commit `d24a0e8`), the plugin no longer sends literal `[]`; it takes OpenClaw's `params.messages` when non-empty, otherwise falls back to `this.lastTurnMessages` buffered during the turn (GF-04). Runtime uses these for scanner stage-2 (successful-use, goal-progress) processing after the response boundary split. | No | No -- behavior is determined by PR-6 hybrid A+C shape, not a knob | Sending literal `[]` again would regress PR-6: scanners would see no response messages, successful-use/goal-progress tracking silently dies |
+| 18 | `context/src/engine.ts:197` | Conditionally-spread: `...('prePromptMessageCount' in params ? { pre_prompt_message_count: params.prePromptMessageCount } : {})` | `pre_prompt_message_count` is **absent from the wire when OpenClaw didn't emit it**, **present (including `0`) when OpenClaw did**. Post-PR-6 hybrid A+C: `lifecycle.py:884-892` uses the has-key signal to decide between trusting the plugin (`boundary_source="plugin"`) and deriving via tail-walker (`boundary_source="derived"`); empty `messages` branches to `boundary_source="empty"`. No hardcoded default — the plugin's silence IS the signal. | No | No -- architectural invariant of the hybrid-A+C design | Collapsing via `|| 0` (or reintroducing a default) would hide OpenClaw's silence and force the runtime to trust a fabricated `0`, silently disabling the tail-walker fallback |
 | 19 | `context/src/engine.ts:194` | `"completed"` | Default `reason` for onSubagentEnded | No | Yes -- behavioral | Other values: `"deleted"`, `"swept"`, `"released"` affect how parent session resumes context |
 | 20 | `context/src/engine.ts:200` | `"agent:main:main"` | Reset value for sessionKey in dispose() | No (documented at engine.ts:47 for initial, not for reset) | No -- matches initial | Different reset value would leave stale session identity |
 | 21 | `context/src/engine.ts:218` | `"unknown"` | Default provider string when LLM event has no provider | No | No -- reporting fallback | Shows "unknown" in metrics/traces |
@@ -9052,3 +9053,60 @@ return JSONResponse(status_code=500, content=detail.model_dump())
 | **LOW** | No CORS policy configured | 3.5 |
 | **LOW** | Grafana default admin password | 5.1 |
 | **LOW** | Qdrant vector delete is best-effort | 4.5 |
+
+---
+
+## 18. API Changelog — Known Breaking Changes
+
+This section tracks API-surface changes that affect external consumers of
+the runtime HTTP API. No API version header or deprecation field is emitted
+on the wire today — operators should consult this list when upgrading a
+deployment across the PR boundary noted on each entry.
+
+### PR #6 (T-3): `WorkingSetItem.source_type` split into `(source_type, retrieval_source)`
+
+**Affected endpoints:** `GET /working-set/{session_key}/{session_id}`,
+`POST /working-set/build`, any other response that embeds
+`WorkingSetItem` (see `elephantbroker/schemas/working_set.py:91-95`).
+
+**Before (pre-PR-6):** `source_type` was a freeform `str` that carried
+**two orthogonal meanings** fused into one field:
+
+- The DataPoint class of the item (`"fact"`, `"artifact"`, `"goal"`, ...)
+- The retrieval path that produced it (`"vector"`, `"keyword"`,
+  `"structural"`, `"graph"`) — only meaningful for fact-class items
+
+Consumers that introspected the field had to disambiguate the two
+meanings ad hoc.
+
+**After (PR #6):** two fields, each a constrained `Literal`:
+
+- `source_type: Literal["fact", "artifact", "goal", "persistent_goal", "procedure", "compact_state"]`
+  — the DataPoint-type semantic. Always populated. For retrieval-sourced
+  items this is always `"fact"`.
+- `retrieval_source: Literal["structural", "keyword", "vector", "graph"] | None = None`
+  — the retrieval-path semantic. `None` for non-fact items (goals,
+  procedures, artifacts, compact-states) that flow through the pipeline
+  without a retrieval source.
+
+**Migration for API consumers:**
+
+| Pre-PR-6 read | Post-PR-6 equivalent |
+|---|---|
+| `source_type == "vector"` | `retrieval_source == "vector"` |
+| `source_type == "keyword"` | `retrieval_source == "keyword"` |
+| `source_type == "structural"` | `retrieval_source == "structural"` |
+| `source_type == "graph"` | `retrieval_source == "graph"` |
+| `source_type == "fact"` | `source_type == "fact"` (unchanged) |
+| `source_type == "artifact"` | `source_type == "artifact"` (unchanged) |
+| `source_type == "goal"` / `"persistent_goal"` | unchanged |
+| `source_type == "procedure"` | unchanged |
+
+Consumers that previously read `source_type` to determine the retrieval
+path will now see `"fact"` for every retrieval-sourced item and must read
+`retrieval_source` instead. Consumers that only cared about the
+DataPoint type need no change.
+
+**Additional operator-facing reference:** the same change is documented
+from the plugin/SDK consumer's angle in
+[OPENCLAW-SETUP.md §T-3: WorkingSetItem Schema Split](./OPENCLAW-SETUP.md#t-3-workingsetitem-schema-split-pr-6).
