@@ -22,6 +22,7 @@
 15. [LLM Prompt Template Reference](#15-llm-prompt-template-reference)
 16. [Configuration Value Guide](#16-configuration-value-guide)
 17. [Production Security Hardening Guide](#17-production-security-hardening-guide)
+18. [API Changelog — Known Breaking Changes](#18-api-changelog--known-breaking-changes)
 
 ---
 
@@ -4422,6 +4423,7 @@ All metrics are defined in `elephantbroker/runtime/metrics.py`. Metrics are cond
 | `eb_llm_tokens_used` | Counter | `gateway_id`, `direction`, `model` | Token consumption |
 | `eb_ingest_buffer_flushes_total` | Counter | `gateway_id`, `trigger` | Buffer flushes |
 | `eb_ingest_gate_skips_total` | Counter | `gateway_id`, `reason` | Ingest gate skips (FULL mode — extraction via context engine) |
+| `eb_after_turn_boundary_source_total` | Counter | `gateway_id`, `source` | P4 response-boundary decision per `after_turn`. Bounded: `source ∈ {empty, plugin, derived}`. **Alert on `source="derived"`** — indicates OpenClaw has stopped emitting `prePromptMessageCount` and the runtime is falling back to tail-walker derivation (see §3 "`after_turn_completed` payload" below). |
 | `eb_session_active` | Gauge | `gateway_id`, `profile_name` | Active sessions |
 | `eb_edges_created_total` | Counter | `gateway_id`, `edge_type` | Graph edges created |
 | `eb_edges_failed_total` | Counter | `gateway_id`, `edge_type` | Failed edges |
@@ -4670,6 +4672,47 @@ Accessible via `GET /trace/event-types`.
 | 49 | `consolidation_started` | Consolidation (sleep) pipeline started for gateway |
 | 50 | `consolidation_stage_completed` | Single consolidation stage completed (1 of 9) |
 | 51 | `consolidation_completed` | Full consolidation pipeline completed (all 9 stages) |
+
+#### `after_turn_completed` payload — P4 hybrid-A+C boundary observability
+
+Added in PR #6 to surface the response-boundary decision made by
+`ContextLifecycle.after_turn`. The payload fields below are **additive**
+on top of the pre-PR-6 `after_turn_completed` shape (no keys removed or
+renamed — TODO-6-704 verification).
+
+| Field | Type | Description |
+|---|---|---|
+| `total_messages` | int | Count of messages in `params.messages` for the turn |
+| `response_messages` | int | Count of messages sliced as response-side after the boundary decision |
+| `boundary_source` | string | How the boundary was determined — one of `{empty, plugin, derived}` — see alert semantics below |
+
+**`boundary_source` values and alert semantics:**
+
+| Value | Meaning | Operator action |
+|---|---|---|
+| `empty` | No messages on the turn (heartbeat / idle). `response_messages == 0`. | Benign — **don't alert**. Expected on heartbeats or gated paths. |
+| `plugin` | OpenClaw emitted `prePromptMessageCount`; the runtime sliced accordingly. This is the steady-state hot path. | Normal operation — **don't alert**. |
+| `derived` | OpenClaw did not emit `prePromptMessageCount`; the runtime walked backward to the last user-role message and sliced after it (tail-walker fallback). | **Operator-actionable.** Either (a) a plugin version regressed and stopped emitting the field, or (b) a non-EB OpenClaw consumer is driving traffic. Investigate plugin manifest + OpenClaw hook registrations. |
+
+**Alerting channels** (TODO-6-204):
+
+The merge-doc phrase "operators can alert on `boundary_source=derived`"
+applies to **two independent channels**:
+
+- **Trace-query / ClickHouse alerting** — reads the `boundary_source`
+  field directly from the `after_turn_completed` event payload (detailed
+  per-turn provenance, supports ad-hoc drilldown by session_key /
+  session_id). Use when you need the turn-level context.
+- **Prometheus alertmanager** — reads the
+  `eb_after_turn_boundary_source_total{source="derived"}` counter
+  (documented in § Observability Configuration → Prometheus Metrics →
+  Core Memory & Storage). Aggregate rate, lower cardinality, suitable
+  for rate-of-change alerts. Use when you need a classic
+  `rate(...) > 0` SLO rule.
+
+Both channels observe the same underlying decision; pick based on the
+alerting stack. Dashboards typically combine: counter for the
+page-worthy SLO, trace query for the drill-in once paged.
 
 ---
 
@@ -5484,8 +5527,8 @@ After reading every TypeScript file across both plugins (35 files total, with `s
 | 14 | `context/src/engine.ts:106` | `false` | Default `is_subagent` in bootstrap | No | No -- semantic default | `true` would treat primary session as subagent |
 | 15 | `context/src/engine.ts:130` | `false` | Default `is_heartbeat` in ingestBatch | No | No -- semantic default | `true` would mark all ingested messages as heartbeats |
 | 16 | `context/src/engine.ts:142` | `""` | Default `query` in assemble params | No | No -- empty query is valid | Non-empty would bias assembly toward a query |
-| 17 | `context/src/engine.ts:177` | `[]` | Empty `messages` array in afterTurn | No | No -- structural placeholder | OpenClaw passes no messages here; server ignores |
-| 18 | `context/src/engine.ts:178` | `0` | Default `pre_prompt_message_count` in afterTurn | No | No -- tracking disabled | Non-zero would skew successful-use tracking |
+| 17 | `context/src/engine.ts:184,192` | Resolved variable `(params.messages && params.messages.length > 0) ? params.messages : this.lastTurnMessages` | Turn `messages` forwarded in `afterTurn`. Post-PR-6 (commit `d24a0e8`), the plugin no longer sends literal `[]`; it takes OpenClaw's `params.messages` when non-empty, otherwise falls back to `this.lastTurnMessages` buffered during the turn (GF-04). Runtime uses these for scanner stage-2 (successful-use, goal-progress) processing after the response boundary split. | No | No -- behavior is determined by PR-6 hybrid A+C shape, not a knob | Sending literal `[]` again would regress PR-6: scanners would see no response messages, successful-use/goal-progress tracking silently dies |
+| 18 | `context/src/engine.ts:197` | Conditionally-spread: `...('prePromptMessageCount' in params ? { pre_prompt_message_count: params.prePromptMessageCount } : {})` | `pre_prompt_message_count` is **absent from the wire when OpenClaw didn't emit it**, **present (including `0`) when OpenClaw did**. Post-PR-6 hybrid A+C: `lifecycle.py:884-892` uses the has-key signal to decide between trusting the plugin (`boundary_source="plugin"`) and deriving via tail-walker (`boundary_source="derived"`); empty `messages` branches to `boundary_source="empty"`. No hardcoded default — the plugin's silence IS the signal. | No | No -- architectural invariant of the hybrid-A+C design | Collapsing via `|| 0` (or reintroducing a default) would hide OpenClaw's silence and force the runtime to trust a fabricated `0`, silently disabling the tail-walker fallback |
 | 19 | `context/src/engine.ts:194` | `"completed"` | Default `reason` for onSubagentEnded | No | Yes -- behavioral | Other values: `"deleted"`, `"swept"`, `"released"` affect how parent session resumes context |
 | 20 | `context/src/engine.ts:200` | `"agent:main:main"` | Reset value for sessionKey in dispose() | No (documented at engine.ts:47 for initial, not for reset) | No -- matches initial | Different reset value would leave stale session identity |
 | 21 | `context/src/engine.ts:218` | `"unknown"` | Default provider string when LLM event has no provider | No | No -- reporting fallback | Shows "unknown" in metrics/traces |
@@ -8054,7 +8097,68 @@ Previous passes documented WHAT parameters exist. This pass documents the VALUE 
 
 **Recommended production:** `6` (default). Lower to `3` for interactive assistants. Raise to `10-12` only if LLM cost is a concern and latency tolerance is high.
 
-### 2.4 `llm.extraction_max_input_tokens`
+#### Ingest-related batch/cap fields — distinct stages
+
+| Field | Location | Default | Stage it controls |
+|-------|----------|---------|-------------------|
+| `LLMConfig.ingest_batch_size` (env `EB_INGEST_BATCH_SIZE`) | Global | `6` | IngestBuffer flush threshold — how many buffered messages trigger the LLM extraction pipeline. |
+| `ProfilePolicy.ingest_batch_size` | Per-profile override (nullable) | `None` (inherit global) | Same stage as above, but tuned per profile. Set on `ProfilePolicy` in profile YAML. Resolved via `ProfileRegistry.effective_ingest_batch_size(policy, llm_config)`; exposed at `GET /context/config?profile=<name>`. |
+| `LLMConfig.extraction_max_facts_per_batch` | Global | `10` | LLM fact-extraction call — max facts per extraction output. |
+| `AutorecallPolicy.extraction_max_facts_per_batch_before_dedup` | Per-profile on `AutorecallPolicy` | `5` | Post-extraction dedup pre-filter — caps how many facts pass through dedup. |
+
+These names historically overlap because they were added at different phases, but they control independent pipeline stages. See `local/FIX-PLAN-Pre-Prompt-Ingest-Pipeline.md` "Naming overlap" for the rationale on why the rename is deferred.
+
+### 2.4 Successful-use scanner thresholds (T-2)
+
+The ContextLifecycle successful-use scanner (`_track_successful_use`) scores each injected working-set item against the agent's response-delta messages. It uses 3 scoring methods (S1 direct-quote, S2 tool-correlation, S3 jaccard overlap) plus an aggregation gate. All thresholds are configurable **per-profile** via `ProfilePolicy.successful_use_thresholds`, falling back to module-level defaults when unset.
+
+| Field | Default | Range | Controls |
+|-------|---------|-------|----------|
+| `s1_direct_quote_ratio` | 0.15 | [0.0, 1.0] | Min ratio of fact-phrase substring matches in the assistant response for S1 to fire. Lower = more lenient quote detection. |
+| `s2_tool_correlation_overlap` | 0.3 | [0.0, 1.0] | Min overlap between fact tokens and tool-message tokens for S2 to fire. |
+| `s3_jaccard_score` | 0.15 | [0.0, 1.0] | Min Jaccard overlap between fact tokens and response tokens for S3 to fire. |
+| `use_confidence_gate` | 0.15 | [0.0, 1.0] | Aggregated-signal threshold above which `FactDataPoint.successful_use_count` is incremented. Signals below this threshold still update `use_count` and `last_used_at` silently. |
+| `s6_ignored_turns_floor` | 3 | ≥1 | Turns-since-injection floor after which an ignored fact gets the "ignored_turns" tag for Phase 9 decay tuning. |
+
+All 5 built-in presets (base/coding/research/managerial/worker/personal_assistant) currently inherit the defaults above. Operators can override per-profile by adding a `successful_use_thresholds` block to their profile YAML:
+
+```yaml
+coding:
+  successful_use_thresholds:
+    s1_direct_quote_ratio: 0.20  # tighter quote detection
+    use_confidence_gate: 0.25    # only count very high-confidence uses
+```
+
+**Tuning guidance:**
+- Lower thresholds = more permissive = higher successful_use_count recall (risk: noise from weak matches).
+- Higher thresholds = stricter = higher precision (risk: losing legitimate usage signals from paraphrased responses).
+
+**Empirical calibration and tradeoffs (TODO-6-102, Round 1 Business Logic Reviewer, MEDIUM):**
+
+The 0.15 default for `use_confidence_gate` (and for `s1_direct_quote_ratio` / `s3_jaccard_score`) was calibrated against live-fire probes (DIAG-I1 + K-2) in 2026-04. Key observations:
+
+- **Observed paraphrase confidence band: 0.14–0.18.** Realistic agent paraphrases that reference an injected fact produce scanner confidences in this range. K-2 live verification flipped TimescaleDB `successful_use_count` 0→1 at `confidence=0.190` (margin to the gate: 0.04).
+- **Why 0.15 (lower edge of the band):** the gate is positioned deliberately on the *low* side of the paraphrase median so cases like K-2's TimescaleDB paraphrase clear the gate. Raising the default to ~0.17 would block legitimate paraphrases near the empirical median — precision gain at the cost of recall on the exact signal the scanner is designed to catch.
+- **Known tail-loss at 0.14–0.15:** signals in this band fall *below* the gate and update only `use_count` + `last_used_at` silently — they do NOT increment `successful_use_count`. Operators relying on `successful_use_count` as Phase-9 strengthening input should expect a ~25-50% under-count on genuine but low-confidence paraphrased uses. This is intentional — raising the gate to capture those would also admit more coincidental matches in the 0.15–0.17 band.
+- **Silent over-count at 0.15–0.17:** conversely, low-signal coincidental matches in this band clear the gate and get credit. The two failure modes trade off around the 0.15 choice; the empirical 0.16 midpoint has no obvious separator.
+- **Don't raise the global default.** The operator explicitly reset all 5 preset overrides to `SuccessfulUseThresholds` defaults in commit `252c7d3` — raising the global default reintroduces the "differentiated defaults shipped without telemetry" problem that decision fixed. Per-profile tuning via `ProfilePolicy.successful_use_thresholds` (see YAML example above) is the right knob for operators with use-case-specific telemetry that justifies precision over recall.
+- **Class-level fix in flight:** the paraphrase-fragility *class* (lexical-only scanning misses semantically equivalent restatements) is addressed by **TD-scanner-4** — an embedding-based S4 scanner planned for a future PR. That's the proper long-term solution; threshold bumps here are a single-knob workaround for a multi-dimensional failure mode.
+
+Operators who need to bias for precision (research profiles, compliance-sensitive settings) can raise `use_confidence_gate` per-profile to 0.20–0.25; operators biasing for recall (exploratory coding, learning loops) can lower it to 0.10–0.12. Don't raise the global default.
+
+**S2 `tool_correlation_overlap` asymmetry (TODO-6-103, Round 1 Business Logic Reviewer, LOW):**
+
+S2 stays at `0.3` while S1 (`direct_quote_ratio`) and S3 (`jaccard_score`) dropped to `0.15` in the J-1 calibration. Because `use_confidence = max(all signals)` and the aggregate `use_confidence_gate` is `0.15`, any S2 hit trivially clears the aggregate gate once it fires. But S2's own `0.3` threshold itself rarely fires — empirical calibration data (DIAG-I1 + DIAG-M1 live-fire probes in 2026-04) only exercised *paraphrase* paths, not *tool-output quotation* paths, so there is no empirical basis to realign S2 alongside S1/S3.
+
+The per-scanner asymmetry is **intentional** pending tool-path telemetry. Raising or lowering S2 without tool-output-specific probes would be speculative — the signal S2 is designed to catch (fact tokens appearing in tool messages, e.g. shell output or API responses quoting a stored fact) has a different noise floor than paraphrase matching and warrants its own calibration cycle.
+
+Operators with a specific profile's tool-use pattern that justifies a different floor can override via `ProfilePolicy.successful_use_thresholds.s2_tool_correlation_overlap` per-profile (same mechanism as the S1/S3 knobs documented above). When tool-path signal-distribution telemetry becomes available, a follow-up calibration pass can realign the global S2 default with an empirical basis.
+
+**Distinct from `successful_use.*` (global config):** The per-profile `successful_use_thresholds` documented here gate the always-on per-turn scanner in `after_turn()`. The separate global `successful_use.*` YAML section (opt-in, default disabled) configures the RT-1 LLM-based batch evaluation pipeline (`SuccessfulUseReasoningTask`). Different mechanisms, different cost profiles — the per-profile thresholds are cheap and always active; the global RT-1 feature is expensive (LLM calls per turn) and opt-in.
+
+See `elephantbroker/schemas/profile.py::SuccessfulUseThresholds` for the schema definition.
+
+### 2.5 `llm.extraction_max_input_tokens`
 
 **Schema constraint:** `Field(default=4000, ge=100)`. Env: `EB_LLM_EXTRACTION_MAX_INPUT_TOKENS`. Controls the user prompt truncation before sending to LLM. Truncation is by character ratio: if `prompt_tokens > max_input_tokens`, the prompt is sliced to `int(len(prompt) * max_input_tokens / prompt_tokens)`.
 
@@ -9011,3 +9115,60 @@ return JSONResponse(status_code=500, content=detail.model_dump())
 | **LOW** | No CORS policy configured | 3.5 |
 | **LOW** | Grafana default admin password | 5.1 |
 | **LOW** | Qdrant vector delete is best-effort | 4.5 |
+
+---
+
+## 18. API Changelog — Known Breaking Changes
+
+This section tracks API-surface changes that affect external consumers of
+the runtime HTTP API. No API version header or deprecation field is emitted
+on the wire today — operators should consult this list when upgrading a
+deployment across the PR boundary noted on each entry.
+
+### PR #6 (T-3): `WorkingSetItem.source_type` split into `(source_type, retrieval_source)`
+
+**Affected endpoints:** `GET /working-set/{session_key}/{session_id}`,
+`POST /working-set/build`, any other response that embeds
+`WorkingSetItem` (see `elephantbroker/schemas/working_set.py:91-95`).
+
+**Before (pre-PR-6):** `source_type` was a freeform `str` that carried
+**two orthogonal meanings** fused into one field:
+
+- The DataPoint class of the item (`"fact"`, `"artifact"`, `"goal"`, ...)
+- The retrieval path that produced it (`"vector"`, `"keyword"`,
+  `"structural"`, `"graph"`) — only meaningful for fact-class items
+
+Consumers that introspected the field had to disambiguate the two
+meanings ad hoc.
+
+**After (PR #6):** two fields, each a constrained `Literal`:
+
+- `source_type: Literal["fact", "artifact", "goal", "persistent_goal", "procedure"]`
+  — the DataPoint-type semantic. Always populated. For retrieval-sourced
+  items this is always `"fact"`.
+- `retrieval_source: Literal["structural", "keyword", "vector", "graph"] | None = None`
+  — the retrieval-path semantic. `None` for non-fact items (goals,
+  procedures, artifacts) that flow through the pipeline without a
+  retrieval source.
+
+**Migration for API consumers:**
+
+| Pre-PR-6 read | Post-PR-6 equivalent |
+|---|---|
+| `source_type == "vector"` | `retrieval_source == "vector"` |
+| `source_type == "keyword"` | `retrieval_source == "keyword"` |
+| `source_type == "structural"` | `retrieval_source == "structural"` |
+| `source_type == "graph"` | `retrieval_source == "graph"` |
+| `source_type == "fact"` | `source_type == "fact"` (unchanged) |
+| `source_type == "artifact"` | `source_type == "artifact"` (unchanged) |
+| `source_type == "goal"` / `"persistent_goal"` | unchanged |
+| `source_type == "procedure"` | unchanged |
+
+Consumers that previously read `source_type` to determine the retrieval
+path will now see `"fact"` for every retrieval-sourced item and must read
+`retrieval_source` instead. Consumers that only cared about the
+DataPoint type need no change.
+
+**Additional operator-facing reference:** the same change is documented
+from the plugin/SDK consumer's angle in
+[OPENCLAW-SETUP.md §T-3: WorkingSetItem Schema Split](./OPENCLAW-SETUP.md#t-3-workingsetitem-schema-split-pr-6).

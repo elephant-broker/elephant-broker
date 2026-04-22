@@ -342,16 +342,41 @@ def _render_item_block(item: WorkingSetItem) -> str:
 
     Large items are replaced with an artifact placeholder to save tokens;
     small items are inlined verbatim.
+
+    TODO-6-101 (Business Logic Reviewer, MEDIUM): the agent-facing label
+    prefers ``item.retrieval_source`` when set, falling back to
+    ``item.source_type`` otherwise. Rationale:
+
+    - Pre-T-3: retrieval-sourced facts carried ``source_type="vector"`` /
+      ``"keyword"`` / ``"structural"`` / ``"graph"``; the agent saw
+      ``[Memory (vector): ...]`` and could reason about retrieval
+      provenance.
+    - Post-T-3 (schema split): ``source_type`` is the DataPoint-type
+      Literal (fact/artifact/goal/persistent_goal/procedure) and the
+      retrieval path moved to ``retrieval_source``. Without this
+      stamping, every retrieval-sourced fact renders uniformly as
+      ``[Memory (fact)]`` — losing the per-path provenance signal.
+
+    The ``retrieval_source or source_type`` pattern mirrors the Option C
+    stamping already applied at ``lifecycle.py`` (metric label) and
+    ``manager.py`` (injection reference), keeping the label semantic
+    consistent across all three call sites.
+
+    Non-fact items (artifact / goal / persistent_goal / procedure) have
+    ``retrieval_source=None`` by construction and gracefully fall back
+    to ``source_type``, so they still render as ``[Memory (goal)]``,
+    ``[Memory (procedure)]``, etc.
     """
+    label = item.retrieval_source or item.source_type
     if len(item.text) > _ARTIFACT_PLACEHOLDER_THRESHOLD:
         # Artifact placeholder -- the model can call ``artifact_search``
         # to retrieve the full content on demand.
         summary = item.text[:120].replace("\n", " ").strip()
         return (
-            f"[Memory ({item.source_type}): {summary}...]\n"
+            f"[Memory ({label}): {summary}...]\n"
             f" -> Call artifact_search(\"{item.id}\") for full content"
         )
-    return f"[{item.source_type}] {item.text}"
+    return f"[{label}] {item.text}"
 
 
 def _render_goal_block(goals: list[GoalState], budget: int) -> str:

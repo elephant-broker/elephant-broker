@@ -173,9 +173,46 @@ describe("TestLifecycleMethods", () => {
   it("afterTurn sends empty messages when no lastTurnMessages set", async () => {
     engine.setSessionContext("sk", "sid");
     await engine.afterTurn({ sessionId: "sid" });
+    // P4: when OpenClaw doesn't emit prePromptMessageCount, the wire payload
+    // must NOT include the field — the Python side uses has-key to decide
+    // between honoring the plugin signal and deriving via tail-walker.
     expect(client.afterTurn).toHaveBeenCalledWith(
-      expect.objectContaining({ messages: [], pre_prompt_message_count: 0 }),
+      expect.objectContaining({ messages: [] }),
     );
+    const payload = (client.afterTurn as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload).not.toHaveProperty("pre_prompt_message_count");
+  });
+
+  it("afterTurn omits pre_prompt_message_count when plugin is silent (P4)", async () => {
+    engine.setSessionContext("sk", "sid");
+    engine.setLastTurnMessages([
+      { role: "user", content: "ping" },
+      { role: "assistant", content: "pong" },
+    ]);
+    // Caller passes messages but NO prePromptMessageCount — field must be absent.
+    await engine.afterTurn({
+      sessionId: "sid",
+      messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ],
+    });
+    const payload = (client.afterTurn as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload).not.toHaveProperty("pre_prompt_message_count");
+  });
+
+  it("afterTurn forwards explicit 0 (distinct from absent) (P4)", async () => {
+    engine.setSessionContext("sk", "sid");
+    // prePromptMessageCount=0 is a valid signal meaning "all messages are
+    // response-side" (e.g. a first-turn reply). `|| 0` would have erased this
+    // distinction; `'key' in params` preserves it.
+    await engine.afterTurn({
+      sessionId: "sid",
+      messages: [{ role: "assistant", content: "hello world" }],
+      prePromptMessageCount: 0,
+    });
+    const payload = (client.afterTurn as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload).toHaveProperty("pre_prompt_message_count", 0);
   });
 
   it("afterTurn forwards lastTurnMessages and clears buffer", async () => {

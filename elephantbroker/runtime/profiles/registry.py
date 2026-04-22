@@ -13,21 +13,46 @@ from __future__ import annotations
 import logging
 import time
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
 from elephantbroker.runtime.interfaces.profile_registry import IProfileRegistry
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.runtime.profiles.inheritance import ProfileInheritanceEngine
 from elephantbroker.runtime.profiles.org_override_store import OrgOverrideStore
 from elephantbroker.runtime.profiles.presets import PROFILE_PRESETS
-from elephantbroker.schemas.profile import ProfilePolicy
+from elephantbroker.schemas.profile import ProfilePolicy, SuccessfulUseThresholds
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 from elephantbroker.schemas.working_set import ScoringWeights
+
+if TYPE_CHECKING:
+    from elephantbroker.schemas.config import LLMConfig
 
 logger = logging.getLogger(__name__)
 
 
 class ProfileRegistry(IProfileRegistry):
-    """Resolves profiles with inheritance, org overrides, and TTL caching."""
+    """Resolves profiles with inheritance, org overrides, and TTL caching.
+
+    Sync-resolver convention (TODO-6-409, Round 1 Architecture Reviewer, INFO):
+    Methods prefixed ``effective_*`` (currently ``effective_ingest_batch_size``
+    and ``effective_successful_use_thresholds``) are **synchronous** and take
+    an already-resolved ``ProfilePolicy`` as input. They perform pure field
+    reads with a simple "policy override or default" fallback — no I/O, no
+    cache lookups, no org-override resolution — and therefore do not need
+    to be ``async``. Callers that already hold a resolved policy can use
+    these helpers directly; callers starting from a profile name should
+    first call ``resolve_profile(...)`` (which IS async — it touches the
+    cache, the preset table, and the optional SQLite org-override store)
+    and then pass the resolved policy into the sync resolver. This avoids
+    a redundant async round-trip on every effective-value lookup.
+
+    The ``get_scoring_weights`` precedent ships the other shape (async,
+    takes a profile name, re-resolves) and is retained for callers that
+    don't already hold a policy; new sync resolvers follow the
+    pre-resolved-policy shape because most callers at the lifecycle layer
+    resolve once per turn and then reuse the policy across multiple
+    effective-value lookups.
+    """
 
     def __init__(
         self,
@@ -118,6 +143,39 @@ class ProfileRegistry(IProfileRegistry):
         """Get resolved scoring weights for a profile."""
         policy = await self.resolve_profile(profile_name, org_id=org_id)
         return policy.scoring_weights
+
+    def effective_ingest_batch_size(
+        self,
+        policy: ProfilePolicy,
+        llm_config: "LLMConfig",
+    ) -> int:
+        """Resolve the effective ingest buffer flush threshold for a profile.
+
+        Returns ``policy.ingest_batch_size`` when set, otherwise
+        ``llm_config.ingest_batch_size`` (the global EB_INGEST_BATCH_SIZE).
+        Synchronous — takes the already-resolved policy so callers avoid a
+        re-resolve round-trip. Mirrors the ``get_scoring_weights`` precedent
+        of read-only convenience helpers that stay close to the registry.
+        """
+        return (
+            policy.ingest_batch_size
+            if policy.ingest_batch_size is not None
+            else llm_config.ingest_batch_size
+        )
+
+    def effective_successful_use_thresholds(
+        self,
+        policy: ProfilePolicy,
+    ) -> SuccessfulUseThresholds:
+        """Resolve the scanner thresholds for a profile.
+
+        Returns ``policy.successful_use_thresholds`` when set; otherwise a
+        fresh ``SuccessfulUseThresholds()`` with module defaults. Follows
+        the ``effective_ingest_batch_size`` precedent — sync, takes the
+        already-resolved policy, no LLM-config second input (module
+        defaults serve that role here).
+        """
+        return policy.successful_use_thresholds or SuccessfulUseThresholds()
 
     async def list_profiles(self) -> list[str]:
         """List all available profile IDs (excluding 'base')."""

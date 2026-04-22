@@ -64,15 +64,32 @@ class IngestBuffer(IIngestBuffer):
         self._keys = redis_keys if redis_keys is not None else RedisKeyBuilder(gateway_id="")
 
     @traced
-    async def add_messages(self, session_key: str, messages: list[dict]) -> bool:
+    async def add_messages(
+        self,
+        session_key: str,
+        messages: list[dict],
+        *,
+        effective_batch_size: int | None = None,
+    ) -> bool:
         """Add messages to the buffer. Returns True if batch size reached.
 
         Note: In FULL mode, the P1 gate on /memory/ingest-messages prevents this
         method from being called — extraction is handled by ContextLifecycle.ingest_batch().
         The overflow guard below is only reachable in MEMORY_ONLY mode (TODO(TD-15)).
+
+        ``effective_batch_size`` (P6): when provided, overrides both the flush
+        threshold and the 3x overflow guard for the duration of this call.
+        Lets callers that have a resolved ``ProfilePolicy`` apply a per-profile
+        override without mutating the gateway-wide singleton's config. When
+        ``None``, behavior is byte-identical to the pre-P6 path.
         """
+        batch_size = (
+            effective_batch_size
+            if effective_batch_size is not None
+            else self._config.ingest_batch_size
+        )
         key = self._keys.ingest_buffer(session_key)
-        max_size = self._config.ingest_batch_size * 3  # 3x = ~3 flushes of headroom
+        max_size = batch_size * 3  # 3x = ~3 flushes of headroom
         pipe = self._redis.pipeline()
         for msg in messages:
             pipe.rpush(key, json.dumps(msg))
@@ -80,7 +97,7 @@ class IngestBuffer(IIngestBuffer):
         pipe.expire(key, self._config.ingest_buffer_ttl_seconds)
         await pipe.execute()
         size = await self._redis.llen(key)
-        return size >= self._config.ingest_batch_size
+        return size >= batch_size
 
     @traced
     async def flush(self, session_key: str) -> list[dict]:

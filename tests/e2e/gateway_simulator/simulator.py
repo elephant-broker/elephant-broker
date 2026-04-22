@@ -257,9 +257,19 @@ class OpenClawGatewaySimulator:
     async def simulate_context_after_turn(
         self,
         messages: list[dict] | None = None,
-        pre_prompt_message_count: int = 0,
+        pre_prompt_message_count: int | None = None,
     ) -> dict:
-        """Simulate POST /context/after-turn — post-turn successful-use tracking."""
+        """Simulate POST /context/after-turn — post-turn successful-use tracking.
+
+        ``pre_prompt_message_count`` mirrors the 3-state ``AfterTurnParams``
+        contract (TODO-6-308, Round 1 Blind Spot Reviewer, INFO):
+        ``None`` → field omitted from the JSON body, exercises the
+        'derived' branch (tail-walker fallback) on the server;
+        ``0`` → honored as an explicit zero (hybrid A+C first-turn
+        contract), NOT falsy-collapsed to None;
+        positive ``N`` → passed through verbatim as the pre-prompt
+        boundary marker.
+        """
         r = await self.client.post("/context/after-turn", json={
             "session_id": self.session_id,
             "session_key": self.session_key,

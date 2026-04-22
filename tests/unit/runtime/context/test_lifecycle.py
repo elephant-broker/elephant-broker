@@ -64,10 +64,21 @@ def _make_lifecycle(*, fresh_bootstrap: bool = False, **overrides):
         fresh_bootstrap: If True, session_store.get returns None so bootstrap
             creates a new SessionContext instead of reusing an existing one (GF-15).
     """
+    from elephantbroker.schemas.profile import SuccessfulUseThresholds
+
     profile = make_profile_policy()
 
     profile_reg = AsyncMock()
     profile_reg.resolve_profile = AsyncMock(return_value=profile)
+    # T-2: scanner threshold resolver is sync. AsyncMock's auto-generated
+    # attribute returns a MagicMock that doesn't behave as a real
+    # SuccessfulUseThresholds instance (its gate attrs are MagicMocks,
+    # not floats). Stub with a real default instance so every scanner
+    # path in after_turn / _track_successful_use works out-of-the-box.
+    # Individual tests can override by reassigning on the returned lc.
+    profile_reg.effective_successful_use_thresholds = MagicMock(
+        return_value=SuccessfulUseThresholds(),
+    )
 
     session_store = AsyncMock()
     session_store.get = AsyncMock(return_value=None if fresh_bootstrap else make_session_context())
@@ -995,6 +1006,321 @@ class TestAfterTurn:
 
 
 # ======================================================================
+# P4: response-delta boundary (hybrid A+C)
+# ======================================================================
+
+
+class TestAfterTurnP4:
+    """P4 tests: honor OpenClaw pre_prompt_message_count when emitted;
+    derive response delta via tail-walker when the plugin is silent."""
+
+    def _after_turn_trace_payload(self, trace: AsyncMock) -> dict:
+        """Extract AFTER_TURN_COMPLETED payload from the trace mock."""
+        matches = [
+            c for c in trace.append_event.call_args_list
+            if c[0][0].event_type == TraceEventType.AFTER_TURN_COMPLETED
+        ]
+        assert matches, "Expected AFTER_TURN_COMPLETED trace event"
+        return matches[-1][0][0].payload
+
+    async def test_honors_plugin_explicit_zero(self):
+        """An explicit pre_prompt_message_count=0 (plugin emitted) means
+        'all messages are response-side' — honored verbatim, not derived."""
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        msgs = [
+            AgentMessage(role="assistant", content="greetings"),
+            AgentMessage(role="assistant", content="more reply"),
+        ]
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=msgs, pre_prompt_message_count=0,
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "plugin"
+        assert payload["response_messages"] == 2
+        assert payload["total_messages"] == 2
+
+    async def test_honors_plugin_nonzero(self):
+        """pre_prompt_message_count=2 on 5 messages slices to 3 response msgs,
+        regardless of where the user messages sit — plugin signal wins."""
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        msgs = [
+            AgentMessage(role="user", content="q1"),
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="user", content="q2"),
+            AgentMessage(role="assistant", content="a2a"),
+            AgentMessage(role="assistant", content="a2b"),
+        ]
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=msgs, pre_prompt_message_count=2,
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "plugin"
+        assert payload["response_messages"] == 3
+        assert payload["total_messages"] == 5
+
+    async def test_derives_response_delta_when_plugin_silent(self):
+        """When OpenClaw doesn't emit pre_prompt_message_count (None), the
+        runtime walks backward from the tail to the last user message and
+        slices after it — defense-in-depth for plugins that haven't wired
+        the signal yet."""
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        msgs = [
+            AgentMessage(role="user", content="old q"),
+            AgentMessage(role="assistant", content="old a"),
+            AgentMessage(role="user", content="current q"),
+            AgentMessage(role="assistant", content="current a"),
+            AgentMessage(role="tool", content="tool output"),
+        ]
+        # pre_prompt_message_count omitted → defaults to None
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK, messages=msgs,
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "derived"
+        # Everything after index 2 (the last user message) is response-side.
+        assert payload["response_messages"] == 2
+        assert payload["total_messages"] == 5
+
+    async def test_empty_messages_records_empty_boundary_source(self):
+        """TODO-6-605: `after_turn` called with `messages=[]` must emit an
+        AFTER_TURN_COMPLETED trace event whose payload pins the third P4
+        branch — `boundary_source="empty"`, `response_messages=0`.
+
+        Rounds out the payload-shape coverage for all 3 P4 boundary branches
+        (plugin/derived/empty). The observability sibling test in
+        `TestAfterTurnBoundarySourceObservability::test_empty_branch_logs_and_increments`
+        covers the DEBUG log + Prometheus counter; this pins the trace-event
+        payload contract that operators reading the trace stream rely on.
+        """
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        await lc.after_turn(AfterTurnParams(
+            session_id=SID, session_key=SK, messages=[],
+        ))
+        payload = self._after_turn_trace_payload(trace)
+        assert payload["boundary_source"] == "empty"
+        assert payload["response_messages"] == 0
+        assert payload["total_messages"] == 0
+
+    def test_extract_response_delta_unit(self):
+        """_extract_response_delta walks backward to the last user-role
+        message and returns everything after it. If no user message is
+        present, the entire list is treated as response-side.
+
+        TODO-6-105 / TODO-6-306: ``_extract_response_delta`` is now an
+        instance method (not ``@staticmethod``) so it can emit a WARN log
+        and increment ``inc_response_delta_no_user_boundary`` on the
+        no-user-role fallback branch. Direct unit calls go through an
+        instance built with the shared ``_make_lifecycle()`` helper.
+        """
+        lc = _make_lifecycle()
+
+        # No user message at all → whole list is response.
+        only_assistant = [
+            AgentMessage(role="assistant", content="a"),
+            AgentMessage(role="assistant", content="b"),
+        ]
+        assert lc._extract_response_delta(only_assistant) == only_assistant
+
+        # Single user in the middle → slice after it.
+        mixed = [
+            AgentMessage(role="assistant", content="old"),
+            AgentMessage(role="user", content="q"),
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="tool", content="t1"),
+        ]
+        delta = lc._extract_response_delta(mixed)
+        assert len(delta) == 2
+        assert delta[0].role == "assistant"
+        assert delta[1].role == "tool"
+
+        # Multiple users → slice after the LAST one (not the first).
+        multi_user = [
+            AgentMessage(role="user", content="first"),
+            AgentMessage(role="assistant", content="reply1"),
+            AgentMessage(role="user", content="latest"),
+            AgentMessage(role="assistant", content="reply2"),
+        ]
+        delta = lc._extract_response_delta(multi_user)
+        assert len(delta) == 1
+        assert delta[0].content == "reply2"
+
+        # Empty input → empty output.
+        assert lc._extract_response_delta([]) == []
+
+    def test_extract_response_delta_no_user_warns_and_increments(self, caplog):
+        """TODO-6-105 (Business Logic, LOW) + TODO-6-306 (Blind Spot, LOW):
+        when the envelope contains no ``role=="user"`` message, the
+        tail-walker returns the full list as a defensive fallback AND
+        emits both observability signals:
+
+        - WARN log on ``elephantbroker.runtime.context.lifecycle`` with
+          the envelope size so operators tailing journalctl can detect
+          the no-user-boundary branch firing.
+        - ``MetricsContext.inc_response_delta_no_user_boundary()``
+          increment on the ``eb_response_delta_no_user_total{gateway_id}``
+          counter so alertmanager can fire on ``rate(...) > 0``.
+
+        The return value is intentionally NOT changed to ``[]`` — preserving
+        the defensive fallback (``list(messages)``) keeps downstream scanners
+        running; the observability surface is what closes the gap.
+        """
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+
+        envelope = [
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="tool", content="t1"),
+            AgentMessage(role="assistant", content="a2"),
+        ]
+
+        with caplog.at_level(
+            logging.WARNING, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            delta = lc._extract_response_delta(envelope)
+
+        # 1. Fallback return value is the full list (resilience preserved).
+        assert delta == envelope
+        assert len(delta) == 3
+
+        # 2. Counter incremented exactly once (no labels beyond gateway_id).
+        metrics.inc_response_delta_no_user_boundary.assert_called_once_with()
+
+        # 3. WARN log emitted on the lifecycle logger.
+        warn_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "_extract_response_delta" in rec.getMessage()
+            and "no user-role message" in rec.getMessage()
+        ]
+        assert len(warn_records) == 1, (
+            f"expected exactly one WARN on no-user fallback, got {len(warn_records)}"
+        )
+        assert "3-message envelope" in warn_records[0].getMessage()
+
+
+# ======================================================================
+# C-boundary-source cluster — DEBUG log + Prometheus counter for the
+# P4 hybrid-A+C boundary_source decision (TODO-6-201, TODO-6-302).
+# ======================================================================
+
+
+class TestAfterTurnBoundarySourceObservability:
+    """TODO-6-201 (DEBUG log) + TODO-6-302 (Prometheus counter): the P4
+    boundary-source decision (empty/plugin/derived) must be visible on
+    both the log channel (operator tailing journalctl) and the metric
+    channel (alertmanager rule on `source="derived"`)."""
+
+    async def test_empty_branch_logs_and_increments(self, caplog):
+        """No messages on the turn → `boundary_source="empty"` → one
+        DEBUG log line + one `inc_after_turn_boundary_source("empty")`
+        metric increment. Benign; operators should NOT alert on this."""
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+
+        with caplog.at_level(
+            logging.DEBUG, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            await lc.after_turn(AfterTurnParams(
+                session_id=SID, session_key=SK, messages=[],
+            ))
+
+        metrics.inc_after_turn_boundary_source.assert_called_once_with("empty")
+
+        debug_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.DEBUG
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "boundary_source=empty" in rec.getMessage()
+        ]
+        assert len(debug_records) == 1, (
+            f"expected exactly one DEBUG line for empty branch, got {len(debug_records)}"
+        )
+        msg = debug_records[0].getMessage()
+        assert "response_delta=0" in msg
+        assert "total=0" in msg
+
+    async def test_plugin_branch_logs_and_increments(self, caplog):
+        """OpenClaw emitted `pre_prompt_message_count` → `boundary_source="plugin"`
+        → one DEBUG log + one `inc_after_turn_boundary_source("plugin")`.
+        Steady-state hot path; operators should NOT alert on this."""
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+        msgs = [
+            AgentMessage(role="user", content="q1"),
+            AgentMessage(role="assistant", content="a1"),
+            AgentMessage(role="user", content="q2"),
+            AgentMessage(role="assistant", content="a2"),
+        ]
+
+        with caplog.at_level(
+            logging.DEBUG, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            await lc.after_turn(AfterTurnParams(
+                session_id=SID, session_key=SK,
+                messages=msgs, pre_prompt_message_count=2,
+            ))
+
+        metrics.inc_after_turn_boundary_source.assert_called_once_with("plugin")
+
+        debug_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.DEBUG
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "boundary_source=plugin" in rec.getMessage()
+        ]
+        assert len(debug_records) == 1
+        msg = debug_records[0].getMessage()
+        assert "response_delta=2" in msg
+        assert "total=4" in msg
+
+    async def test_derived_branch_logs_and_increments(self, caplog):
+        """OpenClaw silent (no `pre_prompt_message_count`) → tail-walker
+        fallback → `boundary_source="derived"` → one DEBUG log + one
+        `inc_after_turn_boundary_source("derived")`. **Operator-actionable**
+        — this is the value dashboards alert on to catch plugin regressions."""
+        import logging
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(metrics=metrics)
+        msgs = [
+            AgentMessage(role="user", content="old q"),
+            AgentMessage(role="assistant", content="old a"),
+            AgentMessage(role="user", content="current q"),
+            AgentMessage(role="assistant", content="current a"),
+        ]
+
+        with caplog.at_level(
+            logging.DEBUG, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            await lc.after_turn(AfterTurnParams(
+                session_id=SID, session_key=SK, messages=msgs,
+            ))
+
+        metrics.inc_after_turn_boundary_source.assert_called_once_with("derived")
+
+        debug_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.DEBUG
+            and rec.name == "elephantbroker.runtime.context.lifecycle"
+            and "boundary_source=derived" in rec.getMessage()
+        ]
+        assert len(debug_records) == 1
+        msg = debug_records[0].getMessage()
+        # Everything after index 2 (last user message) is response-side → 1 msg.
+        assert "response_delta=1" in msg
+        assert "total=4" in msg
+
+
+# ======================================================================
 # PR #11 R1: Additional after_turn tests
 # ======================================================================
 
@@ -1688,6 +2014,542 @@ class TestComputeRunningJaccard:
         assert score == 0.0
 
 
+class TestScannerCalibration:
+    """J-1: validate successful-use scanner threshold calibration.
+
+    Pre-calibration (DIAG-I1 verdict): the scanner returned method="ignored" on 21/21
+    candidates in a live test where the agent quoted stored facts verbatim. Two root
+    causes were identified:
+
+    - H-alt-2: S1/Jaccard/use_confidence gates were too strict (0.4 / 0.3 / 0.3).
+      A response that quoted a single canonical token (e.g., "TimescaleDB") out of a
+      multi-phrase fact could never clear 0.4 on S1. Lowered to 0.15 across the board
+      (S2 tool_correlation stays at 0.3 — different signal, different noise floor).
+
+    - H-alt-4 heritage (now superseded by T-3): the ``source_type == "fact"``
+      guards at the assemble-time ``last_used_at`` touch and in
+      ``_track_successful_use`` originally excluded retrieval-sourced facts
+      because ``WorkingSetItem.source_type`` overloaded two semantics — both
+      DataPoint-type ("fact"/"artifact"/"goal"/…) AND retrieval path
+      ("vector"/"keyword"/"graph"/"structural"). J-1 shipped a tactical
+      widening via a frozenset union (see TD-scanner-3 in
+      local/IMPLEMENTED-PR-6-merge.md for the T-3 history). T-3 superseded
+      that by splitting the two concerns into distinct fields:
+      ``source_type`` now
+      carries only the DataPoint-type semantic, ``retrieval_source`` the
+      retrieval path. Fact-class items (regardless of retrieval path)
+      correctly hit the ``== "fact"`` check today.
+    """
+
+    def test_s1_direct_quote_fires_at_lowered_threshold(self):
+        """S1 registers a single-phrase hit (ratio ~0.2) that would've been ignored at 0.4.
+
+        Pre-calibration, a fact with 5 extracted phrases whose response only contained
+        one matching bigram produced ratio=0.2 → method="ignored". Post-calibration,
+        the same input produces method="quote" with confidence=0.2.
+        """
+        lc = _make_lifecycle()
+        # text yields 5 phrases: (postgres timescaledb), (timescaledb compression),
+        # (compression hypertables), (postgres timescaledb compression),
+        # (timescaledb compression hypertables)
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+        )
+        msgs = [
+            AgentMessage(
+                role="assistant",
+                content="postgres timescaledb is the right answer here",
+            ),
+        ]
+        is_quote, confidence = lc._detect_direct_quote(item, msgs, 0)
+        assert is_quote is True, (
+            "S1 should register a single canonical-token quote post-calibration "
+            "(ratio 0.2 > new threshold 0.15)"
+        )
+        # Sanity: we're deliberately in the band the calibration unlocked.
+        assert 0.15 < confidence < 0.4, (
+            f"confidence={confidence} — expected in the (0.15, 0.4) band that "
+            f"the old 0.4 threshold used to reject"
+        )
+
+    def test_s1_fires_on_punct_heavy_fact_with_paraphrase(self):
+        """T-1 pipeline smoke test: realistic fact+paraphrase produces a
+        direct_quote signal ≥ 0.15 with punctuation stripping in effect.
+
+        The strict punctuation-stripping regression guarantees are covered by
+        `test_utils.py::TestExtractKeyPhrases` (the utility-level tests).
+        This is the scanner-level integration: once `_extract_key_phrases`
+        has been made punct-tolerant, `_detect_direct_quote` consuming it
+        must still produce a firing signal on a realistic agent paraphrase
+        (live DIAG-M1 baseline on a production TimescaleDB fact was ratio
+        ~0.067 pre-T-1).
+
+        The fact text has a trailing period (`"data."`). Post-T-1 strips
+        that period so phrases ending in `"data"` substring-match the
+        response `"time-series data in this project"`.
+        """
+        lc = _make_lifecycle()
+        item = make_working_set_item(
+            text="I use PostgreSQL with the TimescaleDB extension for time-series data.",
+        )
+        msgs = [
+            AgentMessage(
+                role="assistant",
+                content=(
+                    "You use PostgreSQL with the TimescaleDB extension "
+                    "for time-series data in this project."
+                ),
+            ),
+        ]
+        is_quote, confidence = lc._detect_direct_quote(item, msgs, 0)
+        assert is_quote is True, (
+            "S1 should fire post-T-1: trailing-punct phrases now match "
+            "paraphrased responses without the punctuation"
+        )
+        assert confidence > 0.15, (
+            f"confidence={confidence} — expected > 0.15 post-T-1 "
+            f"(pre-fix baseline was ~0.067)"
+        )
+
+    async def test_vector_source_type_triggers_successful_use_update(self):
+        """Retrieval-sourced fact fires successful_use_count increment after a
+        matching response — validates the T-3 source_type split.
+
+        Pre-J-1: ``item.source_type == "fact"`` guard skipped retrieval items
+        whose ``source_type`` carried the retrieval path ("vector", etc.).
+        J-1 widened via a tactical frozenset union (see TD-scanner-3 in
+        local/IMPLEMENTED-PR-6-merge.md for the T-3 history). T-3 split
+        the two concerns — fact-class items now carry
+        ``source_type="fact"`` with ``retrieval_source`` on a separate
+        field — so the clean ``== "fact"`` check correctly covers all
+        fact-class items regardless of retrieval path.
+        """
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="fact",           # T-3: DataPoint-type semantic
+            retrieval_source="vector",    # T-3: retrieval-path provenance
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(
+                    role="assistant",
+                    content=(
+                        "postgres timescaledb is the right answer — "
+                        "it handles hypertables natively."
+                    ),
+                ),
+            ],
+            pre_prompt_message_count=0,
+        )
+        await lc.after_turn(params)
+
+        # Extract any memory_store.update call carrying successful_use_count.
+        # T-3: fact-class items (source_type="fact") with retrieval_source
+        # stamped produce successful_use_count increments when the response
+        # quotes their text. Pre-T-3, a tactical frozenset union widened
+        # this check to cover retrieval-path-typed items (see TD-scanner-3
+        # in local/IMPLEMENTED-PR-6-merge.md for the T-3 history); post-T-3
+        # the check is a clean `== "fact"` against the DataPoint-type
+        # semantic and retrieval_source lives on a separate field.
+        success_updates = []
+        for c in memory_store.update.call_args_list:
+            if len(c.args) >= 2 and isinstance(c.args[1], dict):
+                if "successful_use_count" in c.args[1]:
+                    success_updates.append(c.args[1])
+        assert len(success_updates) >= 1, (
+            "Expected successful_use_count increment for fact-class item "
+            "(source_type='fact', retrieval_source='vector'). "
+            "If this fails, the T-3 source_type split or the scanner's "
+            "fact-update gate regressed."
+        )
+        assert success_updates[0]["successful_use_count"] == 1
+
+    async def test_unrelated_fact_still_ignored(self):
+        """Calibration must not cause false positives: a fact with no token overlap
+        with the response still yields method='ignored' and does NOT increment
+        successful_use_count (just last_used_at / use_count).
+        """
+        item = make_working_set_item(
+            text="redis sentinel failover cluster configuration",
+            source_type="fact",           # T-3: DataPoint-type semantic
+            retrieval_source="vector",    # T-3: retrieval-path provenance
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(
+                    role="assistant",
+                    content="postgres schemas and database connection pooling.",
+                ),
+            ],
+            pre_prompt_message_count=0,
+        )
+        await lc.after_turn(params)
+
+        for c in memory_store.update.call_args_list:
+            if len(c.args) >= 2 and isinstance(c.args[1], dict):
+                assert "successful_use_count" not in c.args[1], (
+                    f"Unrelated fact should not trigger successful_use_count "
+                    f"increment, got update payload: {c.args[1]}"
+                )
+
+    async def test_uses_profile_thresholds(self):
+        """T-2: scanner respects per-profile `successful_use_thresholds`.
+
+        Uses the exact fact+response pair from
+        ``test_s1_direct_quote_fires_at_lowered_threshold`` (ratio ~0.2,
+        which fires at the default S1 threshold 0.15). With tightened
+        profile thresholds (S1=0.5, S3=0.5) the same input produces
+        ``method="ignored"`` and no ``successful_use_count`` increment.
+
+        Both S1 and S3 are tightened because the fact+response pair also
+        produces a Jaccard score (~0.29, from the 2-token intersection
+        ``{postgres, timescaledb}``) that would fire under the default
+        S3 gate of 0.15 — the test isolates scanner-level threshold flow,
+        not signal-specific semantics.
+
+        Covers end-to-end resolution: profile → registry resolver →
+        ``_track_successful_use`` → ``_detect_direct_quote`` +
+        ``_compute_running_jaccard``. Confirms the thresholds object flows
+        from the registry through the scanner helpers and is actually
+        consulted at each gate.
+        """
+        from elephantbroker.schemas.profile import SuccessfulUseThresholds
+
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="fact",           # T-3: DataPoint-type semantic
+            retrieval_source="vector",    # T-3: retrieval-path provenance
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+        # Override resolver to return tighter S1 + S3 thresholds (0.5 each)
+        # — the same input that fires at the default (0.15/0.15) must now
+        # get ignored on both signals, yielding method="ignored".
+        lc._profile_registry.effective_successful_use_thresholds = MagicMock(
+            return_value=SuccessfulUseThresholds(
+                s1_direct_quote_ratio=0.5,
+                s3_jaccard_score=0.5,
+            ),
+        )
+
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(
+                    role="assistant",
+                    content="postgres timescaledb is the right answer here",
+                ),
+            ],
+            pre_prompt_message_count=0,
+        )
+        await lc.after_turn(params)
+
+        # At tightened thresholds, neither the 0.2-ratio quote nor the
+        # 0.29-score jaccard fires. The memory_store should only see the
+        # plain use_count bump (last_used_at path), never successful_use_count.
+        for c in memory_store.update.call_args_list:
+            if len(c.args) >= 2 and isinstance(c.args[1], dict):
+                assert "successful_use_count" not in c.args[1], (
+                    f"Profile thresholds 0.5/0.5 should have ignored both "
+                    f"S1 and S3 signals — got update payload: {c.args[1]}"
+                )
+
+    async def test_successful_use_count_increments_exactly_once_on_delta(self):
+        """TODO-6-602: P4 `pre_prompt_message_count` single-fire regression.
+
+        Scenario: the agent framework re-sends the full conversation to
+        `after_turn()` — i.e. the `messages` list contains BOTH prior-turn
+        history messages AND the current-turn response. If the P4 boundary
+        is honored, the scanner sees only the delta (messages[N:]) and fires
+        exactly once on the fact. If the boundary regresses (e.g., plugin
+        signal dropped and tail-walker misidentifies the delta), the scanner
+        could potentially scan the entire history, producing a single
+        inflated update with `successful_use_count > 1` from repeated
+        matches, OR a duplicate update call.
+
+        This test pins the invariant: with `pre_prompt_message_count` set,
+        exactly one update with `successful_use_count == 1` is produced.
+
+        Regression this test catches: any future change that accidentally
+        ignores `params.pre_prompt_message_count` (e.g. reordering the
+        if/elif at lifecycle.py:884-892 such that the tail-walker branch
+        wins over the explicit plugin signal).
+        """
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="fact",
+            retrieval_source="vector",
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        # Envelope: 4 messages = [T1_user, T1_assistant (matches fact),
+        # T2_user, T2_assistant (matches fact)]. With pre_prompt_message_count=3,
+        # only T2_assistant falls into the response delta — T1 history stays
+        # outside the scanner window.
+        messages = [
+            AgentMessage(role="user", content="tell me about postgres tuning"),
+            AgentMessage(
+                role="assistant",
+                content=(
+                    "postgres timescaledb is great for hypertables and "
+                    "compression at scale."
+                ),
+            ),
+            AgentMessage(role="user", content="follow-up question"),
+            AgentMessage(
+                role="assistant",
+                content=(
+                    "postgres timescaledb compression works well on "
+                    "hypertables when tuned properly."
+                ),
+            ),
+        ]
+        params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=messages,
+            pre_prompt_message_count=3,
+        )
+        await lc.after_turn(params)
+
+        # Collect every memory_store.update call that carried a
+        # successful_use_count key. Invariant: exactly one such call, and
+        # its payload value is 1 (starting from 0 + 1 = 1).
+        success_updates = [
+            c.args[1]
+            for c in memory_store.update.call_args_list
+            if len(c.args) >= 2
+            and isinstance(c.args[1], dict)
+            and "successful_use_count" in c.args[1]
+        ]
+        assert len(success_updates) == 1, (
+            f"P4 boundary-respecting scanner should fire exactly once per "
+            f"after_turn call, got {len(success_updates)} updates with "
+            f"successful_use_count key: {success_updates}"
+        )
+        assert success_updates[0]["successful_use_count"] == 1, (
+            f"successful_use_count should be exactly 1 (0 + 1), got "
+            f"{success_updates[0]['successful_use_count']} — this would "
+            f"indicate the scanner is inflating counts (e.g., double-"
+            f"counting matches on history messages)."
+        )
+
+    async def test_successful_use_fires_exactly_once_across_turns(self):
+        """TODO-6-603: P4 state-progression regression across sequential turns.
+
+        Scenario: two sequential `after_turn()` calls on the same fact.
+        T1 response does not match the fact (no signal); T2 response does
+        match. Invariant: no successful_use_count update fires in T1, and
+        exactly one fires in T2 with count==1.
+
+        This exercises the same P4 boundary logic as
+        `test_successful_use_count_increments_exactly_once_on_delta` but
+        across *separate* after_turn invocations rather than within a single
+        call. Together they pin the "exactly once per matching response"
+        contract end-to-end.
+
+        Note on snapshot state: the WorkingSetItem loaded from Redis carries
+        `successful_use_count` as persisted. Here we keep the same snapshot
+        JSON on Redis across both turns (the live system would normally
+        refresh the snapshot between turns via assemble()); the T1 call
+        produces no update and the T2 call produces count=1. If either
+        turn's scanner fired spuriously, we'd see an extra update call.
+
+        Full-integration version (OpenClaw Gateway simulator + real Redis +
+        trace-probe on AFTER_TURN_COMPLETED) is tracked as a deferred TD
+        entry — see local/TECHNICAL-DEBT.md (TD-scanner-6).
+        """
+        item = make_working_set_item(
+            text="postgres timescaledb compression hypertables",
+            source_type="fact",
+            retrieval_source="vector",
+            successful_use_count=0,
+            use_count=0,
+        )
+        snapshot = make_working_set_snapshot(items=[item])
+        ctx = make_session_context(
+            last_snapshot_id=str(snapshot.snapshot_id),
+            fact_last_injection_turn={str(item.id): 0},
+            turn_count=1,
+        )
+        session_store = AsyncMock()
+        session_store.get = AsyncMock(return_value=ctx)
+        session_store.save = AsyncMock()
+        session_store._effective_ttl = lambda p: 86400
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=snapshot.model_dump_json())
+        memory_store = AsyncMock()
+        config = ElephantBrokerConfig()
+        config.successful_use.enabled = True
+        lc = _make_lifecycle(
+            session_context_store=session_store,
+            redis=redis,
+            memory_store=memory_store,
+            config=config,
+        )
+
+        # T1: non-matching response (unrelated tokens). The scanner should
+        # not fire a successful_use_count update — only the plain use_count
+        # / last_used_at path would run (not asserted here, it's covered by
+        # test_unrelated_fact_still_ignored).
+        t1_params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(role="user", content="question one"),
+                AgentMessage(
+                    role="assistant",
+                    content="redis sentinel failover cluster configuration.",
+                ),
+            ],
+            pre_prompt_message_count=1,  # only assistant message in delta
+        )
+        await lc.after_turn(t1_params)
+        t1_success_updates = [
+            c.args[1]
+            for c in memory_store.update.call_args_list
+            if len(c.args) >= 2
+            and isinstance(c.args[1], dict)
+            and "successful_use_count" in c.args[1]
+        ]
+        assert len(t1_success_updates) == 0, (
+            f"T1 response is non-matching — scanner must not emit a "
+            f"successful_use_count update in this turn, got "
+            f"{len(t1_success_updates)}: {t1_success_updates}"
+        )
+
+        # Reset memory_store.update call history so T2 assertions are not
+        # polluted by T1's plain use_count bump. We only care about T2's
+        # scanner-emitted updates from here on.
+        memory_store.update.reset_mock()
+
+        # T2: matching response. The scanner should now fire exactly once
+        # with `successful_use_count == 1` (0 + 1, since the snapshot held
+        # on Redis still carries the original count=0 for this test).
+        t2_params = AfterTurnParams(
+            session_id=SID, session_key=SK,
+            messages=[
+                AgentMessage(role="user", content="question two"),
+                AgentMessage(
+                    role="assistant",
+                    content=(
+                        "postgres timescaledb compression handles "
+                        "hypertables natively."
+                    ),
+                ),
+            ],
+            pre_prompt_message_count=1,  # only assistant message in delta
+        )
+        await lc.after_turn(t2_params)
+        t2_success_updates = [
+            c.args[1]
+            for c in memory_store.update.call_args_list
+            if len(c.args) >= 2
+            and isinstance(c.args[1], dict)
+            and "successful_use_count" in c.args[1]
+        ]
+        assert len(t2_success_updates) == 1, (
+            f"T2 response is matching — scanner must emit exactly one "
+            f"successful_use_count update, got {len(t2_success_updates)}: "
+            f"{t2_success_updates}"
+        )
+        assert t2_success_updates[0]["successful_use_count"] == 1, (
+            f"T2 successful_use_count should be 1 (0 + 1), got "
+            f"{t2_success_updates[0]['successful_use_count']}"
+        )
+
+
 # ======================================================================
 # Message transformation (AD-4)
 # ======================================================================
@@ -1916,8 +2778,18 @@ class TestIntegrationFlowThrough:
         assert turn_ingest.run.called
         call_kwargs = turn_ingest.run.call_args.kwargs
         assert "agent_key" in call_kwargs
-        # Regression guard: messages must be dicts, not AgentMessage objects
-        assert all(isinstance(m, dict) for m in call_kwargs["messages"])
+        # TD-28 regression guard (TODO-6-601 tightened): the original PR #8
+        # guard asserted `isinstance(m, dict)` to catch re-introduction of the
+        # pre-conversion comprehension at lifecycle.py:~445 that TD-28 removed.
+        # The post-TD-28 contract is: lifecycle forwards AgentMessage objects
+        # directly and the pipeline normalizes internally. The assertion is
+        # narrowed to AgentMessage-only so any future regression that reintroduces
+        # a `model_dump`/`dict(...)` comprehension at the lifecycle side fails
+        # this assertion, as originally intended. Pipeline-side accept-both-forms
+        # behavior is verified separately by
+        # test_run_accepts_mixed_agent_message_and_dict_input in
+        # tests/unit/pipelines/test_turn_ingest.py — not in scope here.
+        assert all(isinstance(m, AgentMessage) for m in call_kwargs["messages"])
 
     async def test_ingest_batch_result_has_facts_stored_on_success(self):
         """Pipeline facts_stored propagates to IngestBatchResult."""

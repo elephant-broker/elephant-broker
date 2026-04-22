@@ -24,6 +24,28 @@ try:
     eb_llm_tokens_used = Counter("eb_llm_tokens_used", "Token consumption", ["gateway_id", "direction", "model"])
     eb_ingest_buffer_flushes_total = Counter("eb_ingest_buffer_flushes_total", "Buffer flushes", ["gateway_id", "trigger"])
     eb_ingest_gate_skips_total = Counter("eb_ingest_gate_skips_total", "Ingest gate skips (FULL mode)", ["gateway_id", "reason"])
+    # TODO-6-302 (cluster C-boundary-source): surface the P4 hybrid-A+C
+    # response-boundary decision as a Prometheus counter. Values bounded to
+    # {empty, plugin, derived} — stable cardinality. Operators can alert on
+    # `source="derived"` to catch OpenClaw silently stopping to emit
+    # prePromptMessageCount.
+    eb_after_turn_boundary_source_total = Counter(
+        "eb_after_turn_boundary_source_total",
+        "P4 response-boundary source per after_turn",
+        ["gateway_id", "source"],
+    )
+    # TODO-6-105 / TODO-6-306 (cluster C-response-delta-no-user): surface
+    # the `_extract_response_delta` no-user-role fallback branch. When the
+    # tail-walker finds no role="user" message, the whole envelope is
+    # returned as "response delta" — bounded blast radius (downstream
+    # scanners filter to role="assistant") but silent until now. Operators
+    # can alert on `rate(...) > 0` to catch malformed/heartbeat/subagent
+    # envelopes reaching after_turn.
+    eb_response_delta_no_user_total = Counter(
+        "eb_response_delta_no_user_total",
+        "P4 _extract_response_delta no-user-role fallback fires per after_turn",
+        ["gateway_id"],
+    )
     eb_session_active = Gauge("eb_session_active", "Active sessions", ["gateway_id", "profile_name"])
     eb_edges_created_total = Counter("eb_edges_created_total", "Graph edges created", ["gateway_id", "edge_type"])
     eb_edges_failed_total = Counter("eb_edges_failed_total", "Failed edges", ["gateway_id", "edge_type"])
@@ -93,6 +115,19 @@ try:
     eb_budget_resolution_tokens = Histogram("eb_budget_resolution_tokens", "Budget resolution", ["gateway_id", "source"])
     eb_tool_replacements_total = Counter("eb_tool_replacements_total", "Tool replacements", ["gateway_id", "tool_name"])
     eb_tool_tokens_saved_total = Counter("eb_tool_tokens_saved_total", "Tool tokens saved", ["gateway_id"])
+    # `source_type` label union-semantics (T-3 compromise):
+    # For FACT rows (the majority) this label holds the retrieval-PATH value
+    # (structural / keyword / vector / graph) — preserves pre-T-3 dashboard
+    # cardinality so existing alerts/panels keep working.
+    # For NON-FACT rows (artifact / goal / persistent_goal / procedure) this
+    # label holds the DataPoint-TYPE value (the row HAS no retrieval_source;
+    # it was produced by the scoring pipeline, not a retrieval orchestrator).
+    # A clean T-3-aligned split would add a second `retrieval_source` label
+    # and have this label hold only DataPoint types — deferred because that
+    # would break every operator dashboard/alert keyed on the current union.
+    # See lifecycle.py:968-972 + manager.py:163-164 for the stamp sites.
+    # The same union-semantics applies to `eb_working_set_candidates` above
+    # (line 81), which is fed by the manager.py stamp site.
     eb_injection_referenced_total = Counter("eb_injection_referenced_total", "Items referenced", ["gateway_id", "category", "memory_class", "source_type"])
     eb_injection_ignored_total = Counter("eb_injection_ignored_total", "Items ignored", ["gateway_id", "category", "memory_class", "source_type"])
     eb_subagent_spawns_total = Counter("eb_subagent_spawns_total", "Subagent spawns", ["gateway_id"])
@@ -253,6 +288,31 @@ def inc_ingest_gate_skip(reason: str, gateway_id: str = "") -> None:
         eb_ingest_gate_skips_total.labels(gateway_id=gateway_id, reason=reason).inc()
 
 
+def inc_after_turn_boundary_source(source: str, gateway_id: str = "") -> None:
+    """Increment the P4 hybrid-A+C boundary-source counter.
+
+    ``source`` is bounded to ``{"empty", "plugin", "derived"}`` by the
+    lifecycle code that calls this (see lifecycle.py:~884-892), so label
+    cardinality is stable at 3 per gateway_id.
+    """
+    if METRICS_AVAILABLE:
+        eb_after_turn_boundary_source_total.labels(
+            gateway_id=gateway_id, source=source,
+        ).inc()
+
+
+def inc_response_delta_no_user(gateway_id: str = "") -> None:
+    """Increment the P4 _extract_response_delta no-user-role fallback counter.
+
+    Fires when the tail-walker in ``ContextLifecycle._extract_response_delta``
+    cannot find a ``role=="user"`` message in the envelope — the whole list
+    is returned as response delta (defensive fallback). Single bounded label
+    (``gateway_id``); the counter is a pure incident signal.
+    """
+    if METRICS_AVAILABLE:
+        eb_response_delta_no_user_total.labels(gateway_id=gateway_id).inc()
+
+
 def inc_cognee_capture_failure(operation: str, gateway_id: str = "") -> None:
     if METRICS_AVAILABLE:
         eb_cognee_data_id_capture_failures_total.labels(
@@ -363,6 +423,12 @@ class MetricsContext:
 
     def inc_ingest_gate_skip(self, reason: str) -> None:
         inc_ingest_gate_skip(reason, gateway_id=self._gw)
+
+    def inc_after_turn_boundary_source(self, source: str) -> None:
+        inc_after_turn_boundary_source(source, gateway_id=self._gw)
+
+    def inc_response_delta_no_user_boundary(self) -> None:
+        inc_response_delta_no_user(gateway_id=self._gw)
 
     def inc_cognee_capture_failure(self, operation: str) -> None:
         inc_cognee_capture_failure(operation, gateway_id=self._gw)

@@ -116,3 +116,24 @@ def get_authority_store(request: Request):
 
 def get_org_override_store(request: Request):
     return getattr(get_container(request), "org_override_store", None)
+
+
+def get_gateway_org_id(container: RuntimeContainer) -> str | None:
+    """Return the gateway's configured ``org_id`` (or ``None`` if unset).
+
+    TODO-6-751 (Round 2, Feature Reviewer, MEDIUM): the P6 resolve_profile()
+    call sites at ``/memory/ingest-messages`` and ``/context/config`` must
+    pass the gateway's configured ``org_id`` to ``resolve_profile(...)`` so
+    admin-registered org overrides (registered via
+    ``POST /admin/profiles/{org_id}/{profile_id}/overrides``) actually reach
+    the profile resolution. Prior Round 1 fixes (``7a095bf``, ``72a5afc``)
+    hardcoded ``org_id=None`` at both sites, silently dropping org context.
+
+    Centralized here rather than re-`getattr`-ing at each call site so the
+    two-step nested-``getattr`` pattern stays consistent with the
+    pre-existing reference at ``routes/memory.py::search_memory`` (line
+    142-146). Takes the container directly (not a ``Request``) so non-
+    route callers can reuse it too.
+    """
+    gw_cfg = getattr(getattr(container, "config", None), "gateway", None)
+    return getattr(gw_cfg, "org_id", None) if gw_cfg else None

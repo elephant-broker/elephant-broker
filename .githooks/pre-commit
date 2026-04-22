@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pre-commit — enforce plugin dist/src parity.
+#
+# Enable per-clone: `git config core.hookspath .githooks`
+#
+# This hook delegates to scripts/verify-plugin-dist.sh in hook mode, which
+# inspects staged files and only rebuilds plugins whose src/** changed.
+# Commits that don't touch plugin src pass instantly (no-op).
+#
+# Bypassable with `git commit --no-verify` — client-side hooks cannot be
+# made tamper-proof. Reviewers (per local/teams/REVIEWING.md) MUST
+# independently verify committed dist matches a fresh build when plugin
+# src is touched.
+#
+# See TODO-6-501 / PR #6 for background.
+
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "${SCRIPT_DIR}/.." && pwd )"
+
+exec "${REPO_ROOT}/scripts/verify-plugin-dist.sh" --hook

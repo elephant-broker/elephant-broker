@@ -183,7 +183,10 @@ class AfterTurnParams(BaseModel):
     session_id: str
     session_key: str
     messages: list[AgentMessage] = Field(default_factory=list)
-    pre_prompt_message_count: int = 0
+    # P4: None means "plugin did not emit this signal" — lifecycle derives the
+    # response delta via tail-walker fallback. An explicit 0 is honored as-is
+    # (all messages are response-side, e.g. a first-turn purely model reply).
+    pre_prompt_message_count: int | None = None
     auto_compaction_summary: str | None = None
     is_heartbeat: bool = False
     token_budget: int | None = None

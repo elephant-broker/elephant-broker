@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -68,9 +69,31 @@ class WorkingSetScores(BaseModel):
 
 
 class WorkingSetItem(BaseModel):
-    """A fact that has been scored and may be included in the working set."""
+    """A fact that has been scored and may be included in the working set.
+
+    T-3: `source_type` carries the DataPoint-type semantic — "what KIND of thing
+    is this". `retrieval_source` (new, nullable) carries retrieval-path
+    provenance — "which of the 5 fact-retrieval sources produced this fact".
+    Previously both semantics were overloaded into the single freeform
+    `source_type: str`, with retrieval items taking values like "vector" /
+    "keyword" / "graph" / "structural" — causing consumers to branch on
+    "is this a fact?" via ad-hoc unions (tactical union constant; see
+    TD-scanner-3 closure in local/IMPLEMENTED-PR-6-merge.md for the T-3
+    history). The split makes both questions answerable independently:
+    - `source_type == "fact"`  → is it fact-class?
+    - `retrieval_source`       → which retrieval path produced it? (None for
+      non-retrieval items: goals, procedures, artifacts)
+
+    Artifacts intentionally get `source_type="artifact", retrieval_source=None`
+    — the `retrieval_source` field is about FACT retrieval paths; artifacts
+    are a distinct DataPoint type that happens to flow through the same
+    retrieval pipeline.
+    """
     id: str
-    source_type: str
+    source_type: Literal[
+        "fact", "artifact", "goal", "persistent_goal", "procedure",
+    ]
+    retrieval_source: Literal["structural", "keyword", "vector", "graph"] | None = None
     source_id: uuid.UUID
     text: str
     scores: WorkingSetScores = Field(default_factory=WorkingSetScores)

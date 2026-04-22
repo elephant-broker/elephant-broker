@@ -11,6 +11,7 @@ from elephantbroker.pipelines.turn_ingest.buffer import IngestBuffer
 from elephantbroker.pipelines.turn_ingest.pipeline import TurnIngestPipeline
 from elephantbroker.runtime.memory.facade import DedupSkipped
 from elephantbroker.schemas.config import LLMConfig
+from elephantbroker.schemas.context import AgentMessage
 from elephantbroker.schemas.fact import MemoryClass
 from elephantbroker.schemas.pipeline import TurnIngestResult
 from elephantbroker.schemas.trace import TraceEventType
@@ -115,6 +116,33 @@ class TestTurnIngestPipeline:
         assert len(result.facts_extracted) > 0
         assert result.facts_stored > 0
         assert result.trace_event_id is not None
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_run_accepts_mixed_agent_message_and_dict_input(self, mock_cognee):
+        """TD-28: run() accepts list[AgentMessage | dict] and normalizes internally.
+
+        Mixed input exercises the fast path (lifecycle forwards AgentMessage objects
+        directly) alongside legacy callers that pass plain dicts. The pipeline must
+        normalize both to dicts before downstream .get()/subscript operations, and
+        extra fields (e.g. actor_id) must survive via model_dump(mode="json").
+        """
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        pipe = _make_pipeline()
+
+        actor_id = str(uuid.uuid4())
+        messages = [
+            AgentMessage(role="user", content="I prefer Python for all projects", actor_id=actor_id),
+            {"role": "assistant", "content": "Noted — Python it is."},
+        ]
+        result = await pipe.run("session:test", messages)
+
+        assert isinstance(result, TurnIngestResult)
+        # Pipeline did not crash on AgentMessage input — normalization worked.
+        assert len(result.facts_extracted) > 0
+        # Extra field preserved through normalization: the user fact's source_actor_id
+        # should resolve to the AgentMessage's actor_id (TD-28 precondition check).
+        assert result.facts_extracted[0].source_actor_id == uuid.UUID(actor_id)
 
     async def test_empty_messages_returns_zero(self):
         pipe = _make_pipeline()
@@ -624,6 +652,64 @@ class TestIngestBuffer:
         assert flushed[0]["content"] == "msg3"  # oldest surviving message
         assert flushed[-1]["content"] == "msg11"  # newest message
 
+    async def test_add_messages_uses_effective_batch_size_when_provided(self):
+        """P6: effective_batch_size override supersedes self._config.ingest_batch_size
+        for both the flush threshold and the 3x overflow guard.
+
+        Global is 6, override is 2: the third added message must return True
+        (threshold hit at 2 under the override, not 6 under the global).
+        """
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=6)
+        buf = IngestBuffer(redis, config)
+
+        # 1st message — below the override (2) → False.
+        r1 = await buf.add_messages(
+            "s1", [{"role": "user", "content": "m1"}], effective_batch_size=2,
+        )
+        assert r1 is False
+        # 2nd message — threshold reached under override → True.
+        r2 = await buf.add_messages(
+            "s1", [{"role": "user", "content": "m2"}], effective_batch_size=2,
+        )
+        assert r2 is True
+
+    async def test_add_messages_override_respects_overflow_guard(self):
+        """P6: the 3x overflow guard uses the override, not self._config.
+
+        With an override of 2, max_size must be 6 (not 18 from the global 6*3).
+        Adding 8 messages should trim down to 6.
+        """
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=6)  # global max_size would be 18
+        buf = IngestBuffer(redis, config)
+
+        for i in range(8):
+            await buf.add_messages(
+                "s1",
+                [{"role": "user", "content": f"msg{i}"}],
+                effective_batch_size=2,
+            )
+        flushed = await buf.flush("s1")
+        # Override max_size = 2 * 3 = 6 → only last 6 survive.
+        assert len(flushed) == 6
+        assert flushed[0]["content"] == "msg2"
+        assert flushed[-1]["content"] == "msg7"
+
+    async def test_add_messages_without_override_preserves_global_behavior(self):
+        """P6: when effective_batch_size is omitted (None), behavior is
+        byte-identical to the pre-P6 path (uses self._config.ingest_batch_size).
+        """
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=3)
+        buf = IngestBuffer(redis, config)
+
+        await buf.add_messages("s1", [{"role": "user", "content": "m1"}])
+        await buf.add_messages("s1", [{"role": "user", "content": "m2"}])
+        # 3rd triggers under the global (3), no override supplied.
+        result = await buf.add_messages("s1", [{"role": "user", "content": "m3"}])
+        assert result is True
+
     # --- Gateway Identity: Redis key prefix (PR #5 TODOs 5-202, 5-310) ---
     # Every Redis key MUST be built via RedisKeyBuilder so two gateways sharing
     # Redis never collide. buffer.py previously fell back to hardcoded
@@ -868,7 +954,12 @@ class TestIngestBufferABCConformance:
         from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
 
         class _Partial(IIngestBuffer):
-            async def add_messages(self, session_key, messages): return False
+            # TODO-6-406: `effective_batch_size` kwarg must match the ABC
+            # signature (post TODO-6-701/401) — otherwise any caller that
+            # passes it TypeErrors on this stub. See
+            # `test_ingest_buffer_signature_matches_abc` below for the
+            # generalized drift guard.
+            async def add_messages(self, session_key, messages, *, effective_batch_size: int | None = None): return False
             async def flush(self, session_key): return []
             async def force_flush(self, session_key): return []
             async def check_timeout_flush(self, session_key): return False
@@ -888,7 +979,8 @@ class TestIngestBufferABCConformance:
 
         class _StubBuffer(IIngestBuffer):
             def __init__(self): self.scrubbed: list[tuple[str, str]] = []
-            async def add_messages(self, session_key, messages): return False
+            # TODO-6-406: `effective_batch_size` kwarg synced with ABC.
+            async def add_messages(self, session_key, messages, *, effective_batch_size: int | None = None): return False
             async def flush(self, session_key): return []
             async def force_flush(self, session_key): return []
             async def check_timeout_flush(self, session_key): return False
@@ -904,6 +996,44 @@ class TestIngestBufferABCConformance:
             trace_ledger=MagicMock(), ingest_buffer=stub,
         )
         assert facade._ingest_buffer is stub
+
+    def test_ingest_buffer_signature_matches_abc(self):
+        """TODO-6-406 (Round 1 Architecture Reviewer, LOW): the concrete
+        IngestBuffer must match the IIngestBuffer ABC's per-method signature,
+        not merely the method-name set. @abstractmethod only enforces name
+        presence; a signature drift (e.g. the ABC adding `effective_batch_size`
+        while a subclass forgets it) wouldn't trip the subclass check, but
+        would TypeError at the first caller that passes the new kwarg.
+
+        Parity assertion: for every abstract method on IIngestBuffer, the
+        parameter list (name, kind, default, annotation) on the real
+        IngestBuffer method must match the ABC's. Catches future kwarg /
+        default / star-arg drift without waiting for a caller to TypeError.
+
+        Matches the existing pattern at `tests/unit/runtime/interfaces/
+        test_contracts.py::test_iscrub_buffer_method_signature_matches_
+        iingestbuffer` which compares `.parameters` (not the full
+        Signature). Narrower comparison sidesteps any non-material
+        divergence that async/decorator machinery might introduce around
+        return-type annotations while still catching every material drift
+        class (added/removed kwargs, changed defaults, re-kinded params).
+        """
+        import inspect
+        from elephantbroker.runtime.interfaces.ingest_buffer import IIngestBuffer
+
+        abstract_methods = IIngestBuffer.__abstractmethods__
+        mismatches: list[str] = []
+        for name in sorted(abstract_methods):
+            abc_params = inspect.signature(getattr(IIngestBuffer, name)).parameters
+            impl_params = inspect.signature(getattr(IngestBuffer, name)).parameters
+            if abc_params != impl_params:
+                mismatches.append(
+                    f"{name}: ABC={dict(abc_params)}  impl={dict(impl_params)}",
+                )
+        assert not mismatches, (
+            "IngestBuffer parameter drift vs IIngestBuffer ABC:\n  "
+            + "\n  ".join(mismatches)
+        )
 
 
 # ---------------------------------------------------------------------------

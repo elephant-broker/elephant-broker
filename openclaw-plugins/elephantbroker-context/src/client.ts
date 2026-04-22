@@ -28,18 +28,29 @@ export class ContextEngineClient {
   private baseUrl: string;
   private gatewayId: string;
   private gatewayShortName: string;
+  private profileName: string;
   private agentId = "";
   private agentKey = "";
   private currentSessionKey = "";
   private currentSessionId = "";
 
-  constructor(baseUrl: string = "http://localhost:8420", gatewayId?: string, gatewayShortName?: string) {
+  constructor(
+    baseUrl: string = "http://localhost:8420",
+    gatewayId?: string,
+    gatewayShortName?: string,
+    profileName?: string,
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.gatewayId = gatewayId || process.env.EB_GATEWAY_ID || "";
     if (!this.gatewayId) {
       throw new Error("EB_GATEWAY_ID is required for ContextEnginePlugin.");
     }
     this.gatewayShortName = gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME || this.gatewayId.substring(0, 8);
+    // TODO-6-503: carry profileName so getConfig() can forward it as the
+    // ?profile= query param (P6 per-profile ingest_batch_size override).
+    // Empty string → no query param → Python endpoint returns global default
+    // (backward-compat contract from commit 72a5afc).
+    this.profileName = profileName || "";
   }
 
   setAgentIdentity(agentId: string, agentKey: string): void {
@@ -200,7 +211,16 @@ export class ContextEngineClient {
   async getConfig(): Promise<BatchConfig> {
     return tracer.startActiveSpan("context.getConfig", { kind: SpanKind.CLIENT }, async (span) => {
       try {
-        const res = await fetch(`${this.baseUrl}/context/config`, { headers: this.getHeaders() });
+        // TODO-6-503: forward this.profileName as ?profile= so the Python
+        // endpoint returns the per-profile ingest_batch_size override (P6)
+        // rather than the global default. `encodeURIComponent` guards
+        // against special chars (`&`/`=`/spaces/Unicode) in profile names.
+        // Empty profileName → no query param → Python endpoint returns the
+        // global default (backward-compat contract from commit 72a5afc).
+        const url = this.profileName
+          ? `${this.baseUrl}/context/config?profile=${encodeURIComponent(this.profileName)}`
+          : `${this.baseUrl}/context/config`;
+        const res = await fetch(url, { headers: this.getHeaders() });
         if (!res.ok) throw new Error(`GetConfig failed: ${res.status}`);
         return (await res.json()) as BatchConfig;
       } catch (err) {

@@ -69,12 +69,18 @@ class BudgetSelector:
                 selected.append(item)
                 remaining_budget -= item.token_size
 
-        # Diversity warning
+        # Diversity warning — over DataPoint-type (source_type), not
+        # retrieval path. T-3: source_type is the clean DataPoint-type
+        # semantic, so "all N items are DataPoint-type X" is a meaningful
+        # diversity signal across the full set (fact/artifact/goal/procedure/…).
+        # Retrieval-path diversity is a finer-grain question answered by the
+        # retrieval_source field; it collapses to None for non-retrieval
+        # items (goals, procedures, artifacts) and would be noise here.
         if len(selected) > 1:
             source_types = {it.source_type for it in selected}
             if len(source_types) == 1:
                 logger.warning(
-                    "All %d selected items are from source_type=%s — low diversity",
+                    "All %d selected items are of DataPoint type %s — low diversity",
                     len(selected), next(iter(source_types)),
                 )
 

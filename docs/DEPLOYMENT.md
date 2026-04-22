@@ -38,6 +38,27 @@ safety for per-tenant cleanup.)*
 > lockfile specifies. See [`deploy/UPDATING-DEPS.md`](../deploy/UPDATING-DEPS.md)
 > for the dep-upgrade workflow.
 
+## Contributor Setup (one-time, per clone)
+
+After cloning the repo, enable the plugin-dist pre-commit hook so any
+commit that touches `openclaw-plugins/*/src/**` is automatically rebuilt
+and checked for dist drift:
+
+```bash
+git config core.hookspath .githooks
+```
+
+This is a per-clone setting (stored in `.git/config`, not versioned), so
+every contributor runs it once. See `.githooks/pre-commit` and
+`scripts/verify-plugin-dist.sh` for the implementation. The manual
+equivalent — safe to run anytime — is `bash scripts/verify-plugin-dist.sh`.
+
+The hook is skipped for commits that don't touch plugin `src/**` (no-op,
+no `npm ci` overhead). It's client-side and bypassable via
+`git commit --no-verify`; reviewers independently verify dist↔src parity
+on PRs that touch plugin src (see `local/teams/REVIEWING.md` § Production
+Context).
+
 ## Service User and Directory Layout
 
 The runtime runs under a dedicated `elephantbroker` system user — never as
@@ -375,12 +396,19 @@ git clone https://github.com/elephant-broker/elephant-broker.git /opt/elephantbr
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-memory ~/.openclaw/extensions/elephantbroker-memory
 ln -s /opt/elephantbroker/openclaw-plugins/elephantbroker-context ~/.openclaw/extensions/elephantbroker-context
 
-# Install dependencies + build the bundle. Both plugins use a bundle-dist
-# layout — esbuild compiles `index.ts` to `dist/index.js`, and that file is
-# what OpenClaw loads. `npm ci` is the lockfile-driven install (the npm
-# equivalent of `uv sync --frozen`); `npm run build` produces the bundle.
-cd ~/.openclaw/extensions/elephantbroker-memory && npm ci && npm run build
-cd ~/.openclaw/extensions/elephantbroker-context && npm ci && npm run build
+# Install runtime dependencies from the committed lockfile. `npm ci` is
+# lockfile-driven (the npm equivalent of `uv sync --frozen`).
+cd ~/.openclaw/extensions/elephantbroker-memory && npm ci
+cd ~/.openclaw/extensions/elephantbroker-context && npm ci
+
+# OPTIONAL (belt-and-braces). The committed `dist/index.js` in each plugin
+# is the source of truth for what OpenClaw loads. Contributor clones enforce
+# src↔dist parity via a client-side pre-commit hook (see "Why `dist/` is
+# committed" below). `npm ci` alone is sufficient on deploy; the explicit
+# rebuild below is defense-in-depth — run it if you want to reverify locally
+# that the bytes loaded match what would be built from this checkout.
+# cd ~/.openclaw/extensions/elephantbroker-memory && npm run build
+# cd ~/.openclaw/extensions/elephantbroker-context && npm run build
 ```
 
 > **Why `npm ci` and not `npm install`:** `npm install` resolves package.json
@@ -389,6 +417,19 @@ cd ~/.openclaw/extensions/elephantbroker-context && npm ci && npm run build
 > the committed `package-lock.json` and installs bit-for-bit the same tree
 > every time. Use it for any production deployment, CI run, or anywhere you
 > care about reproducibility.
+
+> **Why `dist/` is committed:** OpenClaw loads `openclaw-plugins/*/dist/index.js`
+> directly — that file IS the plugin. Leaving `dist/` gitignored let src and
+> dist drift in working trees (this bit PR #6: a src fix shipped without the
+> corresponding rebuilt bundle). The repo now commits both plugins' `dist/`
+> subtrees. Enforcement is client-side: a pre-commit hook at
+> `.githooks/pre-commit` (also runnable standalone as
+> `bash scripts/verify-plugin-dist.sh`) rebuilds any plugin whose `src/**`
+> was staged and fails the commit on drift. Enable per-clone with a one-time
+> `git config core.hookspath .githooks`. Deploy installs (`npm ci`) trust
+> the committed bytes; the optional rebuild above is a self-check, not a
+> correctness requirement. The hook is escapable with `--no-verify`, so
+> reviewers independently verify parity on PRs that touch plugin `src/**`.
 
 ### 2. Environment
 
@@ -515,12 +556,22 @@ dependency upgrade workflow.
 cd /opt/elephantbroker
 git pull origin main
 
-# Re-install npm deps from the committed lockfile and rebuild the bundles.
-# `npm ci` is lockfile-driven (reproducible); `npm run build` regenerates
-# `dist/index.js`, which is what OpenClaw loads. Skipping the build leaves
-# the old bundle in place — the `git pull` changes won't take effect.
-cd openclaw-plugins/elephantbroker-memory && npm ci && npm run build
-cd ../elephantbroker-context && npm ci && npm run build
+# Re-install npm deps from the committed lockfile. The committed `dist/` is
+# the source of truth — `git pull` brings the updated bundle along with src.
+# Parity enforcement is client-side: contributors opt in to `.githooks/pre-
+# commit` via `git config core.hookspath .githooks` (one-time per clone),
+# which runs `scripts/verify-plugin-dist.sh` on commits that touch plugin
+# `src/**`. The hook is escapable with `--no-verify`; interop reviewers
+# independently verify parity on PRs that touch plugin src (see
+# `local/teams/REVIEWING.md` § Production).
+cd openclaw-plugins/elephantbroker-memory && npm ci
+cd ../elephantbroker-context && npm ci
+
+# OPTIONAL belt-and-braces rebuild. Not required (committed dist is trusted)
+# but useful if you want to reverify locally that the loaded bytes match a
+# fresh build of the pulled src.
+# cd openclaw-plugins/elephantbroker-memory && npm run build
+# cd ../elephantbroker-context && npm run build
 
 # Restart gateway to reload plugins
 openclaw gateway restart

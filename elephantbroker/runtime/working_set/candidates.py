@@ -16,6 +16,19 @@ from elephantbroker.schemas.working_set import WorkingSetItem
 logger = logging.getLogger("elephantbroker.runtime.working_set.candidates")
 
 
+# TODO-6-303 (Round 1 Blind Spot Reviewer, LOW): the set of
+# RetrievalCandidate.source values that may flow into
+# CandidateGenerator.retrieval_candidate_to_item. RetrievalCandidate.source is
+# a loose `str` to accommodate non-working-set producers (notably
+# /rerank with source="api"), so we guard at the conversion boundary rather
+# than tightening the producer-side schema. Keep in sync with the Literal in
+# WorkingSetItem.retrieval_source (structural/keyword/vector/graph) plus the
+# sentinel "artifact" that selects the non-retrieval branch below.
+_VALID_RETRIEVAL_SOURCES: frozenset[str] = frozenset({
+    "structural", "keyword", "vector", "graph",
+})
+
+
 class CandidateGenerator:
     """Collects raw candidates from retrieval, goals, and procedures."""
 
@@ -299,11 +312,39 @@ class CandidateGenerator:
 
     @classmethod
     def retrieval_candidate_to_item(cls, rc: RetrievalCandidate) -> WorkingSetItem:
-        """Convert a reranked RetrievalCandidate to WorkingSetItem, carrying all metadata."""
+        """Convert a reranked RetrievalCandidate to WorkingSetItem, carrying all metadata.
+
+        T-3: split `rc.source` into two orthogonal fields —
+        `source_type` (DataPoint-type semantic) and `retrieval_source`
+        (retrieval-path provenance). Pattern (b1): artifacts are a distinct
+        DataPoint type, so they get `source_type="artifact"` with no
+        retrieval_source; fact-class items get `source_type="fact"` and
+        stamp `retrieval_source=rc.source` (structural/keyword/vector/graph).
+
+        TODO-6-303 (Round 1 Blind Spot Reviewer, LOW): ``RetrievalCandidate.
+        source`` is a loose ``str`` to accommodate non-working-set producers
+        like ``/rerank`` (``source="api"``). This converter maps ``rc.source``
+        → ``WorkingSetItem.retrieval_source``, which is
+        ``Literal["structural","keyword","vector","graph"] | None``. Reject
+        unknown values explicitly so the error surfaces at this boundary
+        with an actionable message, not deep in ``WorkingSetItem`` Pydantic
+        validation where the user has to trace the call chain to understand
+        which producer shipped the bad value.
+        """
         fact = rc.fact
+        is_artifact = rc.source == "artifact"
+        if not is_artifact and rc.source not in _VALID_RETRIEVAL_SOURCES:
+            raise ValueError(
+                f"retrieval_candidate_to_item: unknown RetrievalCandidate.source "
+                f"{rc.source!r}; expected one of "
+                f"{sorted(_VALID_RETRIEVAL_SOURCES)} or 'artifact'. If this is "
+                f"a non-working-set producer (e.g. /rerank with source='api'), "
+                f"do not pipe it through this converter.",
+            )
         return WorkingSetItem(
             id=str(fact.id),
-            source_type=rc.source,
+            source_type="artifact" if is_artifact else "fact",
+            retrieval_source=None if is_artifact else rc.source,
             source_id=fact.id,
             text=fact.text,
             token_size=fact.token_size or len(fact.text) // 4,

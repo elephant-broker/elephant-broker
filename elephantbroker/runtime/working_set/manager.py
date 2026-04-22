@@ -151,10 +151,14 @@ class WorkingSetManager(IWorkingSetManager):
                     item.evidence_ref_ids = [uuid.UUID(eid) for eid in eids if len(eid) == 36]
 
         # Metrics: observe candidate counts by source type
+        # Option C stamping: `retrieval_source or source_type` preserves the
+        # pre-T-3 dashboard cardinality contract. See metrics.py `source_type`
+        # label union-semantics comment (at the eb_injection_referenced_total /
+        # eb_injection_ignored_total declarations) for the full rationale.
         if self._metrics:
             source_counts: dict[str, int] = {}
             for item in all_items:
-                st = getattr(item, "source_type", "unknown")
+                st = item.retrieval_source or item.source_type
                 source_counts[st] = source_counts.get(st, 0) + 1
             for st, cnt in source_counts.items():
                 self._metrics.observe_candidates(st, cnt)

@@ -176,6 +176,38 @@ class AssemblyPlacementPolicy(BaseModel):
     goal_reminder_interval: int = Field(default=5, ge=1)
 
 
+class SuccessfulUseThresholds(BaseModel):
+    """Thresholds for the successful-use scanner in ``ContextLifecycle._track_successful_use``.
+
+    Set once per profile via ``ProfilePolicy.successful_use_thresholds``; when
+    left unset the module defaults below apply. Defaults match the J-1
+    calibration baseline (0.15/0.3/0.15/0.15/3) that shipped in PR #6.
+    T-2 (2026-04-21) made these per-profile-configurable so profiles with
+    different signal quality (research = looser, managerial = stricter)
+    can tune independently without recompiling.
+
+    Design note (TODO-6-408, Round 1 Architecture Reviewer, INFO):
+    The fallback model here is intentionally asymmetric to
+    ``ProfilePolicy.ingest_batch_size`` / ``effective_ingest_batch_size``.
+    ``effective_ingest_batch_size`` falls back to ``LLMConfig.ingest_batch_size``
+    (ops-time-tunable via ``EB_LLM_INGEST_BATCH_SIZE``) because flush cadence
+    is an operator concern — load, latency, memory-pressure — that should be
+    tunable without a code change. The scanner thresholds here, by contrast,
+    are compile-time calibration baselines derived from signal-quality
+    experiments; they are not meant to be ops-tunable, so there is no
+    second ``LLMConfig``-style input. When ``policy.successful_use_thresholds``
+    is ``None``, ``ProfileRegistry.effective_successful_use_thresholds`` simply
+    returns a fresh ``SuccessfulUseThresholds()`` with these module defaults.
+    See ``local/TECHNICAL-DEBT.md`` → TD-scanner-7 for the "tune vs rip out"
+    decision gate pending telemetry.
+    """
+    s1_direct_quote_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
+    s2_tool_correlation_overlap: float = Field(default=0.3, ge=0.0, le=1.0)
+    s3_jaccard_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    use_confidence_gate: float = Field(default=0.15, ge=0.0, le=1.0)
+    s6_ignored_turns_floor: int = Field(default=3, ge=1)
+
+
 class ProfilePolicy(BaseModel):
     """Complete policy configuration for a profile."""
     id: str = Field(min_length=1)
@@ -192,3 +224,23 @@ class ProfilePolicy(BaseModel):
     # Phase 6 additions
     session_data_ttl_seconds: int = Field(default=86400, ge=3600)
     assembly_placement: AssemblyPlacementPolicy = Field(default_factory=AssemblyPlacementPolicy)
+    ingest_batch_size: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-profile override for the ingest buffer flush threshold "
+            "(messages). When None, falls back to LLMConfig.ingest_batch_size "
+            "(global EB_INGEST_BATCH_SIZE). Independent from "
+            "AutorecallPolicy.extraction_max_facts_per_batch_before_dedup "
+            "(which caps LLM extraction output, not the buffer flush)."
+        ),
+    )
+    successful_use_thresholds: SuccessfulUseThresholds | None = Field(
+        default=None,
+        description=(
+            "Per-profile override for the successful-use scanner thresholds "
+            "(S1/S2/S3/use-confidence gate + S6 ignored-turns floor). "
+            "When None, the scanner uses module defaults (see "
+            "SuccessfulUseThresholds). T-2 (2026-04-21)."
+        ),
+    )

@@ -325,6 +325,37 @@ The agent is the planner. The extraction system is the scorekeeper.
 | Guard 412 on unloaded session | If a session's guard rules haven't been loaded (e.g., after runtime restart), `preflight_check` raises `GuardRulesNotLoadedError` → API returns **412 Precondition Failed**. The agent should re-bootstrap the session or call `refresh_guard_rules()`. |
 | `goal_create` scope removal | The `goal_create` tool always creates **session-scoped** goals. The `scope` parameter has been removed. Persistent goals are created exclusively via admin API (`POST /admin/goals`). |
 | Goal confidence default 0.8 | New goals start with `confidence: 0.8` (not 1.0). This reflects "plausible but unverified" — confidence increases via `progress` evidence or sub-goal completion. |
+| T-3 `WorkingSetItem` schema split | The `source_type` field no longer carries retrieval-path values. See [§ T-3: WorkingSetItem Schema Split](#t-3-workingsetitem-schema-split-pr-6) below for the full migration note. |
+
+### T-3: WorkingSetItem Schema Split (PR #6)
+
+Shipped in PR #6. Affects `GET /working-set/{session_key}/{session_id}`,
+`POST /working-set/build`, and any response that embeds
+`WorkingSetItem` (defined at `elephantbroker/schemas/working_set.py:91-95`).
+
+Before PR #6, `WorkingSetItem.source_type` was a freeform `str` that
+fused two orthogonal meanings: the DataPoint class of the item AND the
+retrieval path that produced it (for fact-class items only). The T-3
+schema split separates them into two constrained `Literal` fields.
+
+**Current shape:**
+
+| Field | Type | Purpose |
+|---|---|---|
+| `source_type` | `Literal["fact", "artifact", "goal", "persistent_goal", "procedure"]` | DataPoint-type semantic. Always populated. |
+| `retrieval_source` | `Literal["structural", "keyword", "vector", "graph"] \| None = None` | Retrieval-path semantic. `None` for non-fact items (goals, procedures, artifacts). |
+
+**Migration note for plugin/SDK consumers:** previously `source_type`
+carried retrieval-path values (`"vector"` / `"keyword"` / `"structural"`
+/ `"graph"`); those are now in the separate `retrieval_source` field.
+`source_type` now returns the DataPoint type — always `"fact"` for
+retrieval-sourced items, so any plugin that read `source_type` to
+determine the retrieval path must be updated to read
+`retrieval_source` instead.
+
+The runtime-side changelog entry with the field-by-field migration
+table lives at
+[CONFIGURATION.md § 18](./CONFIGURATION.md#18-api-changelog--known-breaking-changes).
 
 ---
 

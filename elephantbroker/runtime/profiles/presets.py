@@ -202,6 +202,10 @@ RESEARCH_PROFILE = ProfilePolicy(
         goal_injection_cadence="smart", goal_reminder_interval=10,
         keep_last_n_tool_outputs=0, replace_tool_outputs=False,
     ),
+    # T-2: successful_use_thresholds intentionally left unset — Option C reset
+    # means all 5 presets inherit module defaults (0.15/0.3/0.15/0.15/3).
+    # Per-profile differentiation was removed after Q-2 live verification
+    # showed speculative overrides blocked realistic signal strengths.
 )
 
 # ---------------------------------------------------------------------------
@@ -274,6 +278,10 @@ MANAGERIAL_PROFILE = ProfilePolicy(
         goal_injection_cadence="always",
         keep_last_n_tool_outputs=1, replace_tool_outputs=True,
     ),
+    # T-2: successful_use_thresholds intentionally left unset — Option C reset
+    # means all 5 presets inherit module defaults (0.15/0.3/0.15/0.15/3).
+    # Per-profile differentiation was removed after Q-2 live verification
+    # showed speculative overrides blocked realistic signal strengths.
 )
 
 # ---------------------------------------------------------------------------
@@ -422,6 +430,10 @@ PERSONAL_ASSISTANT_PROFILE = ProfilePolicy(
         keep_last_n_tool_outputs=1, replace_tool_outputs=True,
         system_context_blockers=False,
     ),
+    # T-2: successful_use_thresholds intentionally left unset — Option C reset
+    # means all 5 presets inherit module defaults (0.15/0.3/0.15/0.15/3).
+    # Per-profile differentiation was removed after Q-2 live verification
+    # showed speculative overrides blocked realistic signal strengths.
 )
 
 # ---------------------------------------------------------------------------

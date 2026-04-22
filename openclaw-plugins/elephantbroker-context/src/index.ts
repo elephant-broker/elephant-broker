@@ -33,7 +33,11 @@ export function register(api: PluginAPI) {
   const profileName = cfg.profileName || process.env.EB_PROFILE || "coding";
   const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
   const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
-  const client = new ContextEngineClient(baseUrl, gatewayId, gatewayShortName);
+  // TODO-6-503: pass profileName so client.getConfig() can forward it as
+  // ?profile=X to the Python /context/config endpoint (P6 per-profile
+  // ingest_batch_size override). Without this, the TS buffer-flush
+  // decision silently uses the global default.
+  const client = new ContextEngineClient(baseUrl, gatewayId, gatewayShortName, profileName);
 
   // Create engine with profile and gateway config
   const engine = new ContextEngineImpl(client, { profileName, gatewayId });

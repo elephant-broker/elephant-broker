@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from elephantbroker.api.deps import get_context_lifecycle
+from elephantbroker.api.deps import get_context_lifecycle, get_gateway_org_id
 from elephantbroker.schemas.context import (
     AfterTurnParams,
     AssembleParams,
@@ -182,7 +182,7 @@ async def dispose(body: BuildOverlayRequest, request: Request):
 
 
 @router.get("/config")
-async def get_config(request: Request):
+async def get_config(request: Request, profile: str | None = None):
     from elephantbroker.api.deps import get_container
     container = get_container(request)
     config = getattr(container, "config", None)
@@ -191,6 +191,62 @@ async def get_config(request: Request):
         if hasattr(config, "context_assembly"):
             result.update(config.context_assembly.model_dump(mode="json"))
         if hasattr(config, "llm"):
-            result["ingest_batch_size"] = config.llm.ingest_batch_size
+            # P6: when ?profile=X is supplied, resolve the profile-level
+            # ingest_batch_size override via ProfileRegistry.
+            #
+            # TODO-6-702 / TODO-6-202 / TODO-6-304 (cluster C-config-swallow):
+            # KeyError → 404 (unknown profile is a client error and MUST be
+            # diagnosable — silent fallback hides typos behind matching-default
+            # values). Other exceptions → WARNING log + global fallback (never
+            # 500 the /config endpoint; transient registry/DB faults stay
+            # observable via logs). Only the WARN-log format is mirrored from
+            # /memory/ingest-messages (commit 7a095bf, TODO-6-701+6-401); the
+            # two endpoints do NOT share the same error-handling shape.
+            #
+            # TODO-6-391 (Round 4, Blind Spot LOW) — GET/POST divergence note:
+            # KeyError→404 is intentionally preserved HERE (GET read-only —
+            # callers read the response; 404 is a diagnosable client error).
+            # /memory/ingest-messages folds KeyError→Exception→WARN+fallback
+            # instead (POST fire-and-forget from the TS plugin client; 404
+            # would silently drop messages). See routes/memory.py comment
+            # block at the try/except for the extended TODO-6-581 rationale.
+            effective_batch = config.llm.ingest_batch_size
+            if profile and getattr(container, "profile_registry", None):
+                try:
+                    # TODO-6-751 (Round 2, Feature MEDIUM): pass the gateway's
+                    # configured org_id so admin-registered org overrides
+                    # reach this resolve_profile() call (was hardcoded None).
+                    policy = await container.profile_registry.resolve_profile(
+                        profile, org_id=get_gateway_org_id(container),
+                    )
+                    if policy is not None:
+                        effective_batch = container.profile_registry.effective_ingest_batch_size(
+                            policy, config.llm,
+                        )
+                except KeyError:
+                    # Unknown profile name — give operators a diagnosable 404
+                    # instead of a silent fallback that's indistinguishable
+                    # from a matching-default value.
+                    raise HTTPException(
+                        status_code=404, detail=f"Unknown profile: {profile}",
+                    )
+                except Exception:
+                    # Transient registry/DB errors — keep endpoint up (don't
+                    # 500), but log so operators can diagnose the silent
+                    # fallback when something actually broke. Inline
+                    # `import logging` matches the dispose() precedent above.
+                    # TODO-6-382 (Round 3, Blind Spot INFO): format aligned with
+                    # /memory/ingest-messages (profile_name=%s + exc_info=True)
+                    # so operators can grep both endpoints uniformly. exc_info
+                    # captures the stack trace for diagnosability without
+                    # inlining a truncated str(exc) in the format string.
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "context/config: profile resolution failed for profile_name=%s "
+                        "(transient error), falling back to global ingest_batch_size",
+                        profile,
+                        exc_info=True,
+                    )
+            result["ingest_batch_size"] = effective_batch
             result["ingest_batch_timeout_ms"] = int(config.llm.ingest_batch_timeout_seconds * 1000)
     return result

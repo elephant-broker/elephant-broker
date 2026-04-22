@@ -36,6 +36,7 @@ from elephantbroker.schemas.context import (
     SubagentSpawnResult,
     SystemPromptOverlay,
 )
+from elephantbroker.schemas.profile import SuccessfulUseThresholds
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 TOOL_ALIASES: dict[str, str] = {
@@ -444,7 +445,7 @@ class ContextLifecycle:
             try:
                 pipeline_result = await self._turn_ingest.run(
                     session_key=sk,
-                    messages=[msg.model_dump(mode="json") for msg in params.messages],
+                    messages=params.messages,
                     session_id=sid,
                     profile_name=params.profile_name,
                     gateway_id=self._gateway_id,
@@ -453,7 +454,26 @@ class ContextLifecycle:
             except Exception as exc:
                 self._log.warning("Turn ingest failed: %s", exc, exc_info=True)
 
-        # Save updated context (skip when called from after_turn to avoid double-save)
+        # Save updated context (skip when called from after_turn to avoid double-save).
+        #
+        # Contract note (TODO-6-107, Round 1 Business Logic Reviewer, LOW):
+        # When `_called_from_after_turn=True`, this code path skips the
+        # session save — the caller (`after_turn()`) is responsible for
+        # the save at its happy-path exit (currently `lifecycle.py:954`).
+        # If `after_turn()` raises between this `ingest_batch()` call and
+        # its own save, any session-context mutations made here — notably
+        # the auto-bootstrap at line ~378 and `eb_turn` stamping at line
+        # ~388 — are lost. Blast radius is small today because the fact-
+        # update branch inside `_track_successful_use` (line ~1403) wraps
+        # per-item updates in try/except and the auto-compaction precheck
+        # at `lifecycle.py:~1030` also catches locally, but the gap is
+        # real: scanner init, analyzer spawn, and other between-steps
+        # exceptions would propagate past this save. A future tightening
+        # would wrap `after_turn()`'s body in try/finally that always
+        # saves. For now: any caller that passes `_called_from_after_turn
+        # =True` MUST guarantee `self._session_store.save(session_ctx)` on
+        # every exit path (happy + exceptional). Today only `after_turn()`
+        # exercises this branch.
         if session_ctx and self._session_store and not _called_from_after_turn:
             await self._session_store.save(session_ctx)
 
@@ -611,6 +631,11 @@ class ContextLifecycle:
                     session_ctx.fact_last_injection_turn[item_id] = session_ctx.turn_count
 
         # Touch last_used_at on injected facts (Phase 9 forward-compat)
+        # T-3: source_type is now clean DataPoint-type semantic; retrieval-
+        # sourced facts carry source_type="fact" with retrieval_source stamped
+        # on the separate field. Simple `== "fact"` check replaces the prior
+        # retrieval-path union (tactical frozenset removed under TD-scanner-3;
+        # see local/IMPLEMENTED-PR-6-merge.md for the T-3 history).
         if snapshot and self._memory_store:
             now_iso = datetime.now(UTC).isoformat()
             for item in snapshot.items:
@@ -869,18 +894,57 @@ class ContextLifecycle:
             except Exception:
                 pass
 
-        # Determine response window
-        response_messages = params.messages[params.pre_prompt_message_count:] if params.messages else []
+        # Determine response window (P4: hybrid A+C)
+        # A: Honor plugin signal when OpenClaw emitted it (hot path, zero cost).
+        # C: Fall back to tail-walker when the plugin stayed silent — we scan
+        #    backward for the last user-role message and slice after it so that
+        #    downstream scanners (successful-use, goal-progress) only see the
+        #    response side. Tail-walker is defense-in-depth; OpenClaw should be
+        #    emitting the count in steady state.
+        if not params.messages:
+            response_messages = []
+            boundary_source = "empty"
+        elif params.pre_prompt_message_count is not None:
+            response_messages = params.messages[params.pre_prompt_message_count:]
+            boundary_source = "plugin"
+        else:
+            response_messages = self._extract_response_delta(params.messages)
+            boundary_source = "derived"
+
+        # TODO-6-201 / TODO-6-302 (cluster C-boundary-source): surface the
+        # branch decision on both the log channel (DEBUG — ephemeral, for
+        # operators tailing journalctl during a session) and the metric
+        # channel (Prometheus counter — for alertmanager rules). See
+        # CONFIGURATION.md §3 "after_turn_completed payload" for the
+        # observability semantics; `source="derived"` is operator-
+        # actionable (plugin stopped emitting prePromptMessageCount).
+        self._log.debug(
+            "P4 boundary_source=%s response_delta=%d total=%d",
+            boundary_source, len(response_messages), len(params.messages),
+        )
+        if self._metrics:
+            self._metrics.inc_after_turn_boundary_source(boundary_source)
 
         # Successful-use tracking (AD-7)
         # The cheap heuristic path (S1/S2/Jaccard) always runs when we have
         # a snapshot and response messages.  The expensive LLM-based RT-1 batch
         # evaluation below is separately gated on config.successful_use.enabled.
+        #
+        # T-2 (2026-04-21): resolve per-profile scanner thresholds once per
+        # turn from `session_ctx.profile` (immutable per-session per
+        # CLAUDE.md). Per-turn resolve — not stashed on `self` — because a
+        # single ContextLifecycle instance serves multiple concurrent
+        # session_keys each with its own profile. See M-1/P-1 design.
+        _registry = self._profile_registry
+        if _registry is not None and session_ctx.profile is not None:
+            thresholds = _registry.effective_successful_use_thresholds(session_ctx.profile)
+        else:
+            thresholds = SuccessfulUseThresholds()
         updated_count = 0
         signals_by_item: dict[str, dict] = {}
         if snapshot and response_messages:
             updated_count, signals_by_item = await self._track_successful_use(
-                snapshot, response_messages, session_ctx,
+                snapshot, response_messages, session_ctx, thresholds,
             )
             if self._trace and signals_by_item:
                 await self._trace.append_event(TraceEvent(
@@ -911,15 +975,26 @@ class ContextLifecycle:
 
         # Emit injection effectiveness metrics (AD-26/T1-1)
         if snapshot and signals_by_item and self._metrics:
-            referenced = sum(1 for s in signals_by_item.values() if s.get("confidence", 0) > 0.3)
+            # J-1 + T-2: aligns with the same use_confidence_gate used by
+            # the fact-update branch in _track_successful_use so metric
+            # counts track actual fact-update behavior per-profile.
+            referenced = sum(
+                1 for s in signals_by_item.values()
+                if s.get("confidence", 0) > thresholds.use_confidence_gate
+            )
             ignored = sum(1 for s in signals_by_item.values() if s.get("method") == "ignored")
             for item in snapshot.items:
                 item_id = str(item.id)
                 sig = signals_by_item.get(item_id, {})
                 cat = getattr(item, "category", "general")
                 mc = getattr(item, "memory_class", "episodic") if hasattr(item, "memory_class") else "episodic"
-                st = item.source_type or "fact"
-                if sig.get("confidence", 0) > 0.3:
+                # Option C stamping: `retrieval_source or source_type` preserves
+                # the pre-T-3 dashboard cardinality contract. See metrics.py
+                # `source_type` label union-semantics comment (at the
+                # eb_injection_referenced_total / eb_injection_ignored_total
+                # declarations) for the full rationale.
+                st = item.retrieval_source or item.source_type
+                if sig.get("confidence", 0) > thresholds.use_confidence_gate:
                     self._metrics.inc_injection_referenced(cat, mc, st)
                 elif sig.get("method") == "ignored":
                     self._metrics.inc_injection_ignored(cat, mc, st)
@@ -991,6 +1066,8 @@ class ContextLifecycle:
                     "turn_count": session_ctx.turn_count,
                     "updated_count": updated_count,
                     "response_messages": len(response_messages),
+                    "total_messages": len(params.messages),
+                    "boundary_source": boundary_source,
                     "snapshot_available": snapshot is not None,
                     "signals_summary": {
                         k: v.get("method", "none") for k, v in signals_by_item.items()
@@ -1309,8 +1386,55 @@ class ContextLifecycle:
 
         return filtered
 
-    async def _track_successful_use(self, snapshot, response_messages, session_ctx) -> tuple[int, dict]:
-        """Multi-signal successful-use tracking: S1+S2+S6+Jaccard."""
+    def _extract_response_delta(self, messages: list[AgentMessage]) -> list[AgentMessage]:
+        """P4 fallback: slice after the last user-role message.
+
+        Walks backward from the end to find the most recent user turn, then
+        returns everything after it (the model's response + any tool traffic).
+
+        No-user-role fallback (TODO-6-105 / TODO-6-306,
+        cluster C-response-delta-no-user): if the envelope contains no
+        ``role=="user"`` message — e.g. a heartbeat/sweep turn, a subagent
+        delta, a malformed buffer replay, or a future OpenClaw shape that
+        omits user echoes — the whole list is returned as response delta.
+        Scanner blast radius is bounded (S1/S3 filter to
+        ``role=="assistant"`` downstream) but the semantic inversion is
+        quiet, so this branch additionally emits a WARN log and increments
+        ``eb_response_delta_no_user_total{gateway_id}`` for operator
+        visibility (trace: journalctl, alertmanager: ``rate(...) > 0``).
+        """
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].role == "user":
+                return messages[idx + 1:]
+        # No user-role message found — return the full list as a defensive
+        # fallback so downstream scanners still have something to iterate,
+        # but surface the incident on both observability channels.
+        self._log.warning(
+            "P4 _extract_response_delta: no user-role message in %d-message "
+            "envelope — treating entire list as response delta (potential "
+            "scanner over-attribution)",
+            len(messages),
+        )
+        if self._metrics:
+            self._metrics.inc_response_delta_no_user_boundary()
+        return list(messages)
+
+    async def _track_successful_use(
+        self,
+        snapshot,
+        response_messages,
+        session_ctx,
+        thresholds: SuccessfulUseThresholds | None = None,
+    ) -> tuple[int, dict]:
+        """Multi-signal successful-use tracking: S1+S2+S6+Jaccard.
+
+        T-2 (2026-04-21): ``thresholds`` carries the per-profile scanner
+        thresholds (S1/S2/S3/use-confidence gate + S6 floor). Falls back
+        to ``SuccessfulUseThresholds()`` (module defaults = J-1 baseline
+        0.15/0.3/0.15/0.15/3) when caller didn't resolve them — keeps
+        direct-call unit tests backward-compatible.
+        """
+        t = thresholds or SuccessfulUseThresholds()
         updated = 0
         signals_by_item: dict[str, dict] = {}
 
@@ -1321,18 +1445,24 @@ class ContextLifecycle:
             signals: list[tuple[str, float]] = []
 
             # S1: Direct quote detection
-            is_quote, quote_conf = self._detect_direct_quote(item, response_messages, injection_turn)
+            is_quote, quote_conf = self._detect_direct_quote(
+                item, response_messages, injection_turn, t,
+            )
             if is_quote:
                 signals.append(("direct_quote", quote_conf))
 
             # S2: Tool correlation
-            is_tool, tool_conf = self._detect_tool_correlation(item, response_messages)
+            is_tool, tool_conf = self._detect_tool_correlation(item, response_messages, t)
             if is_tool:
                 signals.append(("tool_correlation", tool_conf))
 
             # Running Jaccard
+            # J-1: threshold calibrated from 0.3 → 0.15 (H-alt-2). Jaccard at
+            # 0.3 required near-complete token overlap to register; 0.15 captures
+            # paraphrased references while still rejecting coincidental matches.
+            # T-2: threshold now reads from resolved profile thresholds.
             jaccard_score = self._compute_running_jaccard(item, response_messages, injection_turn)
-            if jaccard_score > 0.3:
+            if jaccard_score > t.s3_jaccard_score:
                 signals.append(("jaccard", jaccard_score))
                 if self._metrics:
                     self._metrics.observe_successful_use_jaccard(jaccard_score)
@@ -1347,16 +1477,44 @@ class ContextLifecycle:
 
             signal_entry: dict = {"confidence": use_confidence, "method": method}
             # S6: Track ignored_turns for Phase 9 weight tuning
-            if method == "ignored" and turns_since >= 3:
+            if method == "ignored" and turns_since >= t.s6_ignored_turns_floor:
                 signal_entry["ignored_turns"] = turns_since
 
             signals_by_item[item_id] = signal_entry
 
             # Update fact
+            # T-3: source_type is now the DataPoint-type semantic; the gate
+            # fires for fact-class items only. retrieval_source exposes the
+            # retrieval path (structural/keyword/vector/graph) for fact items,
+            # None for non-retrieval items.
+            # J-1 heritage: use_confidence gate 0.3 → 0.15 (H-alt-2/H-alt-4).
+            # T-2: gate + S1/S3 thresholds resolved per-profile via the
+            # SuccessfulUseThresholds resolver.
+            #
+            # TODO-6-102 (Business Logic Reviewer, MEDIUM) — empirical
+            # calibration note: S1 direct-quote ratio, S3 Jaccard score,
+            # and use_confidence_gate all default to 0.15. DIAG-I1 + K-2
+            # live-fire probes observed realistic agent paraphrases clearing
+            # the scanner with confidences in the 0.14-0.18 range (K-2
+            # TimescaleDB case fired at confidence=0.190). The 0.15 gate
+            # sits at the LOWER edge of that band — intentional to catch
+            # paraphrases near the median. Known tradeoff: signals in the
+            # 0.14-0.15 band fall below the gate and update `use_count`
+            # silently (NOT `successful_use_count`), so Phase-9 strengthening
+            # input under-counts the low-signal tail. Raising the default
+            # (e.g., to 0.17) would block legitimate paraphrases near the
+            # empirical median. Per-profile tuning via
+            # `ProfilePolicy.successful_use_thresholds` is the right
+            # precision/recall knob for operators with use-case-specific
+            # telemetry; global default left at 0.15 (matches operator's
+            # Option C "reset-all-presets-to-defaults" landing — see
+            # commit 252c7d3). The paraphrase-fragility class is addressed
+            # long-term by TD-scanner-4 (embedding-based S4 scanner), not
+            # by a threshold bump here.
             if self._memory_store and item.source_type == "fact":
                 now_iso = datetime.now(UTC).isoformat()
                 try:
-                    if use_confidence > 0.3:
+                    if use_confidence > t.use_confidence_gate:
                         new_suc = (item.successful_use_count or 0) + 1
                         new_use = (item.use_count or 0) + 1
                         await self._memory_store.update(item.source_id, {
@@ -1377,8 +1535,20 @@ class ContextLifecycle:
 
         return updated, signals_by_item
 
-    def _detect_direct_quote(self, item, messages, injection_turn) -> tuple[bool, float]:
-        """S1: Check if item's key phrases appear in post-injection assistant messages."""
+    def _detect_direct_quote(
+        self,
+        item,
+        messages,
+        injection_turn,
+        thresholds: SuccessfulUseThresholds | None = None,
+    ) -> tuple[bool, float]:
+        """S1: Check if item's key phrases appear in post-injection assistant messages.
+
+        T-2 (2026-04-21): ``thresholds`` carries the per-profile S1 ratio
+        threshold. Defaults to ``SuccessfulUseThresholds()`` (0.15) when
+        callers don't resolve — preserves direct-call unit-test ergonomics.
+        """
+        t = thresholds or SuccessfulUseThresholds()
         phrases = _extract_key_phrases(item.text)
         if not phrases:
             return False, 0.0
@@ -1394,10 +1564,29 @@ class ContextLifecycle:
         combined = " ".join(content_as_text(m).lower() for m in post_injection)
         matches = sum(1 for p in phrases if p in combined)
         ratio = matches / len(phrases) if phrases else 0.0
-        return ratio > 0.4, min(ratio, 1.0)
+        # J-1: S1 direct-quote threshold calibrated from 0.4 → 0.15 (H-alt-2).
+        # At 0.4 the scanner required ~40% of a fact's extracted key-phrases to appear
+        # verbatim in the response to register — too strict given that agents often
+        # quote a single canonical token (e.g., TimescaleDB) rather than a phrase set.
+        # 0.15 registers a single-phrase hit on a ~7-phrase fact while still requiring
+        # at least one real match. T-2: per-profile resolvable via
+        # ``ProfilePolicy.successful_use_thresholds`` (defaults to 0.15 across all
+        # presets after the Option C reset).
+        return ratio > t.s1_direct_quote_ratio, min(ratio, 1.0)
 
-    def _detect_tool_correlation(self, item, messages) -> tuple[bool, float]:
-        """S2: Check keyword overlap with tool message args, with alias expansion."""
+    def _detect_tool_correlation(
+        self,
+        item,
+        messages,
+        thresholds: SuccessfulUseThresholds | None = None,
+    ) -> tuple[bool, float]:
+        """S2: Check keyword overlap with tool message args, with alias expansion.
+
+        T-2 (2026-04-21): ``thresholds`` carries the per-profile S2 overlap
+        threshold. Defaults to ``SuccessfulUseThresholds()`` (0.3) when
+        callers don't resolve — preserves direct-call unit-test ergonomics.
+        """
+        t = thresholds or SuccessfulUseThresholds()
         item_words = {w.lower() for w in item.text.split() if w.lower() not in STOP_WORDS and len(w) > 2}
         expanded = set(item_words)
         for word in item_words:
@@ -1422,7 +1611,7 @@ class ContextLifecycle:
             return False, 0.0
 
         overlap = len(expanded & tool_words) / len(expanded) if expanded else 0.0
-        return overlap > 0.3, min(overlap, 1.0)
+        return overlap > t.s2_tool_correlation_overlap, min(overlap, 1.0)
 
     def _compute_running_jaccard(self, item, messages, injection_turn) -> float:
         """Max Jaccard score across post-injection assistant messages."""

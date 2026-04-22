@@ -25,8 +25,12 @@ class BuildWorkingSetRequest(BaseModel):
 async def build_working_set(body: BuildWorkingSetRequest, request: Request):
     """Build working set: candidates → rerank → score → select.
 
-    source_type values: "fact", "artifact", "goal", "procedure".
-    Phase 6 adds "compact_state".
+    T-3: each returned item carries two orthogonal fields:
+    - ``source_type``: DataPoint-type semantic. One of
+      "fact", "artifact", "goal", "persistent_goal", "procedure".
+    - ``retrieval_source``: retrieval-path provenance for fact-class items.
+      One of "structural", "keyword", "vector", "graph", or None (for
+      non-retrieval items: goals, procedures, artifacts).
     """
     manager = get_working_set_manager(request)
     if manager is None:

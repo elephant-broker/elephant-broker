@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from elephantbroker.api.deps import (
     get_artifact_ingest_pipeline,
     get_container,
+    get_gateway_org_id,
     get_ingest_buffer,
     get_memory_store,
     get_procedure_ingest_pipeline,
@@ -418,7 +419,43 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
             content={"status": "buffered", "message": "Buffer not available, messages accepted but not processed"},
         )
 
-    batch_ready = await buffer.add_messages(body.session_key, body.messages)
+    # TODO-6-701 / TODO-6-401: wire per-profile ingest_batch_size from body.profile_name.
+    # TODO-6-751 (Round 2, Feature MEDIUM): org_id now read from the gateway config so
+    # admin-registered org overrides reach this site (was hardcoded to None).
+    # TODO-6-581 (Round 3, Interop MEDIUM): unlike GET /context/config (read-only,
+    # caller reads response; 404 = diagnosable client error), this endpoint is
+    # fire-and-forget write from the TS plugin client at
+    # openclaw-plugins/elephantbroker-memory/src/client.ts:171-183 — `await fetch()`
+    # with no status check, no response parsing, no throw. A 404 HTTP response would
+    # resolve the promise silently and drop messages. Fold KeyError (unknown profile)
+    # into the broader Exception fallback: WARN-log + use the global LLMConfig default
+    # so operators still see typos in logs without silently dropping messages. The
+    # Round 2 "mirror /context/config" rationale does not transfer across HTTP methods
+    # (GET read-only vs POST fire-and-forget-write).
+    # TODO-6-382 (Round 3, Blind Spot INFO): WARN log format aligned with /context/config
+    # (same format: profile_name=%s + exc_info=True).
+    effective_batch_size: int | None = None
+    try:
+        if container.profile_registry is not None:
+            policy = await container.profile_registry.resolve_profile(
+                body.profile_name, org_id=get_gateway_org_id(container),
+            )
+            if policy is not None:
+                effective_batch_size = container.profile_registry.effective_ingest_batch_size(
+                    policy, container.config.llm,
+                )
+    except Exception:  # covers KeyError (unknown profile) and transient registry/DB failures
+        logger.warning(
+            "ingest-messages: profile resolution failed for profile_name=%s "
+            "(unknown profile or transient error), falling back to global ingest_batch_size",
+            body.profile_name,
+            exc_info=True,
+        )
+        effective_batch_size = None
+
+    batch_ready = await buffer.add_messages(
+        body.session_key, body.messages, effective_batch_size=effective_batch_size,
+    )
 
     if batch_ready and pipeline is not None:
         messages = await buffer.flush(body.session_key)
