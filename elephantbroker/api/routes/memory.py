@@ -418,7 +418,34 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
             content={"status": "buffered", "message": "Buffer not available, messages accepted but not processed"},
         )
 
-    batch_ready = await buffer.add_messages(body.session_key, body.messages)
+    # TODO-6-701 / TODO-6-401: wire per-profile ingest_batch_size from body.profile_name.
+    # Resolve the profile's effective flush threshold so MEMORY_ONLY deployments honor
+    # the P6 per-profile override (coding/research/... ingest_batch_size). Silent fallback
+    # to global LLMConfig.ingest_batch_size on any error — matches GET /context/config
+    # hardening precedent ("never 500 the endpoint"). Warning-logged so the fallback is
+    # visible in logs without being a 5xx user error.
+    effective_batch_size: int | None = None
+    try:
+        if container.profile_registry is not None:
+            policy = await container.profile_registry.resolve_profile(
+                body.profile_name, org_id=None,
+            )
+            if policy is not None:
+                effective_batch_size = container.profile_registry.effective_ingest_batch_size(
+                    policy, container.config.llm,
+                )
+    except Exception:
+        logger.warning(
+            "ingest-messages: profile resolution failed for profile_name=%s, "
+            "falling back to global ingest_batch_size",
+            body.profile_name,
+            exc_info=True,
+        )
+        effective_batch_size = None
+
+    batch_ready = await buffer.add_messages(
+        body.session_key, body.messages, effective_batch_size=effective_batch_size,
+    )
 
     if batch_ready and pipeline is not None:
         messages = await buffer.flush(body.session_key)
