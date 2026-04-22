@@ -2529,9 +2529,18 @@ class TestIntegrationFlowThrough:
         assert turn_ingest.run.called
         call_kwargs = turn_ingest.run.call_args.kwargs
         assert "agent_key" in call_kwargs
-        # TD-28: pipeline accepts list[AgentMessage | dict]; lifecycle now forwards
-        # AgentMessage objects directly (pipeline normalizes internally).
-        assert all(isinstance(m, (dict, AgentMessage)) for m in call_kwargs["messages"])
+        # TD-28 regression guard (TODO-6-601 tightened): the original PR #8
+        # guard asserted `isinstance(m, dict)` to catch re-introduction of the
+        # pre-conversion comprehension at lifecycle.py:~445 that TD-28 removed.
+        # The post-TD-28 contract is: lifecycle forwards AgentMessage objects
+        # directly and the pipeline normalizes internally. The assertion is
+        # narrowed to AgentMessage-only so any future regression that reintroduces
+        # a `model_dump`/`dict(...)` comprehension at the lifecycle side fails
+        # this assertion, as originally intended. Pipeline-side accept-both-forms
+        # behavior is verified separately by
+        # test_run_accepts_mixed_agent_message_and_dict_input in
+        # tests/unit/pipelines/test_turn_ingest.py — not in scope here.
+        assert all(isinstance(m, AgentMessage) for m in call_kwargs["messages"])
 
     async def test_ingest_batch_result_has_facts_stored_on_success(self):
         """Pipeline facts_stored propagates to IngestBatchResult."""
