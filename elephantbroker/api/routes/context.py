@@ -199,8 +199,17 @@ async def get_config(request: Request, profile: str | None = None):
             # diagnosable — silent fallback hides typos behind matching-default
             # values). Other exceptions → WARNING log + global fallback (never
             # 500 the /config endpoint; transient registry/DB faults stay
-            # observable via logs). Mirrors the warn-log pattern applied at
-            # /memory/ingest-messages in commit 7a095bf (TODO-6-701+6-401).
+            # observable via logs). Only the WARN-log format is mirrored from
+            # /memory/ingest-messages (commit 7a095bf, TODO-6-701+6-401); the
+            # two endpoints do NOT share the same error-handling shape.
+            #
+            # TODO-6-391 (Round 4, Blind Spot LOW) — GET/POST divergence note:
+            # KeyError→404 is intentionally preserved HERE (GET read-only —
+            # callers read the response; 404 is a diagnosable client error).
+            # /memory/ingest-messages folds KeyError→Exception→WARN+fallback
+            # instead (POST fire-and-forget from the TS plugin client; 404
+            # would silently drop messages). See routes/memory.py comment
+            # block at the try/except for the extended TODO-6-581 rationale.
             effective_batch = config.llm.ingest_batch_size
             if profile and getattr(container, "profile_registry", None):
                 try:
