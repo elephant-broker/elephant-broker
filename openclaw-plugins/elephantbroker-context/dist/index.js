@@ -5,17 +5,19 @@ var ContextEngineClient = class {
   baseUrl;
   gatewayId;
   gatewayShortName;
+  profileName;
   agentId = "";
   agentKey = "";
   currentSessionKey = "";
   currentSessionId = "";
-  constructor(baseUrl = "http://localhost:8420", gatewayId, gatewayShortName) {
+  constructor(baseUrl = "http://localhost:8420", gatewayId, gatewayShortName, profileName) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.gatewayId = gatewayId || process.env.EB_GATEWAY_ID || "";
     if (!this.gatewayId) {
       throw new Error("EB_GATEWAY_ID is required for ContextEnginePlugin.");
     }
     this.gatewayShortName = gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME || this.gatewayId.substring(0, 8);
+    this.profileName = profileName || "";
   }
   setAgentIdentity(agentId, agentKey) {
     this.agentId = agentId;
@@ -196,7 +198,8 @@ var ContextEngineClient = class {
   async getConfig() {
     return tracer.startActiveSpan("context.getConfig", { kind: SpanKind.CLIENT }, async (span) => {
       try {
-        const res = await fetch(`${this.baseUrl}/context/config`, { headers: this.getHeaders() });
+        const url = this.profileName ? `${this.baseUrl}/context/config?profile=${encodeURIComponent(this.profileName)}` : `${this.baseUrl}/context/config`;
+        const res = await fetch(url, { headers: this.getHeaders() });
         if (!res.ok) throw new Error(`GetConfig failed: ${res.status}`);
         return await res.json();
       } catch (err) {
@@ -453,7 +456,7 @@ function register(api) {
   const profileName = cfg.profileName || process.env.EB_PROFILE || "coding";
   const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
   const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
-  const client = new ContextEngineClient(baseUrl, gatewayId, gatewayShortName);
+  const client = new ContextEngineClient(baseUrl, gatewayId, gatewayShortName, profileName);
   const engine = new ContextEngineImpl(client, { profileName, gatewayId });
   client.getConfig().then((config) => {
     if (config.ingest_batch_size) {
