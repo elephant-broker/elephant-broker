@@ -8132,7 +8132,19 @@ coding:
 **Tuning guidance:**
 - Lower thresholds = more permissive = higher successful_use_count recall (risk: noise from weak matches).
 - Higher thresholds = stricter = higher precision (risk: losing legitimate usage signals from paraphrased responses).
-- Empirical observation (as of 2026-04-21): realistic agent paraphrases produce S1 ratios around 0.15–0.17 and Jaccard scores around 0.14–0.18. Setting `use_confidence_gate` above ~0.17 will cause most realistic successful uses to be tracked only via `use_count` (silent), not `successful_use_count` (Phase 9 strengthening input).
+
+**Empirical calibration and tradeoffs (TODO-6-102, Round 1 Business Logic Reviewer, MEDIUM):**
+
+The 0.15 default for `use_confidence_gate` (and for `s1_direct_quote_ratio` / `s3_jaccard_score`) was calibrated against live-fire probes (DIAG-I1 + K-2) in 2026-04. Key observations:
+
+- **Observed paraphrase confidence band: 0.14–0.18.** Realistic agent paraphrases that reference an injected fact produce scanner confidences in this range. K-2 live verification flipped TimescaleDB `successful_use_count` 0→1 at `confidence=0.190` (margin to the gate: 0.04).
+- **Why 0.15 (lower edge of the band):** the gate is positioned deliberately on the *low* side of the paraphrase median so cases like K-2's TimescaleDB paraphrase clear the gate. Raising the default to ~0.17 would block legitimate paraphrases near the empirical median — precision gain at the cost of recall on the exact signal the scanner is designed to catch.
+- **Known tail-loss at 0.14–0.15:** signals in this band fall *below* the gate and update only `use_count` + `last_used_at` silently — they do NOT increment `successful_use_count`. Operators relying on `successful_use_count` as Phase-9 strengthening input should expect a ~25-50% under-count on genuine but low-confidence paraphrased uses. This is intentional — raising the gate to capture those would also admit more coincidental matches in the 0.15–0.17 band.
+- **Silent over-count at 0.15–0.17:** conversely, low-signal coincidental matches in this band clear the gate and get credit. The two failure modes trade off around the 0.15 choice; the empirical 0.16 midpoint has no obvious separator.
+- **Don't raise the global default.** The operator explicitly reset all 5 preset overrides to `SuccessfulUseThresholds` defaults in commit `252c7d3` — raising the global default reintroduces the "differentiated defaults shipped without telemetry" problem that decision fixed. Per-profile tuning via `ProfilePolicy.successful_use_thresholds` (see YAML example above) is the right knob for operators with use-case-specific telemetry that justifies precision over recall.
+- **Class-level fix in flight:** the paraphrase-fragility *class* (lexical-only scanning misses semantically equivalent restatements) is addressed by **TD-scanner-4** — an embedding-based S4 scanner planned for a future PR. That's the proper long-term solution; threshold bumps here are a single-knob workaround for a multi-dimensional failure mode.
+
+Operators who need to bias for precision (research profiles, compliance-sensitive settings) can raise `use_confidence_gate` per-profile to 0.20–0.25; operators biasing for recall (exploratory coding, learning loops) can lower it to 0.10–0.12. Don't raise the global default.
 
 **Distinct from `successful_use.*` (global config):** The per-profile `successful_use_thresholds` documented here gate the always-on per-turn scanner in `after_turn()`. The separate global `successful_use.*` YAML section (opt-in, default disabled) configures the RT-1 LLM-based batch evaluation pipeline (`SuccessfulUseReasoningTask`). Different mechanisms, different cost profiles — the per-profile thresholds are cheap and always active; the global RT-1 feature is expensive (LLM calls per turn) and opt-in.
 

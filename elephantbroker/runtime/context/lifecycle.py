@@ -1475,6 +1475,27 @@ class ContextLifecycle:
             # J-1 heritage: use_confidence gate 0.3 → 0.15 (H-alt-2/H-alt-4).
             # T-2: gate + S1/S3 thresholds resolved per-profile via the
             # SuccessfulUseThresholds resolver.
+            #
+            # TODO-6-102 (Business Logic Reviewer, MEDIUM) — empirical
+            # calibration note: S1 direct-quote ratio, S3 Jaccard score,
+            # and use_confidence_gate all default to 0.15. DIAG-I1 + K-2
+            # live-fire probes observed realistic agent paraphrases clearing
+            # the scanner with confidences in the 0.14-0.18 range (K-2
+            # TimescaleDB case fired at confidence=0.190). The 0.15 gate
+            # sits at the LOWER edge of that band — intentional to catch
+            # paraphrases near the median. Known tradeoff: signals in the
+            # 0.14-0.15 band fall below the gate and update `use_count`
+            # silently (NOT `successful_use_count`), so Phase-9 strengthening
+            # input under-counts the low-signal tail. Raising the default
+            # (e.g., to 0.17) would block legitimate paraphrases near the
+            # empirical median. Per-profile tuning via
+            # `ProfilePolicy.successful_use_thresholds` is the right
+            # precision/recall knob for operators with use-case-specific
+            # telemetry; global default left at 0.15 (matches operator's
+            # Option C "reset-all-presets-to-defaults" landing — see
+            # commit 252c7d3). The paraphrase-fragility class is addressed
+            # long-term by TD-scanner-4 (embedding-based S4 scanner), not
+            # by a threshold bump here.
             if self._memory_store and item.source_type == "fact":
                 now_iso = datetime.now(UTC).isoformat()
                 try:
