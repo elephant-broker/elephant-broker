@@ -557,9 +557,13 @@ cd /opt/elephantbroker
 git pull origin main
 
 # Re-install npm deps from the committed lockfile. The committed `dist/` is
-# the source of truth — `git pull` brings the updated bundle along with src,
-# and CI enforces src↔dist parity on every PR (see
-# `.github/workflows/verify-plugin-dist.yml`).
+# the source of truth — `git pull` brings the updated bundle along with src.
+# Parity enforcement is client-side: contributors opt in to `.githooks/pre-
+# commit` via `git config core.hookspath .githooks` (one-time per clone),
+# which runs `scripts/verify-plugin-dist.sh` on commits that touch plugin
+# `src/**`. The hook is escapable with `--no-verify`; interop reviewers
+# independently verify parity on PRs that touch plugin src (see
+# `local/teams/REVIEWING.md` § Production).
 cd openclaw-plugins/elephantbroker-memory && npm ci
 cd ../elephantbroker-context && npm ci
 

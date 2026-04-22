@@ -215,18 +215,52 @@ class TestIngestMessagesProfileWireThrough:
         mock_buffer.add_messages.assert_awaited_once()
         assert mock_buffer.add_messages.call_args.kwargs["effective_batch_size"] is None
 
-    async def test_profile_resolution_exception_warns_and_falls_back(
-        self, client, container, caplog,
+    async def test_profile_resolution_key_error_returns_404(
+        self, client, container,
     ):
-        """On ``resolve_profile`` failure the route must (a) not 500, (b) log
-        a warning so the silent fallback is observable in logs, (c) pass
-        ``effective_batch_size=None`` to the buffer."""
-        import logging
+        """TODO-6-353 (Round 2, Blind Spot LOW): unknown profile names raise
+        ``KeyError`` from ``resolve_profile()``; the route must surface this
+        as HTTP 404 with a diagnosable ``detail`` so operator typos don't
+        silently fall back to matching-default values. Mirrors the
+        ``/context/config`` precedent (TODO-6-702)."""
         from unittest.mock import AsyncMock
 
         mock_buffer, _ = self._arrange_memory_only(container)
         container.profile_registry.resolve_profile = AsyncMock(
             side_effect=KeyError("Unknown profile: missing"),
+        )
+
+        r = await client.post(
+            "/memory/ingest-messages",
+            json={
+                "session_key": "agent:main:main",
+                "messages": [{"role": "user", "content": "hello"}],
+                "profile_name": "missing",
+            },
+        )
+
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Unknown profile: missing"
+        # The buffer must NOT have been touched — the 404 aborts before the
+        # add_messages call. Operators rely on this to know the message was
+        # not silently accepted against a wrong profile.
+        mock_buffer.add_messages.assert_not_awaited()
+
+    async def test_profile_resolution_transient_exception_warns_and_falls_back(
+        self, client, container, caplog,
+    ):
+        """TODO-6-353 (Round 2, Blind Spot LOW): non-``KeyError`` resolver
+        exceptions (transient registry/DB faults) must (a) NOT 500 — endpoint
+        stays up with global fallback, (b) emit a WARNING so the silent
+        fallback is observable in logs, (c) pass ``effective_batch_size=None``
+        to the buffer. KeyError-specific branch is covered by the 404 test
+        above. Mirrors the split done in ``72a5afc`` for ``/context/config``."""
+        import logging
+        from unittest.mock import AsyncMock
+
+        mock_buffer, _ = self._arrange_memory_only(container)
+        container.profile_registry.resolve_profile = AsyncMock(
+            side_effect=RuntimeError("transient-db-hiccup"),
         )
 
         with caplog.at_level(logging.WARNING, logger="elephantbroker.api.routes.memory"):
@@ -235,7 +269,7 @@ class TestIngestMessagesProfileWireThrough:
                 json={
                     "session_key": "agent:main:main",
                     "messages": [{"role": "user", "content": "hello"}],
-                    "profile_name": "missing",
+                    "profile_name": "coding",
                 },
             )
 
@@ -253,6 +287,52 @@ class TestIngestMessagesProfileWireThrough:
             and "profile resolution failed" in rec.getMessage()
         ]
         assert len(warning_records) == 1, (
-            f"expected exactly one warning log on the except branch, got {len(warning_records)}"
+            f"expected exactly one warning log on the transient-fallback branch, got {len(warning_records)}"
         )
-        assert "missing" in warning_records[0].getMessage()
+        assert "coding" in warning_records[0].getMessage()
+
+    async def test_org_override_wires_through_org_id_to_resolve_profile(
+        self, client, container,
+    ):
+        """TODO-6-751 (Round 2, Feature MEDIUM): the route must pass the
+        gateway's configured ``org_id`` to ``resolve_profile()`` so
+        admin-registered org overrides reach this P6 touchpoint. Before
+        the fix, ``org_id=None`` was hardcoded, silently dropping org
+        context."""
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+        from elephantbroker.schemas.profile import ProfilePolicy
+
+        mock_buffer, _ = self._arrange_memory_only(container)
+        # Configure an org_id on the gateway; this is what must flow through.
+        config = ElephantBrokerConfig()
+        config.gateway.org_id = "acme"
+        container.config = config
+
+        # Return an org-overridden policy (ingest_batch_size=2 — org's tighter
+        # flush). The assertion below is on the call kwargs, not on the
+        # returned value — that's verified separately by the override test.
+        container.profile_registry.resolve_profile = AsyncMock(
+            return_value=ProfilePolicy(id="coding", name="Coding", ingest_batch_size=2),
+        )
+
+        r = await client.post(
+            "/memory/ingest-messages",
+            json={
+                "session_key": "agent:main:main",
+                "messages": [{"role": "user", "content": "hello"}],
+                "profile_name": "coding",
+            },
+        )
+        assert r.status_code == 202
+
+        # Assertion: the route must have passed org_id="acme", NOT None.
+        container.profile_registry.resolve_profile.assert_awaited_once()
+        call_kwargs = container.profile_registry.resolve_profile.call_args.kwargs
+        assert call_kwargs.get("org_id") == "acme", (
+            f"expected org_id='acme' (from container.config.gateway.org_id) "
+            f"to reach resolve_profile(); got kwargs={call_kwargs}"
+        )
+        # Sanity: the returned policy's ingest_batch_size=2 also flowed through.
+        assert mock_buffer.add_messages.call_args.kwargs["effective_batch_size"] == 2

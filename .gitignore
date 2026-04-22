@@ -6,8 +6,10 @@ __pycache__/
 dist/
 # Committed plugin dist bundles — see TODO-6-501 / PR #6.
 # OpenClaw loads openclaw-plugins/*/dist/index.js at runtime; committed dist
-# is the source of truth; .github/workflows/verify-plugin-dist.yml enforces
-# src↔dist parity on every PR.
+# is the source of truth. Client-side enforcement: .githooks/pre-commit
+# (opt-in via `git config core.hookspath .githooks`) runs scripts/verify-
+# plugin-dist.sh on commit to catch src↔dist drift. Hook is escapable with
+# --no-verify; interop reviewers verify parity independently per REVIEWING.md.
 !openclaw-plugins/elephantbroker-context/dist/
 !openclaw-plugins/elephantbroker-context/dist/**
 !openclaw-plugins/elephantbroker-memory/dist/

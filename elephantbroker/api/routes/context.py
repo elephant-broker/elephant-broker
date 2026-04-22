@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from elephantbroker.api.deps import get_context_lifecycle
+from elephantbroker.api.deps import get_context_lifecycle, get_gateway_org_id
 from elephantbroker.schemas.context import (
     AfterTurnParams,
     AssembleParams,
@@ -204,8 +204,11 @@ async def get_config(request: Request, profile: str | None = None):
             effective_batch = config.llm.ingest_batch_size
             if profile and getattr(container, "profile_registry", None):
                 try:
+                    # TODO-6-751 (Round 2, Feature MEDIUM): pass the gateway's
+                    # configured org_id so admin-registered org overrides
+                    # reach this resolve_profile() call (was hardcoded None).
                     policy = await container.profile_registry.resolve_profile(
-                        profile, org_id=None,
+                        profile, org_id=get_gateway_org_id(container),
                     )
                     if policy is not None:
                         effective_batch = container.profile_registry.effective_ingest_batch_size(

@@ -4,13 +4,14 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from elephantbroker.api.deps import (
     get_artifact_ingest_pipeline,
     get_container,
+    get_gateway_org_id,
     get_ingest_buffer,
     get_memory_store,
     get_procedure_ingest_pipeline,
@@ -419,21 +420,28 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
         )
 
     # TODO-6-701 / TODO-6-401: wire per-profile ingest_batch_size from body.profile_name.
-    # Resolve the profile's effective flush threshold so MEMORY_ONLY deployments honor
-    # the P6 per-profile override (coding/research/... ingest_batch_size). Silent fallback
-    # to global LLMConfig.ingest_batch_size on any error — matches GET /context/config
-    # hardening precedent ("never 500 the endpoint"). Warning-logged so the fallback is
-    # visible in logs without being a 5xx user error.
+    # TODO-6-751 (Round 2, Feature MEDIUM): org_id now read from the gateway config so
+    # admin-registered org overrides reach this site (was hardcoded to None).
+    # TODO-6-353 (Round 2, Blind Spot LOW): KeyError (unknown profile) now returns 404
+    # to match the /context/config precedent — operator typos must be diagnosable and
+    # not silently fall back to matching-default values. Other exceptions still log a
+    # WARNING and fall through to the global LLMConfig default (never 500 the endpoint
+    # on transient registry/DB faults).
     effective_batch_size: int | None = None
     try:
         if container.profile_registry is not None:
             policy = await container.profile_registry.resolve_profile(
-                body.profile_name, org_id=None,
+                body.profile_name, org_id=get_gateway_org_id(container),
             )
             if policy is not None:
                 effective_batch_size = container.profile_registry.effective_ingest_batch_size(
                     policy, container.config.llm,
                 )
+    except KeyError:
+        # Unknown profile name — diagnosable 404, mirrors /context/config (TODO-6-702).
+        raise HTTPException(
+            status_code=404, detail=f"Unknown profile: {body.profile_name}",
+        )
     except Exception:
         logger.warning(
             "ingest-messages: profile resolution failed for profile_name=%s, "

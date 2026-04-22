@@ -288,6 +288,39 @@ class TestContextRoutes:
         assert "'coding'" in msg
         assert "transient-db-hiccup" in msg
 
+    async def test_get_config_passes_gateway_org_id_to_resolve_profile(
+        self, client, container,
+    ):
+        """TODO-6-751 (Round 2, Feature MEDIUM): ``/context/config?profile=X``
+        must pass the gateway's configured ``org_id`` to ``resolve_profile()``
+        so admin-registered org overrides reach this P6 touchpoint. Before
+        the fix, ``org_id=None`` was hardcoded, silently dropping org
+        context."""
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+        from elephantbroker.schemas.profile import ProfilePolicy
+
+        config = ElephantBrokerConfig()
+        config.gateway.org_id = "acme"
+        container.config = config
+        container.profile_registry.resolve_profile = AsyncMock(
+            return_value=ProfilePolicy(id="coding", name="Coding", ingest_batch_size=2),
+        )
+
+        r = await client.get("/context/config?profile=coding")
+        assert r.status_code == 200
+        # Org-overridden flush threshold flowed through to the response.
+        assert r.json()["ingest_batch_size"] == 2
+
+        # Assertion: the route must have passed org_id="acme", NOT None.
+        container.profile_registry.resolve_profile.assert_awaited_once()
+        call_kwargs = container.profile_registry.resolve_profile.call_args.kwargs
+        assert call_kwargs.get("org_id") == "acme", (
+            f"expected org_id='acme' (from container.config.gateway.org_id) "
+            f"to reach resolve_profile(); got kwargs={call_kwargs}"
+        )
+
     async def test_subagent_rollback(self, client):
         body = {"parent_session_key": "p", "child_session_key": "c", "rollback_key": "k"}
         r = await client.post("/context/subagent/rollback", json=body)

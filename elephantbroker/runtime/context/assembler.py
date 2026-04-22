@@ -352,8 +352,8 @@ def _render_item_block(item: WorkingSetItem) -> str:
       ``[Memory (vector): ...]`` and could reason about retrieval
       provenance.
     - Post-T-3 (schema split): ``source_type`` is the DataPoint-type
-      Literal (fact/artifact/goal/persistent_goal/procedure/compact_state)
-      and the retrieval path moved to ``retrieval_source``. Without this
+      Literal (fact/artifact/goal/persistent_goal/procedure) and the
+      retrieval path moved to ``retrieval_source``. Without this
       stamping, every retrieval-sourced fact renders uniformly as
       ``[Memory (fact)]`` — losing the per-path provenance signal.
 
@@ -362,10 +362,10 @@ def _render_item_block(item: WorkingSetItem) -> str:
     ``manager.py`` (injection reference), keeping the label semantic
     consistent across all three call sites.
 
-    Non-fact items (artifact / goal / persistent_goal / procedure /
-    compact_state) have ``retrieval_source=None`` by construction and
-    gracefully fall back to ``source_type``, so they still render as
-    ``[Memory (goal)]``, ``[Memory (procedure)]``, etc.
+    Non-fact items (artifact / goal / persistent_goal / procedure) have
+    ``retrieval_source=None`` by construction and gracefully fall back
+    to ``source_type``, so they still render as ``[Memory (goal)]``,
+    ``[Memory (procedure)]``, etc.
     """
     label = item.retrieval_source or item.source_type
     if len(item.text) > _ARTIFACT_PLACEHOLDER_THRESHOLD:
