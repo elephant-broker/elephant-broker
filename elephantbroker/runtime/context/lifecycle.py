@@ -915,12 +915,7 @@ class ContextLifecycle:
         # CLAUDE.md). Per-turn resolve — not stashed on `self` — because a
         # single ContextLifecycle instance serves multiple concurrent
         # session_keys each with its own profile. See M-1/P-1 design.
-        #
-        # `getattr` (not direct attribute access) because some tests construct
-        # ContextLifecycle via `__new__` + manual attr injection without
-        # `_profile_registry` in the attr set; `session_ctx.profile is not None`
-        # guards against manually-mocked contexts missing the profile slot.
-        _registry = getattr(self, "_profile_registry", None)
+        _registry = self._profile_registry
         if _registry is not None and session_ctx.profile is not None:
             thresholds = _registry.effective_successful_use_thresholds(session_ctx.profile)
         else:

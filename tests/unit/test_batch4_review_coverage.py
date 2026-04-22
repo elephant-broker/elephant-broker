@@ -133,6 +133,7 @@ class TestAfterTurnIngestDelegation:
         lc._fallback_session_ids = {}
         lc._rt1_config = None
         lc._rt2_config = None
+        lc._profile_registry = None
         return lc
 
     async def test_after_turn_calls_ingest_batch(self):
