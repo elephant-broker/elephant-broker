@@ -752,37 +752,49 @@ class RuntimeContainer:
     async def close(self) -> None:
         """Shut down all adapter connections."""
         if self.graph:
+            logger.info("Closing adapter: %s", "graph")
             await self.graph.close()
         if self.vector:
+            logger.info("Closing adapter: %s", "vector")
             await self.vector.close()
         if self.embeddings:
+            logger.info("Closing adapter: %s", "embeddings")
             await self.embeddings.close()
         if self.llm_client:
+            logger.info("Closing adapter: %s", "llm_client")
             await self.llm_client.close()
         if self.compaction_llm_client and self.compaction_llm_client is not self.llm_client:
+            logger.info("Closing adapter: %s", "compaction_llm_client")
             await self.compaction_llm_client.close()
         # Phase 5 cleanup
         if self.redis:
+            logger.info("Closing adapter: %s", "redis")
             try:
                 await self.redis.aclose()
             except Exception:
                 pass
         if self.rerank:
+            logger.info("Closing adapter: %s", "rerank")
             try:
                 await self.rerank.close()
             except Exception:
                 pass
         if self.procedure_audit:
+            logger.info("Closing adapter: %s", "procedure_audit")
             await self.procedure_audit.close()
         if self.session_goal_audit:
+            logger.info("Closing adapter: %s", "session_goal_audit")
             await self.session_goal_audit.close()
         # Phase 8 cleanup
         if self.org_override_store:
+            logger.info("Closing adapter: %s", "org_override_store")
             await self.org_override_store.close()
         if self.authority_store:
+            logger.info("Closing adapter: %s", "authority_store")
             await self.authority_store.close()
         # Phase 7 cleanup
         if self.hitl_client:
+            logger.info("Closing adapter: %s", "hitl_client")
             try:
                 await self.hitl_client.close()
             except Exception:
@@ -791,12 +803,14 @@ class RuntimeContainer:
         for store_attr in ("tuning_delta_store", "scoring_ledger_store", "consolidation_report_store"):
             store = getattr(self, store_attr, None)
             if store:
+                logger.info("Closing adapter: %s", store_attr)
                 try:
                     await store.close()
                 except Exception:
                     pass
         trace_qc = getattr(self, "trace_query_client", None)
         if trace_qc:
+            logger.info("Closing adapter: %s", "trace_query_client")
             try:
                 trace_qc.close()
             except Exception:

@@ -111,6 +111,7 @@ async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = 
             "llm_api_key": llm_config.api_key,
         })
     else:
+        _log.warning("LLM config not provided, falling back to embedding config")
         # Fallback: use embedding config (may fail on cognify but allows basic operations)
         cognee.config.set_llm_config({
             "llm_provider": config.embedding_provider,

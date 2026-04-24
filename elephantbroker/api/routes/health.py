@@ -1,11 +1,14 @@
 """Health check routes."""
 from __future__ import annotations
 
+import logging
 import time
 
 from fastapi import APIRouter, Request
 
 from elephantbroker.api.deps import get_container
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -32,6 +35,7 @@ async def ready(request: Request):
             await container.graph.query_cypher("RETURN 1", {})
             checks["neo4j"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
         except Exception as exc:
+            logger.warning("%s health check failed: %s", "Neo4j", exc)
             checks["neo4j"] = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
     else:
         checks["neo4j"] = {"status": "not configured"}
@@ -44,6 +48,7 @@ async def ready(request: Request):
             await qdrant_client.get_collections()
             checks["qdrant"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
         except Exception as exc:
+            logger.warning("%s health check failed: %s", "Qdrant", exc)
             checks["qdrant"] = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
     else:
         checks["qdrant"] = {"status": "not configured"}
@@ -55,6 +60,7 @@ async def ready(request: Request):
             await container.embeddings.embed_text("health check")
             checks["embedding"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
         except Exception as exc:
+            logger.warning("%s health check failed: %s", "Embedding", exc)
             checks["embedding"] = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
     else:
         checks["embedding"] = {"status": "not configured"}
@@ -67,6 +73,7 @@ async def ready(request: Request):
             await llm_client.complete("respond with OK", "test", max_tokens=5)
             checks["llm"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
         except Exception as exc:
+            logger.warning("%s health check failed: %s", "LLM", exc)
             checks["llm"] = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
     else:
         checks["llm"] = {"status": "not configured"}
