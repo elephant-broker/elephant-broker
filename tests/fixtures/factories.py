@@ -97,7 +97,12 @@ def make_verification_summary(**overrides: Any) -> VerificationSummary:
 
 
 def make_procedure_definition(**overrides: Any) -> ProcedureDefinition:
-    defaults: dict[str, Any] = {"name": "Test procedure"}
+    # #1146 RESOLVED (R2-P2.1): default to is_manual_only=True so tests
+    # that don't care about activation_modes get a valid procedure without
+    # every call site having to opt into the flag. Tests that specifically
+    # want to exercise auto-triggered procedures pass activation_modes=...
+    # AND override is_manual_only=False.
+    defaults: dict[str, Any] = {"name": "Test procedure", "is_manual_only": True}
     return ProcedureDefinition(**(defaults | overrides))
 
 

@@ -174,13 +174,14 @@ class TestGoalDataPoint:
 
 class TestProcedureDataPoint:
     def test_from_schema(self):
-        proc = ProcedureDefinition(name="Deploy", description="Deploy to prod")
+        # R2-P2.1 #1146: is_manual_only=True required for activation_modes-empty procedures.
+        proc = ProcedureDefinition(name="Deploy", description="Deploy to prod", is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         assert dp.name == "Deploy"
         assert dp.description == "Deploy to prod"
 
     def test_to_schema(self):
-        proc = ProcedureDefinition(name="Review", version=3)
+        proc = ProcedureDefinition(name="Review", version=3, is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
         assert restored.name == "Review"
@@ -193,6 +194,7 @@ class TestProcedureDataPoint:
             description="Detailed",
             version=2,
             source_actor_id=actor,
+            is_manual_only=True,
         )
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
@@ -454,6 +456,7 @@ class TestProcedureDataPointPhase7:
             name="Deploy",
             steps=[ProcedureStep(order=0, instruction="Run tests",
                                  required_evidence=[ProofRequirement(description="log", proof_type=ProofType.CHUNK_REF)])],
+            is_manual_only=True,
         )
         dp = ProcedureDataPoint.from_schema(proc)
         assert "Run tests" in dp.steps_json
@@ -464,21 +467,21 @@ class TestProcedureDataPointPhase7:
 
     def test_red_line_bindings_round_trip(self):
         from elephantbroker.schemas.procedure import ProcedureDefinition
-        proc = ProcedureDefinition(name="Deploy", red_line_bindings=["no_unreviewed_deploys"])
+        proc = ProcedureDefinition(name="Deploy", red_line_bindings=["no_unreviewed_deploys"], is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
         assert restored.red_line_bindings == ["no_unreviewed_deploys"]
 
     def test_approval_requirements_round_trip(self):
         from elephantbroker.schemas.procedure import ProcedureDefinition
-        proc = ProcedureDefinition(name="Deploy", approval_requirements=["tech_lead"])
+        proc = ProcedureDefinition(name="Deploy", approval_requirements=["tech_lead"], is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
         assert restored.approval_requirements == ["tech_lead"]
 
     def test_decision_domain_round_trip(self):
         from elephantbroker.schemas.procedure import ProcedureDefinition
-        proc = ProcedureDefinition(name="Deploy", decision_domain="code_change")
+        proc = ProcedureDefinition(name="Deploy", decision_domain="code_change", is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         assert dp.decision_domain == "code_change"
         restored = dp.to_schema()

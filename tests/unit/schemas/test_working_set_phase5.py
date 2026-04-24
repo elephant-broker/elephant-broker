@@ -110,9 +110,9 @@ class TestFactAssertionGoalRelevanceTags:
 
 class TestProcedureDefinitionEnabled:
     def test_default_enabled(self):
-        p = ProcedureDefinition(name="test")
+        p = ProcedureDefinition(name="test", is_manual_only=True)
         assert p.enabled is True
 
     def test_disabled(self):
-        p = ProcedureDefinition(name="test", enabled=False)
+        p = ProcedureDefinition(name="test", enabled=False, is_manual_only=True)
         assert p.enabled is False

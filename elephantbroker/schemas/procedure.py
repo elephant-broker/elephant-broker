@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from elephantbroker.schemas.base import Scope
 
@@ -80,6 +80,35 @@ class ProcedureDefinition(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     version: int = Field(default=1, ge=1)
     gateway_id: str = ""
+    # #1146 RESOLVED (R2-P2.1): procedures must specify at least one
+    # activation_mode OR explicitly mark is_manual_only=True. A procedure
+    # with no activation_modes and no manual-only flag was latent dead
+    # weight — the procedure engine could never fire it. The flag
+    # captures the legitimate "manual invocation only" case (e.g., an
+    # operator-initiated runbook) without silently shipping broken
+    # auto-triggered procedures. Legacy reconstruction auto-infers the
+    # flag: see runtime/adapters/cognee/datapoints.py to_schema /
+    # to_schema_from_dict for the back-compat path.
+    is_manual_only: bool = Field(
+        default=False,
+        description=(
+            "Procedure has no auto-triggers; runs only via explicit operator "
+            "or agent invocation. When True, activation_modes may be empty."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _require_activation_or_manual_only(self) -> ProcedureDefinition:
+        """#1146: reject procedures that are neither auto-triggered nor
+        explicitly manual-only — they can never fire."""
+        if not self.activation_modes and not self.is_manual_only:
+            raise ValueError(
+                "ProcedureDefinition must specify at least one activation_mode "
+                "OR set is_manual_only=True (procedure with no activation "
+                "mode and no manual-only flag is dead weight — the engine "
+                "has no path to invoke it)."
+            )
+        return self
 
 
 class ProcedureSuggestion(BaseModel):

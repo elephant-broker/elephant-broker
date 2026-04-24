@@ -10,13 +10,15 @@ RESOLVED (pin test flipped to assert validator):
 * G6 #1147 — ScoringWeights penalty fields reject positive values
 * G10 #1141 — decay_scope_multipliers includes all 8 Scope values
 
-STILL PINNED (documents current behavior; fix deferred / escalated):
+STILL PINNED (documents current behavior; fix deferred):
 * G3 #1166 — ``MemoryStoreFacade.search(min_score=...)`` parameter is DEAD
 * G5 #1184 — ``facade.decay(factor>1.0)`` can INCREASE confidence (clamped at 1.0)
-* G7 #1146 — ``ProcedureDefinition.activation_modes`` accepts empty list
-  (ESCALATED to lead: widening to ``min_length=1`` breaks ~10 call sites
-  including 2 production reconstruction paths at datapoints.py:309,358;
-  needs a broader migration plan)
+
+POST-R2-P2.1 (#1146 now also RESOLVED):
+* G7 #1146 — ProcedureDefinition now requires activation_modes OR is_manual_only
+  (R2-P2.1 added is_manual_only flag + model_validator; reconstruction
+  auto-infers is_manual_only=True for legacy data; G7 pin flipped to assert
+  post-fix contract)
 """
 from __future__ import annotations
 
@@ -273,23 +275,50 @@ def test_scoring_weights_rejects_positive_penalty_values():
 # G7 #1146 — ProcedureDefinition accepts empty activation_modes
 # ---------------------------------------------------------------------------
 
-def test_procedure_definition_accepts_empty_activation_modes():
-    """G7 (#1146): ``ProcedureDefinition.activation_modes`` (procedure.py:70)
-    defaults to an empty list via ``Field(default_factory=list)``.
+def test_procedure_definition_requires_activation_modes_or_manual_flag():
+    """G7 (#1146 RESOLVED — R2-P2.1): ``ProcedureDefinition`` now enforces
+    via ``@model_validator`` that every instance must either declare at
+    least one ``activation_mode`` OR set ``is_manual_only=True``. A
+    procedure with neither can never fire — the engine has no path to
+    invoke it — so rejecting at schema-load surfaces the gap immediately.
 
-    A procedure with zero activation modes can never be activated by the
-    procedure engine — it is silent dead weight. Pydantic doesn't warn
-    about this because the list-default is structurally valid.
+    Fix at ``schemas/procedure.py:63-116`` — added ``is_manual_only: bool``
+    field + ``_require_activation_or_manual_only`` model_validator.
 
-    Pin: constructing a ProcedureDefinition with no activation_modes
-    kwarg yields an empty list with no error. Fix would enforce
-    ``min_length=1`` or at least log a WARNING during ingest.
+    Backwards-compat at the reconstruction layer
+    (``runtime/adapters/cognee/datapoints.py``
+    ``ProcedureDataPoint.to_schema`` / ``to_schema_from_dict``): legacy
+    procedures stored before R2-P2.1 don't have the is_manual_only flag
+    or persisted activation_modes, so reconstruction unconditionally
+    auto-infers ``is_manual_only=True``. See those methods' docstrings
+    for the round-trip fidelity caveat (activation_modes_json not yet in
+    storage schema — orthogonal follow-up).
+
+    Assertions:
+      (1) Empty activation_modes + is_manual_only=False → ValidationError.
+      (2) Empty activation_modes + is_manual_only=True → succeeds (legitimate
+          manual-only procedure).
+      (3) Non-empty activation_modes + is_manual_only=False → succeeds
+          (auto-triggered procedure, the normal case).
     """
-    proc = ProcedureDefinition(name="my_procedure")
-    assert proc.activation_modes == []
-    # Explicit empty also passes.
-    proc2 = ProcedureDefinition(name="my_procedure_2", activation_modes=[])
-    assert proc2.activation_modes == []
+    from pydantic import ValidationError
+    from elephantbroker.schemas.procedure import ProcedureActivation
+    # (1) Neither activation_modes nor is_manual_only → rejected.
+    with pytest.raises(ValidationError, match="at least one activation_mode"):
+        ProcedureDefinition(name="my_procedure")
+    # Same with explicit empty + default is_manual_only=False.
+    with pytest.raises(ValidationError, match="at least one activation_mode"):
+        ProcedureDefinition(name="my_procedure_2", activation_modes=[])
+    # (2) is_manual_only=True allows empty activation_modes.
+    proc_manual = ProcedureDefinition(name="manual_runbook", is_manual_only=True)
+    assert proc_manual.activation_modes == []
+    assert proc_manual.is_manual_only is True
+    # (3) Non-empty activation_modes with the flag left False is the
+    # auto-triggered-procedure happy path.
+    mode = ProcedureActivation(manual=False, trigger_word="deploy")
+    proc_auto = ProcedureDefinition(name="deploy_proc", activation_modes=[mode])
+    assert proc_auto.activation_modes == [mode]
+    assert proc_auto.is_manual_only is False
 
 
 # ---------------------------------------------------------------------------

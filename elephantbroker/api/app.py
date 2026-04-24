@@ -84,7 +84,16 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     async def validation_error_handler(request: Request, exc: RequestValidationError):
         logger = logging.getLogger("elephantbroker.api")
         logger.warning("Validation error on %s %s: %s", request.method, request.url.path, exc.errors())
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        # Sanitize errors to remove non-serializable objects (e.g., ValueError instances in ctx)
+        errors = []
+        for err in exc.errors():
+            sanitized = {k: v for k, v in err.items() if k != "ctx"}
+            # If ctx exists and has an 'error' field with an exception, extract its string representation
+            if "ctx" in err and isinstance(err["ctx"], dict) and "error" in err["ctx"]:
+                error_obj = err["ctx"]["error"]
+                sanitized["ctx"] = {"error": str(error_obj)} if not isinstance(error_obj, str) else err["ctx"]
+            errors.append(sanitized)
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     # OTEL instrumentation (additive, no-op without endpoint)
     try:

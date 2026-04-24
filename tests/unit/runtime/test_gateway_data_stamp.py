@@ -112,7 +112,7 @@ async def test_procedure_engine_store_stamps_gateway():
     t = AsyncMock()
     t.append_event = AsyncMock()
     engine = ProcedureEngine(g, t, gateway_id="gw-test")
-    proc = ProcedureDefinition(name="test")
+    proc = ProcedureDefinition(name="test", is_manual_only=True)
     result = await engine.store_procedure(proc)
     assert result.gateway_id == "gw-test"
 

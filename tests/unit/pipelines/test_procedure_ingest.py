@@ -32,7 +32,7 @@ class TestProcedureIngestPipeline:
         graph = _make_graph()
         trace = _make_trace()
         pipe = ProcedureIngestPipeline(graph, trace)
-        proc = ProcedureDefinition(name="deploy", description="Deploy to prod")
+        proc = ProcedureDefinition(name="deploy", description="Deploy to prod", is_manual_only=True)
         result = await pipe.run(proc)
         assert isinstance(result, ProcedureIngestResult)
         assert result.is_new is True
@@ -47,7 +47,7 @@ class TestProcedureIngestPipeline:
         pipe = ProcedureIngestPipeline(graph, trace)
         # ProcedureDefinition has min_length=1 on name, so we need to bypass
         # validation by creating one with a name then blanking it
-        proc = ProcedureDefinition(name="temp")
+        proc = ProcedureDefinition(name="temp", is_manual_only=True)
         proc.name = ""
         with pytest.raises(ValueError, match="Procedure name is required"):
             await pipe.run(proc)
@@ -57,7 +57,7 @@ class TestProcedureIngestPipeline:
         graph = _make_graph()
         trace = _make_trace()
         pipe = ProcedureIngestPipeline(graph, trace)
-        proc = ProcedureDefinition(name="test-proc", description="Test")
+        proc = ProcedureDefinition(name="test-proc", description="Test", is_manual_only=True)
         result = await pipe.run(proc)
         trace.append_event.assert_called_once()
         event = trace.append_event.call_args[0][0]
@@ -74,7 +74,7 @@ class TestProcedureIngestPipeline:
         graph = _make_graph(existing_records=existing)
         trace = _make_trace()
         pipe = ProcedureIngestPipeline(graph, trace)
-        proc = ProcedureDefinition(name="deploy", description="Deploy v2")
+        proc = ProcedureDefinition(name="deploy", description="Deploy v2", is_manual_only=True)
         result = await pipe.run(proc)
         assert result.is_new is False
         assert result.previous_version == 2
@@ -88,7 +88,7 @@ class TestProcedureIngestPipeline:
         graph = _make_graph()
         trace = _make_trace()
         pipe = ProcedureIngestPipeline(graph, trace)
-        proc = ProcedureDefinition(name="no-triggers", description="No triggers")
+        proc = ProcedureDefinition(name="no-triggers", description="No triggers", is_manual_only=True)
         result = await pipe.run(proc)
         # Should not crash and edges_created should be 0 for new proc
         assert result.edges_created == 0

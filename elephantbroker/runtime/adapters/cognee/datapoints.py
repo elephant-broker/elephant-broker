@@ -261,6 +261,13 @@ class ProcedureDataPoint(DataPoint):
     eb_id: str = ""
     gateway_id: str = ""
     decision_domain: str | None = None
+    # #1146 RESOLVED (R2-P2.1): mirrors ProcedureDefinition.is_manual_only
+    # so the flag survives graph round-trip. Legacy procedures stored before
+    # R2-P2.1 don't have this field and arrive as the default (False); the
+    # to_schema / to_schema_from_dict auto-infer compensates to keep the
+    # new model_validator happy (see those methods for the back-compat
+    # logic).
+    is_manual_only: bool = False
     # Stored as JSON strings for graph persistence
     steps_json: str = "[]"
     red_line_bindings_json: str = "[]"
@@ -282,6 +289,9 @@ class ProcedureDataPoint(DataPoint):
             eb_id=str(proc.id),
             gateway_id=getattr(proc, "gateway_id", ""),
             decision_domain=getattr(proc, "decision_domain", None),
+            # #1146 RESOLVED (R2-P2.1): persist is_manual_only so the flag
+            # survives graph round-trip.
+            is_manual_only=getattr(proc, "is_manual_only", False),
             steps_json=json.dumps([s.model_dump(mode="json") for s in proc.steps]) if proc.steps else "[]",
             red_line_bindings_json=json.dumps(proc.red_line_bindings) if proc.red_line_bindings else "[]",
             approval_requirements_json=json.dumps(proc.approval_requirements) if proc.approval_requirements else "[]",
@@ -306,6 +316,21 @@ class ProcedureDataPoint(DataPoint):
             approval_requirements = json.loads(self.approval_requirements_json) if self.approval_requirements_json else []
         except Exception:
             pass
+        # #1146 RESOLVED (R2-P2.1): legacy-reconstruction auto-infer.
+        # ProcedureDefinition's new model_validator requires
+        # `activation_modes OR is_manual_only`. This DP path does NOT
+        # currently persist activation_modes (orthogonal follow-up TD —
+        # the storage schema lacks an `activation_modes_json` field), so
+        # every reconstructed procedure arrives with activation_modes=[].
+        # To satisfy the validator without breaking every graph read:
+        #   - Honor stored is_manual_only when True.
+        #   - Otherwise (stored False, or legacy record with no flag),
+        #     auto-infer is_manual_only=True because the reconstructed
+        #     activation_modes is always empty today.
+        # A truly auto-triggered procedure cannot survive round-trip via
+        # this DP path today — round-trip fidelity on activation_modes
+        # is a separate IMPLEMENTED-PR-7-merge.md follow-up note.
+        is_manual_only = True  # activation_modes not persisted → always manual-only on read
         return ProcedureDefinition(
             id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
             name=self.name,
@@ -320,6 +345,7 @@ class ProcedureDataPoint(DataPoint):
             steps=steps,
             red_line_bindings=red_line_bindings,
             approval_requirements=approval_requirements,
+            is_manual_only=is_manual_only,
         )
 
     @classmethod
@@ -355,6 +381,14 @@ class ProcedureDataPoint(DataPoint):
                 pass
         elif isinstance(ar_raw, list):
             approval_requirements = ar_raw
+        # #1146 RESOLVED (R2-P2.1): same auto-infer as to_schema() — the
+        # reconstructed activation_modes list is always empty today
+        # (activation_modes_json not yet in storage schema — orthogonal
+        # follow-up TD), so unconditionally mark as manual-only to
+        # satisfy ProcedureDefinition's new model_validator. Applies
+        # uniformly to legacy records (no stored is_manual_only field)
+        # and post-fix records.
+        is_manual_only = True
         return ProcedureDefinition(
             id=uuid.UUID(d["eb_id"]) if d.get("eb_id") else uuid.uuid4(),
             name=d.get("name", ""),
@@ -365,6 +399,7 @@ class ProcedureDataPoint(DataPoint):
             red_line_bindings=red_line_bindings,
             approval_requirements=approval_requirements,
             gateway_id=d.get("gateway_id", ""),
+            is_manual_only=is_manual_only,
         )
 
 
