@@ -210,3 +210,24 @@ class TestPhase5Wiring:
         with patch("elephantbroker.runtime.container.setup_tracing") as mock_tracing:
             await RuntimeContainer.from_config(config, BusinessTier.FULL)
             mock_tracing.assert_called_once_with(config.infra, config.gateway.gateway_id)
+
+    async def test_configure_cognee_failure_aborts_container(self):
+        """G7 (TF-FN-005): configure_cognee() failures must propagate from RuntimeContainer.from_config.
+
+        Pins the #1173 PROD-risk contract: configure_cognee is NOT wrapped in try/except.
+        A bad-credentials / bad-config / network-unreachable error at boot must abort
+        container construction so the operator sees the failure immediately, rather than
+        silently producing a half-initialized container that fails later at random request
+        paths.
+
+        The module-level _mock_configure_cognee autouse fixture is overridden locally here
+        by nesting a second patch with a side_effect -- inner patch wins for the duration
+        of the with-block, then the outer patch is restored.
+        """
+        with patch(
+            "elephantbroker.runtime.container.configure_cognee",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("bad credentials"),
+        ):
+            with pytest.raises(RuntimeError, match="bad credentials"):
+                await RuntimeContainer.from_config(ElephantBrokerConfig(), BusinessTier.FULL)
