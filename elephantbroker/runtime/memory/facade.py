@@ -437,6 +437,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     "caller_gateway": effective_gw,
                 },
             ))
+            # TF-FN-018 follow-up: pair metric with trace (observer L2 Recipe A).
+            if self._metrics:
+                self._metrics.inc_authority_check(action="promote_scope", result="denied")
             raise PermissionError(
                 f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
             )
@@ -488,6 +491,9 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                     "caller_gateway": effective_gw,
                 },
             ))
+            # TF-FN-018 follow-up: pair metric with trace (observer L2 Recipe A).
+            if self._metrics:
+                self._metrics.inc_authority_check(action="promote_class", result="denied")
             raise PermissionError(
                 f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
             )
@@ -529,6 +535,15 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         effective_gw = caller_gateway_id or self._gateway_id
         entity_gw = entity.get("gateway_id", "")
         if entity_gw and entity_gw != effective_gw:
+            # TF-FN-018 follow-up: emit authority-check metric on read-path
+            # cross-gateway rejection. Read path does NOT emit a trace event
+            # (404-semantic — hides the existence oracle), but the metric is
+            # operator-observable aggregate, not per-record, so it's safe to
+            # increment without leaking the existence signal. Observer L2
+            # Recipe A surfaced the counter-at-0 anomaly across all 4 facade
+            # pre-check sites.
+            if self._metrics:
+                self._metrics.inc_authority_check(action="get_by_id", result="denied")
             return None
 
         props = clean_graph_props(entity)
@@ -565,6 +580,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                         "caller_gateway": effective_gw,
                     },
                 ))
+                # TF-FN-018 follow-up: pair the metric with the trace event.
+                # Observer L2 Recipe A surfaced that the trace fired but
+                # eb_authority_checks_total{result="denied"} stayed at 0.
+                if self._metrics:
+                    self._metrics.inc_authority_check(action="update", result="denied")
                 raise PermissionError(
                     f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
                 )

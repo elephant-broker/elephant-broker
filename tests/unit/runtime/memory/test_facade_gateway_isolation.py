@@ -16,12 +16,13 @@ These pin the gateway-ownership pre-checks added in this PR:
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from elephantbroker.runtime.adapters.cognee.vector import VectorSearchResult
 from elephantbroker.runtime.memory.facade import DedupSkipped, MemoryStoreFacade
+from elephantbroker.runtime.metrics import MetricsContext
 from elephantbroker.runtime.trace.ledger import TraceLedger
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.fact import FactAssertion, MemoryClass
@@ -196,3 +197,84 @@ class TestFacadeGatewayIsolation:
         # DedupSkipped should NOT fire here — remove this assertion and
         # assert a clean store instead.
         assert excinfo.value.existing_fact_id == str(other_tenant_fact_id)
+
+    async def test_facade_gateway_isolation_increments_authority_check_metric(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TF-FN-018 follow-up: every facade gateway-isolation rejection
+        must pair the AUTHORITY_CHECK_FAILED trace event with an increment
+        of the ``eb_authority_checks_total{result="denied"}`` metric.
+
+        Surfaced by observer L2 Recipe A: 3 cross-gateway probes returned
+        403, 3 trace events fired, but the counter stayed at 0. Metric
+        was declared (``metrics.py:216-217``) and the method existed
+        (``inc_authority_check`` at metrics.py:821-823) — but it was only
+        wired from ``api/routes/_authority.py`` (approval flows), never
+        from the new facade pre-checks.
+
+        This test pins the fix across all 4 facade pre-check sites:
+        ``get_by_id`` (read, 404-semantic), ``update``, ``promote_scope``,
+        ``promote_class`` (mutations, 403 + trace). Each should drive a
+        ``metrics.inc_authority_check(action=..., result="denied")`` call
+        with the ``action`` label matching the facade method name.
+        """
+        facade, graph, vector, ledger = _make_facade(gateway_id="gw-owner")
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.add_data_points",
+            mock_add_data_points,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.cognee", mock_cognee,
+        )
+        # Install a spy metrics context. MagicMock auto-accepts the
+        # inc_authority_check kwargs and records the call.
+        metrics_spy = MagicMock(spec=MetricsContext)
+        facade._metrics = metrics_spy
+        fact = make_fact_assertion()
+        # Every probe finds the same entity — stored under a different
+        # gateway than the caller-supplied one.
+        graph.get_entity = AsyncMock(return_value={
+            **_fact_props(fact), "gateway_id": "gw-owner",
+        })
+
+        # Probe 1: get_by_id (read path, returns None)
+        result = await facade.get_by_id(fact.id, caller_gateway_id="gw-attacker")
+        assert result is None
+
+        # Probe 2: promote_scope (mutation, raises PermissionError)
+        with pytest.raises(PermissionError):
+            await facade.promote_scope(
+                fact.id, Scope.GLOBAL, caller_gateway_id="gw-attacker",
+            )
+        # Probe 3: promote_class (mutation, raises PermissionError)
+        with pytest.raises(PermissionError):
+            await facade.promote_class(
+                fact.id, MemoryClass.SEMANTIC, caller_gateway_id="gw-attacker",
+            )
+        # Probe 4: update (mutation, raises PermissionError)
+        with pytest.raises(PermissionError):
+            await facade.update(
+                fact.id, {"confidence": 0.1}, caller_gateway_id="gw-attacker",
+            )
+
+        # All four sites must have called inc_authority_check once, with
+        # the specific action label + result="denied".
+        call_args_list = [
+            call.kwargs for call in metrics_spy.inc_authority_check.call_args_list
+        ]
+        assert len(call_args_list) == 4, (
+            f"Expected 4 inc_authority_check calls (one per facade site); "
+            f"got {len(call_args_list)}: {call_args_list!r}"
+        )
+        actions_denied = {
+            kwargs.get("action"): kwargs.get("result") for kwargs in call_args_list
+        }
+        assert actions_denied == {
+            "get_by_id": "denied",
+            "promote_scope": "denied",
+            "promote_class": "denied",
+            "update": "denied",
+        }, (
+            f"Expected one denied call per facade site with matching action "
+            f"label; got {actions_denied!r}"
+        )
