@@ -200,6 +200,11 @@ class RuntimeContainer:
 
         # Shared infrastructure
         self.redis = None  # async Redis client (created in from_config)
+        # OTEL LoggerProvider — held for shutdown (#1181 RESOLVED, TF-FN-019 G11).
+        # `setup_otel_logging()` returns (logger, provider); container retains the
+        # provider so close() can call provider.shutdown() and flush the
+        # BatchLogRecordProcessor buffer before SIGTERM drops the pod.
+        self.otel_logger_provider = None
 
         # Runtime modules (17)
         self.trace_ledger: TraceLedger | None = None
@@ -331,10 +336,16 @@ class RuntimeContainer:
 
         # --- Foundational (no adapter deps) ---
         # TraceLedger with optional OTEL log bridge (Phase 9)
+        # #1181 RESOLVED (TF-FN-019 G11): setup_otel_logging returns
+        # (logger, provider) when enabled; container retains provider for
+        # shutdown in close() so the BatchLogRecordProcessor buffer is
+        # flushed on SIGTERM.
         otel_logger = None
         try:
             from elephantbroker.runtime.observability import setup_otel_logging
-            otel_logger = setup_otel_logging(config.infra, gw_id)
+            result = setup_otel_logging(config.infra, gw_id)
+            if result is not None:
+                otel_logger, c.otel_logger_provider = result
         except Exception:
             pass
         c.trace_ledger = TraceLedger(
@@ -831,5 +842,15 @@ class RuntimeContainer:
             logger.info("Closing adapter: %s", "trace_query_client")
             try:
                 trace_qc.close()
+            except Exception:
+                pass
+        # OTEL LoggerProvider shutdown (#1181 RESOLVED, TF-FN-019 G11).
+        # Flushes the BatchLogRecordProcessor buffer so trace events emitted
+        # in the last ~5s of the pod's lifetime actually make it to ClickHouse
+        # instead of being dropped when the process exits.
+        if self.otel_logger_provider:
+            logger.info("Closing adapter: %s", "otel_logger_provider")
+            try:
+                self.otel_logger_provider.shutdown()
             except Exception:
                 pass

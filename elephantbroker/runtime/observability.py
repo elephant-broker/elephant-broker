@@ -64,9 +64,14 @@ def setup_tracing(config: InfraConfig, gateway_id: str = "") -> TracerProvider:
 def setup_otel_logging(config: InfraConfig, gateway_id: str = ""):
     """Configure OTEL LoggerProvider for TraceLedger event export to ClickHouse.
 
-    Returns an OTEL Logger instance if configured, None otherwise.
-    The TraceLedger uses this to emit LogRecords alongside in-memory storage.
-    Requires EB_OTEL_ENDPOINT and EB_TRACE_OTEL_LOGS_ENABLED=true.
+    Returns ``(Logger, LoggerProvider)`` tuple if configured, ``None``
+    otherwise. The TraceLedger uses the Logger to emit LogRecords
+    alongside in-memory storage; the caller (``RuntimeContainer.from_config``)
+    retains the LoggerProvider so ``container.close()`` can call
+    ``provider.shutdown()`` on SIGTERM and flush the BatchLogRecordProcessor
+    buffer before the pod exits (#1181 RESOLVED — TF-FN-019 G11).
+
+    Requires ``EB_OTEL_ENDPOINT`` and ``EB_TRACE_OTEL_LOGS_ENABLED=true``.
     """
     if not config.otel_endpoint:
         return None
@@ -85,7 +90,7 @@ def setup_otel_logging(config: InfraConfig, gateway_id: str = ""):
         provider = LoggerProvider(resource=resource)
         exporter = OTLPLogExporter(endpoint=config.otel_endpoint)
         provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
-        return provider.get_logger("elephantbroker.trace")
+        return provider.get_logger("elephantbroker.trace"), provider
     except ImportError:
         logging.getLogger("elephantbroker.observability").warning(
             "OTEL endpoint configured (%s) but OTEL log exporter is not installed. "
