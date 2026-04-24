@@ -111,6 +111,24 @@ def _validate_startup_safety(config: ElephantBrokerConfig) -> None:
             "For dev/test, set EB_ALLOW_DEFAULT_GATEWAY_ID=true to opt out."
         )
 
+    # --- A6: gateway_id must not contain Redis-key or scan-glob metacharacters ---
+    # (#1516 RESOLVED) Colons make 'eb:{gw}:...' Redis keys ambiguous with nested
+    # namespaces (gateway_id "gw:prod" prefix "eb:gw:prod" overlaps gateway_id
+    # "gw" key family "eb:gw:prod:..."). Glob metacharacters (* ? [ ]) propagate
+    # into RedisKeyBuilder.*_scan_pattern() outputs and would match other gateways'
+    # keys. RedisKeyBuilder remains permissive (defense in depth: validate at
+    # config load, trust at use site).
+    _FORBIDDEN_GW_CHARS = set(":*?[]")
+    invalid = _FORBIDDEN_GW_CHARS & set(gw_id)
+    if invalid:
+        raise UnsafeStartupConfigError(
+            f"Refusing to boot with gateway.gateway_id={gw_id!r}: contains "
+            f"forbidden characters {sorted(invalid)}. Colons create Redis-key "
+            f"namespace ambiguity; * ? [ ] propagate into SCAN patterns and "
+            f"would match other gateways' keys. Use only [a-zA-Z0-9_-] in "
+            f"gateway_id."
+        )
+
     # --- A4: neo4j_password must not be empty ---
     if not config.cognee.neo4j_password and os.environ.get("EB_DEV_MODE", "").lower() != "true":
         raise UnsafeStartupConfigError(
