@@ -291,14 +291,24 @@ async def sync_memory(request: Request):
 # --- Scope promotion (renamed, old alias preserved) ---
 
 
-@router.post("/promote-scope")
+@router.post(
+    "/promote-scope",
+    responses={
+        200: {"description": "Fact scope promoted"},
+        403: {"description": "Caller gateway does not own this fact"},
+        404: {"description": "Fact not found"},
+    },
+)
 async def promote_scope(body: PromoteRequest, request: Request):
     ms = get_memory_store(request)
+    caller_gw = getattr(request.state, "gateway_id", "")
     try:
-        result = await ms.promote_scope(body.fact_id, body.to_scope)
+        result = await ms.promote_scope(body.fact_id, body.to_scope, caller_gateway_id=caller_gw)
         return result.model_dump(mode="json")
     except KeyError:
         return JSONResponse(status_code=404, content={"detail": "Fact not found"})
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
 
 
 @router.post("/promote")
@@ -313,7 +323,8 @@ async def promote_fact(body: PromoteRequest, request: Request):
 @router.get("/{fact_id}")
 async def get_fact(fact_id: uuid.UUID, request: Request):
     ms = get_memory_store(request)
-    fact = await ms.get_by_id(fact_id)
+    caller_gw = getattr(request.state, "gateway_id", "")
+    fact = await ms.get_by_id(fact_id, caller_gateway_id=caller_gw)
     if fact is None:
         return JSONResponse(status_code=404, content={"detail": "Fact not found"})
     return fact.model_dump(mode="json")
@@ -365,15 +376,25 @@ async def update_fact(fact_id: uuid.UUID, body: UpdateFactRequest, request: Requ
 # --- Class promotion ---
 
 
-@router.post("/promote-class")
+@router.post(
+    "/promote-class",
+    responses={
+        200: {"description": "Fact memory class promoted"},
+        403: {"description": "Caller gateway does not own this fact"},
+        404: {"description": "Fact not found"},
+    },
+)
 async def promote_class(body: PromoteClassRequest, request: Request):
     ms = get_memory_store(request)
+    caller_gw = getattr(request.state, "gateway_id", "")
     try:
         mc = MemoryClass(body.to_class)
-        result = await ms.promote_class(body.fact_id, mc)
+        result = await ms.promote_class(body.fact_id, mc, caller_gateway_id=caller_gw)
         return result.model_dump(mode="json")
     except KeyError:
         return JSONResponse(status_code=404, content={"detail": "Fact not found"})
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"detail": str(e)})
 
 
 # --- Ingest Endpoints ---

@@ -410,10 +410,36 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return facts
 
     @traced
-    async def promote_scope(self, fact_id: uuid.UUID, to_scope: Scope) -> FactAssertion:
+    async def promote_scope(
+        self, fact_id: uuid.UUID, to_scope: Scope, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")
+
+        # Gateway-ownership pre-check (#1168 RESOLVED) — mirrors the update()
+        # pattern at facade.py:480-503. Without this, POST /memory/promote-scope
+        # was a cross-tenant mutation vector: any caller with a valid session
+        # could promote facts owned by another gateway. Empty stored
+        # gateway_id passes through (pre-Gateway-Identity facts must remain
+        # mutable by their owning runtime). 403 here matches the delete()/
+        # update() pattern — the caller already proved id knowledge via POST
+        # intent, so hiding the existence oracle adds no security.
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "promote_scope",
+                    "fact_id": str(fact_id),
+                    "owner_gateway": entity_gw,
+                    "caller_gateway": effective_gw,
+                },
+            ))
+            raise PermissionError(
+                f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
+            )
 
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
@@ -433,14 +459,38 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return fact
 
     # Keep old name as alias
-    async def promote(self, fact_id: uuid.UUID, to_scope: Scope) -> FactAssertion:
-        return await self.promote_scope(fact_id, to_scope)
+    async def promote(
+        self, fact_id: uuid.UUID, to_scope: Scope, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
+        return await self.promote_scope(fact_id, to_scope, caller_gateway_id=caller_gateway_id)
 
     @traced
-    async def promote_class(self, fact_id: uuid.UUID, to_class: MemoryClass) -> FactAssertion:
+    async def promote_class(
+        self, fact_id: uuid.UUID, to_class: MemoryClass, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")
+
+        # Gateway-ownership pre-check (#1169 RESOLVED) — same pattern as
+        # promote_scope. POST /memory/promote-class was the third cross-tenant
+        # mutation surface; update() was the only one guarded before this
+        # commit.
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "promote_class",
+                    "fact_id": str(fact_id),
+                    "owner_gateway": entity_gw,
+                    "caller_gateway": effective_gw,
+                },
+            ))
+            raise PermissionError(
+                f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
+            )
 
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
@@ -457,13 +507,30 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return fact
 
     @traced
-    async def get_by_id(self, fact_id: uuid.UUID) -> FactAssertion | None:
+    async def get_by_id(
+        self, fact_id: uuid.UUID, *, caller_gateway_id: str = "",
+    ) -> FactAssertion | None:
         try:
             entity = await self._graph.get_entity(str(fact_id))
         except Exception:
             return None
         if entity is None:
             return None
+
+        # Gateway-ownership pre-check (#1167 RESOLVED) — cross-gateway read
+        # returns None (not PermissionError). 404 semantic hides the
+        # existence oracle: a caller attempting GET /memory/{id} for
+        # another tenant's fact cannot distinguish "does not exist" from
+        # "exists but not yours", so there is no enumeration side-channel.
+        # Mutation paths (update/promote_*/delete) use 403 instead, because
+        # the caller has already proved id knowledge via the PATCH/POST/
+        # DELETE intent. Empty stored gateway_id passes through for legacy
+        # facts (pre-Gateway-Identity).
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            return None
+
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
         return dp.to_schema()

@@ -306,3 +306,72 @@ def test_redis_key_builder_accepts_any_gateway_id_string_documented_permissive()
         assert keys.prefix == f"eb:{gw}"
 
 
+# ---------------------------------------------------------------------------
+# TF-FN-018 G11, G12 — gap-fill pins complementing the TF-FN-018 bundle.
+# G11 documents the embedding-cache key's CURRENT shape (excludes model
+# name — a mixed-model deployment would produce a collision surface).
+# G12 pins that touch_session_keys only refreshes gateway-scoped keys.
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_cache_key_excludes_model_name():
+    """G11 (TF-FN-018): pins the CURRENT ``embedding_cache`` key shape
+    ``eb:emb_cache:{hash}`` — intentionally excludes the embedding model
+    name.
+
+    Implication: same text hashed identically across embedding models
+    produces the same key. In a single-model deployment this is fine and
+    deliberate (embedding cache is global, per CLAUDE.md "Global (NOT
+    gateway-scoped)" section at redis_keys.py:132-137). But a mixed-model
+    deployment (e.g., rolling an upgrade from model A to model B) would
+    cache hits from A and serve them to B — silently corrupting vector
+    search quality.
+
+    This is NOT a current bug (single-model in prod today), but the shape
+    decision should surface in CI if we ever move to multi-model. No TD
+    filed today — promote to TD only when mixed-model deployment lands on
+    the roadmap; TF-FN-019 is the natural place to revisit.
+    """
+    key = RedisKeyBuilder.embedding_cache("sha256-abc123")
+    # Exact format: no model-name segment, no gateway prefix.
+    assert key == "eb:emb_cache:sha256-abc123"
+    # Static method: two different gateways produce byte-identical keys.
+    assert RedisKeyBuilder("gw-a").embedding_cache("h") == \
+           RedisKeyBuilder("gw-b").embedding_cache("h")
+
+
+@pytest.mark.asyncio
+async def test_touch_session_keys_returns_gateway_scoped_paths_only():
+    """G12 (TF-FN-018): every key that ``touch_session_keys`` refreshes via
+    EXPIRE must be prefixed with the gateway's ``eb:{gateway_id}:``
+    namespace.
+
+    Guards against a regression where a new session-level key is added to
+    ``key_list`` in ``touch_session_keys`` (redis_keys.py:140-182) but
+    forgets the gateway prefix — which would silently break per-tenant
+    TTL refresh isolation.
+
+    Uses the same mock pattern as the existing
+    ``test_touch_session_keys_expires_all_base_keys`` test (MagicMock
+    pipeline recording EXPIRE calls) but asserts the cross-cutting
+    invariant — every key starts with the gateway prefix — instead of the
+    exact 10-key enumeration. Complements, not replaces, that test.
+    """
+    keys = RedisKeyBuilder("gw-tenant-42")
+    pipe = _make_pipeline_mock()
+    redis = AsyncMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+
+    await touch_session_keys(keys, redis, "sk", "sid", 172800)
+
+    # Walk every EXPIRE call and verify the key starts with the gateway prefix.
+    touched_keys = [call.args[0] for call in pipe.expire.call_args_list]
+    assert touched_keys, "touch_session_keys did not invoke EXPIRE on any key"
+    for key in touched_keys:
+        assert key.startswith("eb:gw-tenant-42:"), (
+            f"touch_session_keys refreshed {key!r} which is NOT scoped to "
+            f"gateway 'gw-tenant-42'. All session-level TTL refreshes must "
+            f"stay within the gateway prefix."
+        )
+
+
