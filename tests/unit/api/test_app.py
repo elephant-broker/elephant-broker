@@ -1,5 +1,6 @@
 """Tests for create_app() factory."""
-from unittest.mock import AsyncMock, MagicMock
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
 
@@ -75,3 +76,39 @@ class TestCreateApp:
         # which wraps it in a BaseHTTPMiddleware. Check the middleware stack.
         middleware_classes = [m.cls.__name__ if hasattr(m, "cls") else str(m) for m in app.user_middleware]
         assert any("Auth" in name for name in middleware_classes), f"AuthMiddleware not found in {middleware_classes}"
+
+    def test_middleware_execution_order(self):
+        """G4 (#306): GatewayIdentityMiddleware must run BEFORE AuthMiddleware on the
+        request path so Auth sees request.state.gateway_id already stamped.
+
+        Starlette's ``add_middleware`` INSERTS at position 0, so later-added middleware
+        sits at a LOWER index in ``user_middleware``. The middleware stack is built by
+        iterating the list front-to-back (wrapping inside-out), which makes the FIRST
+        entry the OUTERMOST wrapper — i.e., the first to see an incoming request.
+
+        Given app.py order: ``add_middleware(Auth)`` then ``add_middleware(Gateway)`` →
+        ``user_middleware`` = ``[BaseHTTP(error_handler), Gateway, Auth]`` (BaseHTTP
+        added last via ``app.middleware("http")`` also inserts at 0). Execution order:
+        BaseHTTP → Gateway → Auth → route. The mechanical condition for Gateway-first
+        execution is therefore ``gateway_idx < auth_idx`` in the user_middleware list.
+        """
+        app = create_app(_make_container())
+        classes = [m.cls.__name__ for m in app.user_middleware]
+        gateway_idx = classes.index("GatewayIdentityMiddleware")
+        auth_idx = classes.index("AuthMiddleware")
+        assert gateway_idx < auth_idx, (
+            f"GatewayIdentityMiddleware must appear BEFORE AuthMiddleware in user_middleware "
+            f"(lower index = runs sooner on request). Current order: {classes}"
+        )
+
+    def test_otel_instrumentation_silent_skip_when_unavailable(self):
+        """G5 (#308): If opentelemetry-instrumentation-fastapi is not installed (or its
+        module is mocked unavailable), create_app() must not raise — the try/except block
+        in app.py:68-73 silently skips OTEL setup.
+
+        Pins the graceful-degradation contract: operators who don't install OTEL extras
+        should still get a working app, just without auto-instrumentation.
+        """
+        with patch.dict(sys.modules, {"opentelemetry.instrumentation.fastapi": None}):
+            app = create_app(_make_container())
+            assert isinstance(app, FastAPI)
