@@ -331,8 +331,31 @@ class GatewayConfig(_StrictBase):
     agent_authority_level: int = Field(default=0, ge=0)
 
     @property
-    def effective_short_name(self) -> str:
+    def effective_short_name_or_id(self) -> str:
+        """Return ``gateway_short_name`` if set, otherwise the first 8
+        characters of ``gateway_id`` (no padding).
+
+        #1136 RESOLVED (R2-P2): renamed from ``effective_short_name`` to
+        make the "or id" semantics explicit. A 3-char ``gateway_id`` yields
+        a 3-char result (Python slicing does not pad). Callers wanting a
+        fixed-width ID should use ``effective_short_name_padded`` for a
+        space-padded 8-char string, or compose their own padding.
+
+        Historic: the prior name ``effective_short_name`` misled operators
+        into expecting fixed-width truncation. Callers should update; an
+        ``effective_short_name`` alias is NOT kept — rename is intentional.
+        """
         return self.gateway_short_name or self.gateway_id[:8]
+
+    @property
+    def effective_short_name_padded(self) -> str:
+        """Return the short-name-or-id, space-padded to exactly 8 chars.
+
+        Useful for fixed-width log / metric labels where column alignment
+        matters. A short gateway_id like "abc" yields "abc     " (5 spaces
+        of padding). A gateway_id with >=8 chars is truncated to 8.
+        """
+        return self.effective_short_name_or_id.ljust(8)
 
 
 # --- Phase 6 config models ---

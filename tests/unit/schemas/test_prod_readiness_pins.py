@@ -1,19 +1,22 @@
-"""TF-FN-019 G1-G10 (schema PROD-risk pins).
+"""TF-FN-019 G1-G10 (schema PROD-risk pins) — post-R2-P2 mixed state.
 
-Eight tests pinning current behavior on production-readiness risks that have
-NOT been fixed in this PR (fixes deferred to the relevant phase rewrites).
-When a fix lands, the corresponding pin test will FAIL and force an explicit
-un-pin + contract update — the whole point of the pin pattern.
+Post R2-P2 schema-validator batch, the fix state of each pin is:
 
-PROD items referenced:
-* G1 #1135 — approval request hardcodes 300s timeout, ignores routing config
-* G2 #1136 — ``effective_short_name`` doesn't actually truncate short gateway_ids
+RESOLVED (pin test flipped to assert validator):
+* G1 #1135 — ApprovalRequest honours routing.timeout_seconds (default 300)
+* G2 #1136 — effective_short_name renamed to effective_short_name_or_id;
+  documented semantics + new effective_short_name_padded for fixed-width
+* G4 #1140 — max_outcome raises TypeError on non-GuardOutcome inputs
+* G6 #1147 — ScoringWeights penalty fields reject positive values
+* G10 #1141 — decay_scope_multipliers includes all 8 Scope values
+
+STILL PINNED (documents current behavior; fix deferred / escalated):
 * G3 #1166 — ``MemoryStoreFacade.search(min_score=...)`` parameter is DEAD
-* G4 #1140 — ``max_outcome`` silently accepts strings that happen to have ``.value``
-* G5 #1184 — ``facade.decay(factor>1.0)`` can INCREASE confidence (only clamped at 1.0)
-* G6 #1147 — ``ScoringWeights.redundancy_penalty`` accepts positive values (should be <=0)
-* G7 #1146 — ``ProcedureDefinition.activation_modes`` accepts empty list (never fires)
-* G10 #1141 — ``consolidation.decay_scope_multipliers`` default dict misses 3 scopes
+* G5 #1184 — ``facade.decay(factor>1.0)`` can INCREASE confidence (clamped at 1.0)
+* G7 #1146 — ``ProcedureDefinition.activation_modes`` accepts empty list
+  (ESCALATED to lead: widening to ``min_length=1`` breaks ~10 call sites
+  including 2 production reconstruction paths at datapoints.py:309,358;
+  needs a broader migration plan)
 """
 from __future__ import annotations
 
@@ -40,59 +43,71 @@ from tests.fixtures.factories import make_fact_assertion
 # G1 #1135 — approval request hardcodes 300s timeout
 # ---------------------------------------------------------------------------
 
-def test_approval_request_hardcodes_300s_ignoring_routing_timeout():
-    """G1 (#1135): ``ApprovalRequest.model_post_init`` (guards.py:248-250)
-    hardcodes ``timeout_at = created_at + 300 seconds``.
+def test_approval_request_honours_routing_timeout_seconds():
+    """G1 (#1135 RESOLVED — R2-P2): ``ApprovalRequest`` now accepts a
+    ``timeout_seconds`` kwarg (threaded from
+    ``state.guard_policy.approval_routing.timeout_seconds`` in the guards
+    engine). The prior hardcoded 300s is now the field DEFAULT — callers
+    can pass policy-resolved values and ``timeout_at`` reflects them.
 
-    There is no way for the routing layer (where the approval request is
-    created) to configure a longer or shorter timeout per rule / per
-    environment. Any rule claiming "approval times out after 10 minutes"
-    in docs is silently wrong today — the actual timeout is always 300s.
+    Fix at ``schemas/guards.py:230-254`` (field + model_post_init) and
+    ``runtime/guards/engine.py:528-542`` (caller passes routing timeout).
 
-    Pin the literal 300-second delta so a future fix that routes per-rule
-    timeouts through `ApprovalRequest` will flip this test and force
-    explicit verification.
+    Assertions:
+      (1) Default (no timeout_seconds kwarg) -> 300s (preserves prior
+          serialization shape; prior tests don't break).
+      (2) Explicit timeout_seconds=600 -> 600s (the routing-configured
+          value takes effect).
+      (3) Below-floor timeout_seconds=10 raises ValidationError (field
+          has ge=30 matching ApprovalRouting's constraint).
     """
-    req = ApprovalRequest(
-        request_id=uuid.uuid4(),
-        action_id=uuid.uuid4(),
-        rule_id="test.rule",
-        created_at=datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC),
-    )
-    delta = req.timeout_at - req.created_at
-    assert delta == timedelta(seconds=300), (
-        f"Expected hardcoded 300s timeout, got {delta}. If a fix made the "
-        "timeout configurable, update this test and the #1135 entry."
-    )
+    created = datetime(2026, 4, 25, 12, 0, 0, tzinfo=UTC)
+    # (1) Default
+    req_default = ApprovalRequest(created_at=created)
+    assert req_default.timeout_at - created == timedelta(seconds=300)
+    # (2) Routing-resolved value takes effect
+    req_600 = ApprovalRequest(created_at=created, timeout_seconds=600)
+    assert req_600.timeout_at - created == timedelta(seconds=600)
+    # (3) Floor constraint rejects too-small values
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ApprovalRequest(created_at=created, timeout_seconds=10)
 
 
 # ---------------------------------------------------------------------------
 # G2 #1136 — effective_short_name semantics on short gateway_ids
 # ---------------------------------------------------------------------------
 
-def test_effective_short_name_truncates_short_gateway_id():
-    """G2 (#1136): ``GatewayConfig.effective_short_name`` (config.py:333-335)
-    returns ``gateway_short_name or gateway_id[:8]``.
+def test_effective_short_name_or_id_contract_and_padded_alternative():
+    """G2 (#1136 RESOLVED — R2-P2): ``GatewayConfig.effective_short_name``
+    was renamed to ``effective_short_name_or_id`` to make the "short_name
+    if set, else gateway_id[:8]" semantics explicit. No padding is applied
+    — a 3-char gateway_id yields a 3-char result.
 
-    ``gateway_id[:8]`` on a 3-char gateway_id returns the 3-char string
-    unchanged (Python slice permissiveness). There is no padding, no
-    validation, no warning. A gateway_id ``"gw"`` (passes A6 — no
-    forbidden chars) produces short_name ``"gw"``. That might be the
-    intent, but it is NOT a "truncation to 8 chars" as the field name
-    implies — it's "at most 8 chars, no minimum."
+    A new ``effective_short_name_padded`` property provides space-padded
+    fixed-width output for callers that need column-aligned log / metric
+    labels. This test pins both contracts.
 
-    Pin: an undersized gateway_id of 3 chars yields a 3-char short_name.
+    Fix at ``schemas/config.py:333-362`` (rename + new padded property).
+
+    Historic: the prior name misled operators into expecting fixed-width
+    truncation. The rename is intentional — no ``effective_short_name``
+    alias is kept. Existing callers were updated in the same commit.
     """
-    # Omit gateway_short_name — schema defaults to "" which is the falsy branch
-    # that triggers the `gateway_id[:8]` fallback.
+    # Short gateway_id -> raw, no padding.
     cfg = GatewayConfig(gateway_id="abc")
-    assert cfg.effective_short_name == "abc"
-    # Longer gateway_id: truncated to exactly 8.
+    assert cfg.effective_short_name_or_id == "abc"
+    assert cfg.effective_short_name_padded == "abc     "  # 5-char trailing space
+    # Long gateway_id -> truncated to exactly 8.
     cfg_long = GatewayConfig(gateway_id="very-long-gateway-id")
-    assert cfg_long.effective_short_name == "very-lon"
-    # Explicit override wins regardless of length.
+    assert cfg_long.effective_short_name_or_id == "very-lon"
+    assert cfg_long.effective_short_name_padded == "very-lon"  # already 8-wide
+    # Explicit override wins regardless of length; padded still 8-wide.
     cfg_explicit = GatewayConfig(gateway_id="very-long-gateway-id", gateway_short_name="X")
-    assert cfg_explicit.effective_short_name == "X"
+    assert cfg_explicit.effective_short_name_or_id == "X"
+    assert cfg_explicit.effective_short_name_padded == "X       "
+    # The old name is removed — access raises AttributeError (rename, not alias).
+    assert not hasattr(cfg, "effective_short_name")
 
 
 # ---------------------------------------------------------------------------
@@ -143,30 +158,29 @@ async def test_facade_search_min_score_parameter_is_dead():
 # G4 #1140 — max_outcome accepts strings with .value silently
 # ---------------------------------------------------------------------------
 
-def test_max_outcome_accepts_strings_with_value_attribute_silently():
-    """G4 (#1140): ``max_outcome(a, b)`` (guards.py:87-96) uses
-    ``hasattr(a, 'value')`` to decide whether to extract an enum value,
-    falling back to ``a`` itself when there is no ``.value``.
+def test_max_outcome_rejects_non_guardoutcome_inputs():
+    """G4 (#1140 RESOLVED — R2-P2): ``max_outcome`` now strictly requires
+    ``GuardOutcome`` enum instances. Plain strings (even ones that
+    coincidentally have a ``.value`` attribute via StrEnum base-class
+    inheritance) are rejected with ``TypeError``.
 
-    This means a string with a ``.value`` attribute (e.g., a namedtuple or
-    a crafted mock) will be consumed as if it were a ``GuardOutcome``
-    enum. The function does NOT type-check its inputs — it only checks
-    whether the shape is enum-like.
+    Fix at ``schemas/guards.py:87-106`` — replaced the
+    ``hasattr(x, 'value')`` duck-typing with ``isinstance(x, GuardOutcome)``
+    strict checks on both arguments.
 
-    Pin: a plain string ``"pass"`` passes the ``_OUTCOME_ORDER.get(...)``
-    lookup because ``_OUTCOME_ORDER`` is keyed by the enum string values.
-    Mixed enum + string inputs are accepted silently with no warning.
+    Assertions:
+      (1) Two enum inputs still work (the happy path).
+      (2) A plain string as 'a' raises TypeError.
+      (3) A plain string as 'b' raises TypeError.
     """
-    # Plain string outcomes round-trip via _OUTCOME_ORDER without raising.
-    result = max_outcome(GuardOutcome.PASS, "pass")
-    # The function returns whichever arg has the higher rank — ties return
-    # the second arg per `return a if oa >= ob else b` logic. Equal ranks
-    # means b is returned.
-    assert result == "pass", (
-        f"Expected string 'pass' to be accepted as a valid GuardOutcome-like "
-        f"input; got {result!r}. If max_outcome now validates types, update "
-        "this test and remove the #1140 pin."
-    )
+    # (1) Happy path still works.
+    assert max_outcome(GuardOutcome.PASS, GuardOutcome.BLOCK) == GuardOutcome.BLOCK
+    # (2) String as 'a' rejected.
+    with pytest.raises(TypeError, match="max_outcome.*expected GuardOutcome"):
+        max_outcome("pass", GuardOutcome.BLOCK)  # type: ignore[arg-type]
+    # (3) String as 'b' rejected.
+    with pytest.raises(TypeError, match="max_outcome.*expected GuardOutcome"):
+        max_outcome(GuardOutcome.PASS, "block")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -219,29 +233,40 @@ async def test_facade_decay_with_factor_above_1_increases_then_clamps():
 # G6 #1147 — ScoringWeights accepts positive penalty values
 # ---------------------------------------------------------------------------
 
-def test_scoring_weights_accepts_positive_penalty_values():
-    """G6 (#1147): ``ScoringWeights.redundancy_penalty`` and
-    ``contradiction_penalty`` (working_set.py:27-28) have no
-    ``Field(le=0)`` constraint. A positive value inverts the intent of
-    "penalty" — facts that are redundant or contradictory would then
-    INCREASE in score rather than decrease.
+def test_scoring_weights_rejects_positive_penalty_values():
+    """G6 (#1147 RESOLVED — R2-P2): ``ScoringWeights.redundancy_penalty``,
+    ``contradiction_penalty``, and ``cost_penalty`` now carry ``Field(le=0.0)``
+    constraints. A positive value inverts the intent of "penalty" — facts
+    that are redundant / contradictory / cost-heavy would BOOST their
+    score rather than deprioritise. The validator now catches this at
+    config load instead of letting a misconfigured profile silently ship.
 
-    Pin: constructing ScoringWeights with positive penalty values
-    succeeds silently. Fix would add ``Field(..., le=0.0)`` with
-    migration for any deployed profile configs that happen to have
-    positive values.
+    Fix at ``schemas/working_set.py:27-34`` — added ``le=0.0`` to all
+    three penalty fields.
+
+    Assertions:
+      (1) Default negative values still load (happy path — all 5 ship
+          profiles at ``runtime/profiles/presets.py`` use negative values).
+      (2) Positive values raise ValidationError.
     """
-    # Default negative penalties load fine.
+    from pydantic import ValidationError
+    # (1) Default negative values load fine.
     defaults = ScoringWeights()
     assert defaults.redundancy_penalty == -0.7
     assert defaults.contradiction_penalty == -1.0
-    # Positive values load WITHOUT raising — the pin.
-    weights = ScoringWeights(
-        redundancy_penalty=0.5,
-        contradiction_penalty=0.3,
+    assert defaults.cost_penalty == -0.3
+    # (2) Positive penalty values now rejected.
+    with pytest.raises(ValidationError):
+        ScoringWeights(redundancy_penalty=0.5)
+    with pytest.raises(ValidationError):
+        ScoringWeights(contradiction_penalty=0.3)
+    with pytest.raises(ValidationError):
+        ScoringWeights(cost_penalty=0.1)
+    # Zero is still valid (boundary).
+    ok = ScoringWeights(
+        redundancy_penalty=0.0, contradiction_penalty=0.0, cost_penalty=0.0,
     )
-    assert weights.redundancy_penalty == 0.5
-    assert weights.contradiction_penalty == 0.3
+    assert ok.redundancy_penalty == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -271,34 +296,37 @@ def test_procedure_definition_accepts_empty_activation_modes():
 # G10 #1141 — consolidation decay_scope_multipliers misses 3 scopes
 # ---------------------------------------------------------------------------
 
-def test_consolidation_decay_scope_multipliers_missing_three_scopes():
-    """G10 (#1141): ``ConsolidationConfig.decay_scope_multipliers`` default
-    dict (consolidation.py:42-48) contains 5 keys: ``session, actor,
-    team, organization, global``. The ``Scope`` enum (schemas/base.py)
-    defines EIGHT scopes — the three missing are ``task``, ``subagent``,
-    ``artifact``.
+def test_consolidation_decay_scope_multipliers_covers_all_scopes():
+    """G10 (#1141 RESOLVED — R2-P2): ``ConsolidationConfig.decay_scope_multipliers``
+    default dict now includes all 8 ``Scope`` enum values. The three
+    previously missing (``task``, ``subagent``, ``artifact``) default to
+    1.0 (base rate — no accelerated decay) pending operational data.
 
-    Consumed by ``consolidation/stages/decay.py:40`` as
-    ``self._scope_multipliers = config.decay_scope_multipliers``. When
-    decay walks a TASK / SUBAGENT / ARTIFACT fact, the multiplier lookup
-    falls through to the default branch (whatever the decay stage's
-    ``.get()`` default is — typically 1.0) — silently treating these
-    facts as if they were base-rate.
+    Fix at ``schemas/consolidation.py:42-60`` — extended the default
+    dict, added a ``description`` noting the all-8-scopes invariant.
+    Decay consumer at ``consolidation/stages/decay.py:60`` still uses
+    ``.get(scope_key, 1.0)`` as defense-in-depth, but the policy is now
+    EXPLICIT in the schema instead of implicit in the fallback.
 
-    Pin: default dict has exactly 5 keys, and exactly 3 Scope values are
-    missing from it. Fix would either (a) extend the default to all 8
-    scopes with considered multipliers, or (b) document explicitly that
-    unlisted scopes get base rate.
+    Assertions:
+      (1) All 8 Scope enum values are keys in the default dict.
+      (2) The 3 new keys (task/subagent/artifact) default to 1.0.
+      (3) Existing 5 keys retain their original values (no drift).
     """
     cfg = ConsolidationConfig()
     multipliers = cfg.decay_scope_multipliers
-    assert set(multipliers.keys()) == {
-        "session", "actor", "team", "organization", "global",
-    }
     all_scopes = {s.value for s in Scope}
+    # (1) Coverage — no Scope value is missing.
+    assert set(multipliers.keys()) == all_scopes
     missing = all_scopes - set(multipliers.keys())
-    assert missing == {"task", "subagent", "artifact"}, (
-        f"Expected exactly 3 missing scopes (task, subagent, artifact); "
-        f"got missing={missing}. If the default dict was extended, update "
-        "this test and the #1141 entry."
-    )
+    assert missing == set()
+    # (2) New keys at base rate.
+    assert multipliers["task"] == 1.0
+    assert multipliers["subagent"] == 1.0
+    assert multipliers["artifact"] == 1.0
+    # (3) Existing keys unchanged.
+    assert multipliers["session"] == 1.5
+    assert multipliers["actor"] == 1.0
+    assert multipliers["team"] == 0.8
+    assert multipliers["organization"] == 0.7
+    assert multipliers["global"] == 0.5

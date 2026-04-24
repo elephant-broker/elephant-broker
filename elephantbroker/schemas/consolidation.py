@@ -39,13 +39,24 @@ class ConsolidationConfig(BaseModel):
     # For facts never recalled: gentler time-based decay
     decay_archival_threshold: float = Field(default=0.05, ge=0.0, le=0.5)
     # Below this confidence → mark for archival
-    decay_scope_multipliers: dict[str, float] = Field(default_factory=lambda: {
-        "session": 1.5,       # Session-scoped facts decay 50% faster
-        "actor": 1.0,         # Actor-scoped: base rate
-        "team": 0.8,          # Team-scoped: 20% slower
-        "organization": 0.7,  # Org-scoped: 30% slower
-        "global": 0.5,        # Global-scoped: 50% slower
-    })
+    decay_scope_multipliers: dict[str, float] = Field(
+        default_factory=lambda: {
+            "session": 1.5,       # Session-scoped facts decay 50% faster
+            "actor": 1.0,         # Actor-scoped: base rate
+            "team": 0.8,          # Team-scoped: 20% slower
+            "organization": 0.7,  # Org-scoped: 30% slower
+            "global": 0.5,        # Global-scoped: 50% slower
+            # #1141 RESOLVED (R2-P2): previously the 3 scopes below
+            # (task, subagent, artifact) were missing from the default dict.
+            # decay.py:60 uses `.get(scope_key, 1.0)` so missing scopes
+            # silently got base rate, but now the policy is EXPLICIT + auditable.
+            # Keys MUST match Scope enum values in schemas/base.py:16-25.
+            "task": 1.0,          # Task-scoped: base rate (conservative default)
+            "subagent": 1.0,      # Subagent-scoped: base rate
+            "artifact": 1.0,      # Artifact-scoped: base rate
+        },
+        description="Decay multiplier per Scope. All 8 Scope enum values present post-#1141.",
+    )
 
     # Stage 5: Prune Bad Autorecall
     autorecall_blacklist_min_recalls: int = Field(default=5, ge=2)

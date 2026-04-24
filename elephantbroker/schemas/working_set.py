@@ -24,9 +24,14 @@ class ScoringWeights(BaseModel):
     confidence: float = 0.4
     evidence_strength: float = 0.3
     novelty: float = 0.5
-    redundancy_penalty: float = -0.7
-    contradiction_penalty: float = -1.0
-    cost_penalty: float = -0.3
+    # #1147 RESOLVED (R2-P2): penalty weights MUST be <= 0. A positive value
+    # would invert the intent of "penalty" — redundant / contradictory facts
+    # would BOOST their score instead of being deprioritised. Prior schema had
+    # no sign constraint, so a misconfigured profile could silently ship with
+    # broken scoring.
+    redundancy_penalty: float = Field(default=-0.7, le=0.0)
+    contradiction_penalty: float = Field(default=-1.0, le=0.0)
+    cost_penalty: float = Field(default=-0.3, le=0.0)
     # Phase 5 additions (GAP-7)
     recency_half_life_hours: float = Field(default=69.0, ge=1.0)
     evidence_refs_for_max_score: int = Field(default=3, ge=1)

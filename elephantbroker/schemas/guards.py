@@ -85,12 +85,25 @@ _OUTCOME_ORDER: dict[str, int] = {
 
 
 def max_outcome(a: GuardOutcome, b: GuardOutcome) -> GuardOutcome:
-    """Return the more severe of two outcomes."""
-    try:
-        oa = _OUTCOME_ORDER.get(a.value if hasattr(a, 'value') else a)
-        ob = _OUTCOME_ORDER.get(b.value if hasattr(b, 'value') else b)
-    except (AttributeError, TypeError):
-        raise ValueError(f"Unknown GuardOutcome: {a!r} or {b!r}")
+    """Return the more severe of two outcomes.
+
+    #1140 RESOLVED (R2-P2): both arguments must be ``GuardOutcome`` enum
+    instances. Previously ``hasattr(x, 'value')`` duck-typed any object
+    with a ``.value`` attribute — including plain strings (whose
+    ``.value`` check coincidentally held because of the ``str`` base
+    class inheritance via ``StrEnum``). Now strictly rejects non-enum
+    inputs with ``TypeError``.
+    """
+    if not isinstance(a, GuardOutcome):
+        raise TypeError(
+            f"max_outcome() expected GuardOutcome for 'a', got {type(a).__name__}: {a!r}"
+        )
+    if not isinstance(b, GuardOutcome):
+        raise TypeError(
+            f"max_outcome() expected GuardOutcome for 'b', got {type(b).__name__}: {b!r}"
+        )
+    oa = _OUTCOME_ORDER.get(a.value)
+    ob = _OUTCOME_ORDER.get(b.value)
     if oa is None or ob is None:
         raise ValueError(f"Unknown GuardOutcome: {a!r} or {b!r}")
     return a if oa >= ob else b
@@ -228,7 +241,14 @@ class ApprovalRouting(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    """A request for human approval."""
+    """A request for human approval.
+
+    ``timeout_seconds`` (#1135 RESOLVED — R2-P2): callers pass the
+    routing-resolved timeout (typically ``state.guard_policy.approval_routing.timeout_seconds``)
+    so ``timeout_at`` reflects the policy-configured value instead of the
+    previous hardcoded 300s. Default of 300 matches ``ApprovalRouting.timeout_seconds``
+    default; ``ge=30`` floor matches the routing constraint.
+    """
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     guard_event_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     session_id: uuid.UUID = Field(default_factory=uuid.uuid4)
@@ -239,6 +259,7 @@ class ApprovalRequest(BaseModel):
     matched_rules: list[str] = Field(default_factory=list)
     status: ApprovalStatus = ApprovalStatus.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timeout_seconds: int = Field(default=300, ge=30)
     timeout_at: datetime | None = None
     resolved_at: datetime | None = None
     resolved_by: str | None = None
@@ -247,7 +268,7 @@ class ApprovalRequest(BaseModel):
 
     def model_post_init(self, __context: object) -> None:
         if self.timeout_at is None:
-            self.timeout_at = self.created_at + timedelta(seconds=300)
+            self.timeout_at = self.created_at + timedelta(seconds=self.timeout_seconds)
 
 
 # ---------------------------------------------------------------------------

@@ -525,12 +525,18 @@ class RedLineGuardEngine(IRedLineGuardEngine):
                     ),
                     outcome=GuardOutcome.REQUIRE_APPROVAL,
                 )
+                # #1135 RESOLVED (R2-P2): thread the routing-resolved timeout
+                # into ApprovalRequest so `timeout_at` reflects policy, not the
+                # hardcoded 300s default.
+                _routing_timeout = (state.guard_policy.approval_routing.timeout_seconds
+                                    if state.guard_policy.approval_routing else 300)
                 new_req = ApprovalRequest(
                     guard_event_id=guard_event.id,
                     session_id=state.session_id,
                     action_summary=action.action_content[:500],
                     decision_domain=domain,
                     autonomy_level=autonomy_level,
+                    timeout_seconds=_routing_timeout,
                 )
                 if self._approvals:
                     await self._approvals.create(

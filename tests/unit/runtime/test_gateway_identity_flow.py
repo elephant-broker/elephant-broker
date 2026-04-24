@@ -75,17 +75,17 @@ def test_gateway_config_defaults():
     # is set (Bucket A — A3).
     cfg = GatewayConfig()
     assert cfg.gateway_id == ""
-    assert cfg.effective_short_name == ""
+    assert cfg.effective_short_name_or_id == ""
 
 
 def test_gateway_config_short_name_override():
     cfg = GatewayConfig(gateway_id="gw-prod-us-east-1", gateway_short_name="us-east")
-    assert cfg.effective_short_name == "us-east"
+    assert cfg.effective_short_name_or_id == "us-east"
 
 
 def test_gateway_config_short_name_auto():
     cfg = GatewayConfig(gateway_id="gw-prod-us-east-1")
-    assert cfg.effective_short_name == "gw-prod-"
+    assert cfg.effective_short_name_or_id == "gw-prod-"
 
 
 # --- Multi-gateway Redis isolation ---

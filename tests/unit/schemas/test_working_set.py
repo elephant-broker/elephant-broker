@@ -147,14 +147,31 @@ class TestScoringWeights:
         assert w.contradiction_penalty < 0
         assert w.cost_penalty < 0
 
-    def test_positive_penalty_weight_accepted_by_schema(self):
-        """G7: schema accepts positive penalty weights (no le=0 constraint)."""
-        # Schema permits positive penalty weights by design (#1147 -- no le=0 constraint).
-        # Runtime ScoringTuner + profile presets uphold the negative convention.
-        w = ScoringWeights(contradiction_penalty=1.0)
-        assert w.contradiction_penalty == 1.0
+    def test_positive_penalty_weight_rejected_by_schema(self):
+        """G7 FLIPPED (#1147 RESOLVED — R2-P2): schema now rejects positive
+        penalty weights via ``Field(le=0.0)`` on all three penalty fields.
+
+        Pre-fix this test documented the gap ("schema accepts positive");
+        post-fix the validator enforces the negative convention that
+        ScoringTuner + profile presets already uphold.
+
+        Assertions:
+          (1) Positive `contradiction_penalty` raises ValidationError
+              (the specific example the old pin used).
+          (2) Zero is still valid (boundary: `le=0.0`).
+          (3) The `weighted_sum` behavior with a zero penalty + matching
+              score is unchanged (score * 0 = 0).
+        """
+        import pytest as _pytest
+        from pydantic import ValidationError
+        # (1) Positive now rejected.
+        with _pytest.raises(ValidationError):
+            ScoringWeights(contradiction_penalty=1.0)
+        # (2) Zero still valid (boundary).
+        w = ScoringWeights(contradiction_penalty=0.0)
+        assert w.contradiction_penalty == 0.0
         s = WorkingSetScores(contradiction_penalty=1.0)
-        assert w.weighted_sum(s) == pytest.approx(1.0, abs=1e-9)
+        assert w.weighted_sum(s) == _pytest.approx(0.0, abs=1e-9)
 
     def test_weighted_sum_zero_weights_returns_zero(self):
         """G8: zero out all 11 weights -> sum is 0 regardless of scores."""
