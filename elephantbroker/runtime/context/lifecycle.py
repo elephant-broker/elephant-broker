@@ -1193,7 +1193,7 @@ class ContextLifecycle:
                 session_key=sk,
                 session_id=sid,
                 gateway_id=self._gateway_id,
-                payload={"action": "engine_teardown", "session_key": sk, "session_id": sid},
+                payload={"event": "engine_teardown", "session_key": sk, "session_id": sid},
             ))
 
     async def session_end(self, sk: str, sid: str) -> dict:
@@ -1237,7 +1237,7 @@ class ContextLifecycle:
                 session_key=sk,
                 session_id=sid,
                 gateway_id=self._gateway_id,
-                payload={"action": "session_end", "session_key": sk, "session_id": sid,
+                payload={"event": "lifecycle_session_end", "session_key": sk, "session_id": sid,
                          "goals_flushed": goals_flushed},
             ))
 

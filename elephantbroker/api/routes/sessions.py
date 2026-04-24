@@ -101,12 +101,22 @@ async def session_start(body: SessionStartRequest, request: Request):
                 logger.warning("Subagent parent mapping failed: %s", exc)
 
     # 4. Emit trace event with full identity
+    # TD-65: session_id is promoted to a top-level TraceEvent field so POST /trace/query
+    # can filter by session_id. body.session_id is typed str but production TS plugins
+    # send UUID strings; we tolerate non-UUID strings (e.g., older test fixtures, dev
+    # smoke tests) by falling back to None on parse failure — the raw string is still
+    # preserved in the payload dict.
+    try:
+        parsed_sid = uuid.UUID(body.session_id) if body.session_id else None
+    except (ValueError, TypeError):
+        parsed_sid = None
     trace_event = TraceEvent(
         event_type=TraceEventType.SESSION_BOUNDARY,
         gateway_id=gw_id,
         agent_key=agent_key,
         agent_id=agent_id,
         session_key=body.session_key,
+        session_id=parsed_sid,
         payload={
             "session_key": body.session_key,
             "session_id": body.session_id,
@@ -262,11 +272,18 @@ async def session_end(body: SessionEndRequest, request: Request):
                 logger.warning("Session goal flush failed: %s", exc)
 
     # Emit trace event
+    # TD-65: session_id is promoted to a top-level TraceEvent field so POST /trace/query
+    # can filter by session_id. See /sessions/start for the non-UUID fallback rationale.
+    try:
+        parsed_sid = uuid.UUID(body.session_id) if body.session_id else None
+    except (ValueError, TypeError):
+        parsed_sid = None
     trace_event = TraceEvent(
         event_type=TraceEventType.SESSION_BOUNDARY,
         gateway_id=gw_id,
         agent_key=agent_key,
         session_key=body.session_key,
+        session_id=parsed_sid,
         payload={
             "session_key": body.session_key,
             "session_id": body.session_id,

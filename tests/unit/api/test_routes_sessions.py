@@ -1,4 +1,5 @@
 """Tests for session lifecycle routes."""
+import uuid
 from unittest.mock import AsyncMock
 
 from elephantbroker.runtime.identity import deterministic_uuid_from
@@ -140,10 +141,14 @@ class TestSessionRoutes:
 
         Pins D1 from Step 0 (commit 3526837) — the plan previously expected
         payload.action='start'; code ships payload.event='start' (sessions.py:113).
+
+        TD-65 extension: also asserts top-level TraceEvent.session_id is set (not None)
+        so POST /trace/query can filter by session_id.
         """
+        sid = str(uuid.uuid4())
         await client.post("/sessions/start", json={
             "session_key": "agent:main:main",
-            "session_id": "abc-123",
+            "session_id": sid,
             "agent_id": "main",
         })
         events = [
@@ -155,24 +160,36 @@ class TestSessionRoutes:
         assert ev.payload["event"] == "start"
         assert ev.payload["session_key"] == "agent:main:main"
         assert "agent_key" in ev.payload
+        # TD-65: top-level session_id must be set (not None) for trace_query filtering.
+        assert ev.session_id == uuid.UUID(sid)
 
     async def test_session_end_emits_session_boundary_with_event_end(self, client, container):
         """G5+G9 (end half): /sessions/end emits SESSION_BOUNDARY with payload.event='end'.
 
         Pins D1 from Step 0 — matches sessions.py:273.
+
+        TD-65 extension: also asserts top-level TraceEvent.session_id is set. The
+        `event="end"` emission comes from the route handler (distinct from lifecycle's
+        `lifecycle_session_end` and goal store's `goals_flushed`). We filter for the
+        route event specifically by its unique payload keys (`reason`, `facts_count`).
         """
+        sid = str(uuid.uuid4())
         await client.post("/sessions/end", json={
             "session_key": "agent:main:main",
-            "session_id": "abc-123",
+            "session_id": sid,
         })
         events = [
             e for e in container.trace_ledger._events
             if e.event_type == TraceEventType.SESSION_BOUNDARY
         ]
         assert len(events) >= 1
-        ev = events[-1]
-        assert ev.payload["event"] == "end"
+        # Find the route-level "end" emission (distinguished by payload.event + reason field).
+        route_events = [e for e in events if e.payload.get("event") == "end"]
+        assert route_events, "Expected at least one SESSION_BOUNDARY with event='end' from the route"
+        ev = route_events[-1]
         assert ev.payload["session_key"] == "agent:main:main"
+        # TD-65: top-level session_id must be set (not None) for trace_query filtering.
+        assert ev.session_id == uuid.UUID(sid)
 
     async def test_session_start_header_gateway_id_wins_body_ignored_security_fix(self, client, container):
         """Pins security-corrected behavior post TODO-3-030 / Bucket A-R3 / TD-41:
