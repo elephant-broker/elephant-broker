@@ -1,4 +1,5 @@
 """Tests for RuntimeContainer."""
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -231,3 +232,150 @@ class TestPhase5Wiring:
         ):
             with pytest.raises(RuntimeError, match="bad credentials"):
                 await RuntimeContainer.from_config(ElephantBrokerConfig(), BusinessTier.FULL)
+
+    # ------------------------------------------------------------------
+    # TF-FN-011 additions
+    # ------------------------------------------------------------------
+
+    async def test_close_emits_closing_adapter_log_per_adapter(self, caplog):
+        """G1 (TF-FN-011): close() emits an INFO log line for each adapter it shuts down.
+
+        Pins the F2 fix from Step 0 (commit 3526837) -- operators must be able to see
+        teardown order and identify which adapter hung or failed during shutdown via
+        the journal.
+        """
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        container.graph.close = AsyncMock()
+        container.vector.close = AsyncMock()
+        container.embeddings.close = AsyncMock()
+        container.llm_client.close = AsyncMock()
+        if container.redis:
+            container.redis.aclose = AsyncMock()
+        with caplog.at_level(logging.INFO, logger="elephantbroker.runtime.container"):
+            await container.close()
+        for name in ["graph", "vector", "embeddings", "llm_client"]:
+            assert f"Closing adapter: {name}" in caplog.text, f"Missing log for {name}"
+        if container.redis:
+            assert "Closing adapter: redis" in caplog.text
+
+    async def test_close_unguarded_graph_failure_cascades(self):
+        """G2-a: graph.close is unguarded; failure propagates by design (D13).
+
+        Pins documented partial-guarding behavior (D13 lead decision: intentional fail-fast
+        for critical infrastructure). If a future change wraps this in try/except, update
+        this test, the TF-FN-011 plan, and reconcile with #226 wording.
+        """
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        container.graph.close = AsyncMock(side_effect=RuntimeError("graph close failed"))
+        with pytest.raises(RuntimeError, match="graph close failed"):
+            await container.close()
+
+    async def test_close_guarded_redis_failure_isolated(self):
+        """G2-b: redis.aclose is guarded; its failure does not abort container teardown.
+
+        Pins guarded path: best-effort cleanup for optional services (D13 design). Teardown
+        continues past redis so downstream audit/store closes still run.
+        """
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        # All unguarded closes succeed (so teardown reaches the guarded redis path)
+        container.graph.close = AsyncMock()
+        container.vector.close = AsyncMock()
+        container.embeddings.close = AsyncMock()
+        container.llm_client.close = AsyncMock()
+        if (
+            container.compaction_llm_client is not None
+            and container.compaction_llm_client is not container.llm_client
+        ):
+            container.compaction_llm_client.close = AsyncMock()
+        if container.procedure_audit:
+            container.procedure_audit.close = AsyncMock()
+        if container.session_goal_audit:
+            container.session_goal_audit.close = AsyncMock()
+        if container.org_override_store:
+            container.org_override_store.close = AsyncMock()
+        if container.authority_store:
+            container.authority_store.close = AsyncMock()
+        # Redis close fails -- guarded, so no exception leaks
+        assert container.redis is not None, "test presupposes redis client was created"
+        container.redis.aclose = AsyncMock(side_effect=RuntimeError("redis close failed"))
+        # Must not raise
+        await container.close()
+
+    async def test_redis_init_failure_sets_none_with_warning(self, caplog):
+        """G3 (#227): redis.asyncio.from_url failure sets c.redis = None and logs WARNING.
+
+        Container continues construction -- dependent features (ingest_buffer, cached_embeddings
+        cache path, session goal store) handle redis=None gracefully. Pins the resilience
+        contract that Redis unavailability does not abort boot.
+        """
+        with patch("redis.asyncio.from_url", side_effect=Exception("redis unreachable")):
+            with caplog.at_level(logging.WARNING, logger="elephantbroker.runtime.container"):
+                container = await RuntimeContainer.from_config(
+                    ElephantBrokerConfig(), BusinessTier.FULL,
+                )
+        assert container.redis is None
+        assert "Redis client creation failed, continuing without" in caplog.text
+
+    async def test_procedure_audit_init_db_failure_aborts_container(self):
+        """G4 (#1171): ProcedureAuditStore.init_db() failure must abort container construction.
+
+        This call is NOT in try/except by design -- audit storage is a safety-critical
+        dependency for Phase 7 evidence/verification. A bad SQLite path, permission error,
+        or corrupt DB must be signal-worthy at boot, not silently degraded.
+        """
+        with patch(
+            "elephantbroker.runtime.audit.procedure_audit.ProcedureAuditStore.init_db",
+            new_callable=AsyncMock,
+            side_effect=Exception("sqlite fail"),
+        ):
+            with pytest.raises(Exception, match="sqlite fail"):
+                await RuntimeContainer.from_config(ElephantBrokerConfig(), BusinessTier.FULL)
+
+    async def test_close_does_not_close_trace_ledger_or_cached_embeddings(self):
+        """G5 (#1181, #1182): close() does NOT call TraceLedger.close() or CachedEmbeddingService.close().
+
+        Documents the intentional non-calls:
+        - TraceLedger is in-memory, has no resources to close.
+        - CachedEmbeddingService.close() internally delegates to its inner EmbeddingService's
+          close(); the container already closes that inner directly via container.embeddings.
+          Calling cached_embeddings.close() here would double-close the inner.
+        """
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        container.graph.close = AsyncMock()
+        container.vector.close = AsyncMock()
+        container.embeddings.close = AsyncMock()
+        container.llm_client.close = AsyncMock()
+        if container.redis:
+            container.redis.aclose = AsyncMock()
+        # Attach close mocks so any call would be recorded
+        container.trace_ledger.close = AsyncMock()
+        container.cached_embeddings.close = AsyncMock()
+        await container.close()
+        assert container.trace_ledger.close.await_count == 0
+        assert container.cached_embeddings.close.await_count == 0
+
+    async def test_close_does_not_double_close_compaction_when_same_as_llm(self):
+        """G6 (#1183): `is not` identity check prevents double-close when
+        compaction_llm_client points to the same instance as llm_client.
+
+        Pins the identity-not-equality guard: if compaction_llm_client is an alias for
+        llm_client (shared client, default case), close() must run exactly once on that
+        instance. A future change that relaxes this to `!=` could silently double-close,
+        which some client implementations handle poorly (already-closed exceptions).
+        """
+        config = ElephantBrokerConfig()
+        container = await RuntimeContainer.from_config(config, BusinessTier.FULL)
+        container.graph.close = AsyncMock()
+        container.vector.close = AsyncMock()
+        container.embeddings.close = AsyncMock()
+        container.llm_client.close = AsyncMock()
+        if container.redis:
+            container.redis.aclose = AsyncMock()
+        # Point compaction_llm_client at the same instance as llm_client (aliased).
+        container.compaction_llm_client = container.llm_client
+        await container.close()
+        assert container.llm_client.close.await_count == 1
