@@ -107,7 +107,16 @@ class CachedEmbeddingService:
                     if j < len(new_embeddings) and results[idx] is None:
                         results[idx] = new_embeddings[j]
 
-        # Replace any remaining Nones with empty (shouldn't happen)
+        # ── Diagnostic safety net ── shouldn't happen if inner.embed_batch honors its
+        # contract (one embedding per input). If this fires, file a TD with the call
+        # context and consider raising instead of substituting. See GAP #1163.
+        none_count = sum(1 for r in results if r is None)
+        if none_count > 0:
+            logger.warning(
+                "embed_batch returned %d/%d None entries — substituting with empty vectors. "
+                "This indicates inner.embed_batch returned a truncated response (#1163).",
+                none_count, len(results),
+            )
         return [r if r is not None else [] for r in results]
 
     def get_dimension(self) -> int:
