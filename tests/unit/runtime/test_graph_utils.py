@@ -58,3 +58,37 @@ class TestCleanGraphProps:
             "tags": ["a"],
             "ref": None,
         }
+
+    # TF-FN-020 G1 — pin the ``{``-prefix-only JSON deserialization behavior.
+    # graph_utils.py:25 checks ``v.startswith("{")`` only, so JSON-encoded
+    # *arrays* (``[...]``) pass through as-is even though they're structurally
+    # the same kind of "Neo4j had to serialize this" data as dicts.
+    def test_json_array_string_NOT_deserialized_pin_1163(self):
+        """G1 (#1163 DEFENSIVE): pin that ``clean_graph_props`` only
+        deserializes JSON *objects* (leading ``{``), not JSON *arrays*
+        (leading ``[``). This is the current behavior at
+        ``graph_utils.py:25``.
+
+        Why it's DEFENSIVE, not LIVE: no current schema field is stored
+        as a ``list[dict]`` that Neo4j would need to serialize. The
+        codebase uses the ``*_json: str`` workaround pattern (see
+        ``ProcedureDataPoint.steps_json`` at ``datapoints.py:265``, plus
+        ``red_line_bindings_json`` and ``approval_requirements_json``)
+        where the DataPoint class holds the raw JSON string and its
+        ``to_schema()`` method explicitly calls ``json.loads()``.
+
+        If a future schema introduces a plain ``list[dict]`` field that
+        Neo4j auto-serializes on write, this test will pin the gap —
+        the to_schema pipeline would receive a string instead of a list.
+        Resolution would be either extend ``clean_graph_props`` to handle
+        ``[``-prefix, or adopt the ``*_json: str`` pattern for that
+        field.
+
+        Paired with G4 in ``test_datapoint_reconstruction.py`` which
+        pins ProcedureDataPoint's ``*_json`` pattern as the current
+        workaround.
+        """
+        raw = {"tags": '["a", "b"]', "vals": '[1, 2, 3]'}
+        result = clean_graph_props(raw)
+        # Strings survive unchanged — no `[`-prefix deserialization.
+        assert result == {"tags": '["a", "b"]', "vals": '[1, 2, 3]'}
