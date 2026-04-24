@@ -246,6 +246,35 @@ class TestSessionRoutes:
         assert r.status_code == 200
         assert "main-worker" in r.json()["agent_key"]
 
+    async def test_session_start_increments_session_boundary_metric(self, client, container):
+        """TD-65 follow-up (observer-reverify catch): POST /sessions/start now increments
+        `eb_session_boundary_total{event="session_start"}` so the metric fires 1:1 with the
+        session_end increment in ContextLifecycle.session_end.
+
+        Previously the start increment was inside ContextLifecycle.bootstrap, which was a
+        poor proxy — bootstrap can fire multiple times per session on re-bootstrap after
+        dispose (see TF-FN-011 GF-15), and in some deployment modes it doesn't fire at all.
+        Observer Layer B/C reverify confirmed the start time series was missing in
+        practice; this pin ensures the HTTP-layer signal is the authoritative source.
+        """
+        # MetricsContext from the api conftest is a real instance with .inc_session_boundary;
+        # wrap it so we can count calls without breaking the underlying counter.
+        from unittest.mock import MagicMock
+        original = container.metrics_ctx.inc_session_boundary
+        spy = MagicMock(wraps=original)
+        container.metrics_ctx.inc_session_boundary = spy
+
+        await client.post("/sessions/start", json={
+            "session_key": "agent:main:main",
+            "session_id": "abc-123",
+            "agent_id": "main",
+        })
+        calls = [c.args[0] for c in spy.call_args_list if c.args]
+        assert "session_start" in calls, (
+            f"POST /sessions/start must call inc_session_boundary('session_start'); "
+            f"observed calls: {calls!r}"
+        )
+
     async def test_session_end_does_not_verify_gateway_id_documented_prod_risk(self, client):
         """Pins PROD risk #1507 — /sessions/end does not verify body.gateway_id matches the
         session's stored gateway. Cross-gateway session end is possible.

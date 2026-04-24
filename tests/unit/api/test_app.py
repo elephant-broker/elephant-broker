@@ -41,6 +41,34 @@ class TestCreateApp:
         for prefix in expected_prefixes:
             assert any(p.startswith(prefix) for p in paths), f"Missing prefix: {prefix}"
 
+    def test_lifespan_invokes_container_close_on_shutdown(self):
+        """#1508 / F2 fix (TD-65 2nd follow-up): `create_app()` registers
+        `container.close()` via the FastAPI `lifespan=` kwarg. When the app
+        shuts down (SIGTERM in prod; TestClient `__exit__` in tests), the
+        lifespan's yielded teardown runs, driving `container.close()` —
+        which in turn emits the 14 F2 close-adapter INFO logs.
+
+        Pre-fix: there was no `@app.on_event("shutdown")` AND no
+        `lifespan=` kwarg — `container.close()` was never invoked in
+        production (devops Layer B/C verified via journal grep). Redis
+        distributed locks orphaned on pod restart; adapter connections
+        torn down only via process exit, not graceful close.
+
+        Post-fix: this test drives the lifespan via TestClient context
+        manager and asserts `container.close` was awaited once.
+        """
+        from starlette.testclient import TestClient
+
+        container = _make_container()
+        container.close = AsyncMock()
+        app = create_app(container)
+        # TestClient as context manager triggers lifespan startup on __enter__
+        # and shutdown on __exit__. Our lifespan yields immediately (no startup
+        # work) and awaits container.close() on the post-yield side.
+        with TestClient(app):
+            pass
+        container.close.assert_awaited_once()
+
     def test_middleware_registered(self):
         app = create_app(_make_container())
         # The error_handler_middleware is registered via app.middleware("http"),

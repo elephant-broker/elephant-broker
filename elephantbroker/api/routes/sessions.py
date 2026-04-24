@@ -129,6 +129,16 @@ async def session_start(body: SessionStartRequest, request: Request):
     if trace_ledger:
         await trace_ledger.append_event(trace_event)
 
+    # TD-65 follow-up: increment eb_session_boundary_total{event="session_start"}
+    # here (not in ContextLifecycle.bootstrap) so the metric fires on every
+    # HTTP session-start signal regardless of context-engine bootstrap state,
+    # pairing 1:1 with the session_end increment in lifecycle.session_end.
+    # Observer Layer B/C reverify confirmed the start time series was missing
+    # before this change.
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_session_boundary("session_start")
+
     logger.info("Session started: key=%s, id=%s, agent_key=%s", body.session_key, body.session_id, agent_key)
 
     return {
@@ -258,7 +268,10 @@ async def session_end(body: SessionEndRequest, request: Request):
     context_lifecycle = getattr(container, "context_lifecycle", None)
     if context_lifecycle:
         try:
-            cleanup = await context_lifecycle.session_end(body.session_key, body.session_id, agent_id=agent_id)
+            cleanup = await context_lifecycle.session_end(
+                body.session_key, body.session_id,
+                agent_id=agent_id, agent_key=agent_key,
+            )
             if isinstance(cleanup, dict):
                 goals_flushed = cleanup.get("goals_flushed", 0)
         except Exception as exc:
