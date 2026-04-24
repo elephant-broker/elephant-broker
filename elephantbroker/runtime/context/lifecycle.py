@@ -1196,11 +1196,17 @@ class ContextLifecycle:
                 payload={"event": "engine_teardown", "session_key": sk, "session_id": sid},
             ))
 
-    async def session_end(self, sk: str, sid: str) -> dict:
+    async def session_end(self, sk: str, sid: str, *, agent_id: str | None = None) -> dict:
         """Actual session cleanup — called on real session end only (GF-15).
 
         Flushes goals to Cognee, unloads guards, deletes SessionContext from Redis.
         Does NOT delete session artifacts (TTL-based expiry for Phase 9).
+
+        The ``agent_id`` kwarg is plumbed through from the route layer so the
+        lifecycle's SESSION_BOUNDARY emission carries the same top-level identity
+        fields as the route's own emission (TD-65 observer-reverify follow-up).
+        When omitted, falls back to empty string on the trace event (not ``None``)
+        to keep the field type stable.
         """
         if not sid and sk in self._bootstrap_session_ids:
             sid = self._bootstrap_session_ids.pop(sk)
@@ -1237,6 +1243,8 @@ class ContextLifecycle:
                 session_key=sk,
                 session_id=sid,
                 gateway_id=self._gateway_id,
+                agent_id=agent_id or "",
+                agent_key=self._agent_key or "",
                 payload={"event": "lifecycle_session_end", "session_key": sk, "session_id": sid,
                          "goals_flushed": goals_flushed},
             ))

@@ -174,10 +174,11 @@ class TestSessionRoutes:
         route event specifically by its unique payload keys (`reason`, `facts_count`).
         """
         sid = str(uuid.uuid4())
-        await client.post("/sessions/end", json={
-            "session_key": "agent:main:main",
-            "session_id": sid,
-        })
+        await client.post(
+            "/sessions/end",
+            headers={"X-EB-Agent-Id": "main"},
+            json={"session_key": "agent:main:main", "session_id": sid},
+        )
         events = [
             e for e in container.trace_ledger._events
             if e.event_type == TraceEventType.SESSION_BOUNDARY
@@ -190,6 +191,11 @@ class TestSessionRoutes:
         assert ev.payload["session_key"] == "agent:main:main"
         # TD-65: top-level session_id must be set (not None) for trace_query filtering.
         assert ev.session_id == uuid.UUID(sid)
+        # TD-65 follow-up (observer reverify catch): agent_id must also be set as a
+        # top-level field on the /end emission. Previously only /start populated it,
+        # leaving end events with agent_id=None — inconsistent with the start emission
+        # and breaking per-agent trace_query filtering on session-end signals.
+        assert ev.agent_id == "main"
 
     async def test_session_start_header_gateway_id_wins_body_ignored_security_fix(self, client, container):
         """Pins security-corrected behavior post TODO-3-030 / Bucket A-R3 / TD-41:

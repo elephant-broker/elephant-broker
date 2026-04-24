@@ -222,6 +222,10 @@ async def session_end(body: SessionEndRequest, request: Request):
     if gw_id is None:
         raise HTTPException(status_code=500, detail="gateway_id middleware not installed")
     agent_key = body.agent_key or getattr(request.state, "agent_key", "")
+    # SessionEndRequest has no agent_id field; pull from middleware state so
+    # TraceEvent carries the same identity as the /start emission (observer
+    # re-verify catch — TD-65 follow-up).
+    agent_id = getattr(request.state, "agent_id", "")
 
     # Force-flush buffer if available.
     # In FULL mode, the P1 gate on /memory/ingest-messages skips buffer.add_messages(),
@@ -254,7 +258,7 @@ async def session_end(body: SessionEndRequest, request: Request):
     context_lifecycle = getattr(container, "context_lifecycle", None)
     if context_lifecycle:
         try:
-            cleanup = await context_lifecycle.session_end(body.session_key, body.session_id)
+            cleanup = await context_lifecycle.session_end(body.session_key, body.session_id, agent_id=agent_id)
             if isinstance(cleanup, dict):
                 goals_flushed = cleanup.get("goals_flushed", 0)
         except Exception as exc:
@@ -282,6 +286,7 @@ async def session_end(body: SessionEndRequest, request: Request):
         event_type=TraceEventType.SESSION_BOUNDARY,
         gateway_id=gw_id,
         agent_key=agent_key,
+        agent_id=agent_id,
         session_key=body.session_key,
         session_id=parsed_sid,
         payload={

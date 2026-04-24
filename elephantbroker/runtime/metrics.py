@@ -187,7 +187,7 @@ try:
     eb_session_boundary_total = Counter(
         "eb_session_boundary_total",
         "Session boundary events (start/end)",
-        ["gateway_id", "action"],
+        ["gateway_id", "event"],
     )
 
     eb_session_ttl_touch_total = Counter(
@@ -718,9 +718,9 @@ class MetricsContext:
         if METRICS_AVAILABLE:
             eb_goal_create_total.labels(gateway_id=self._gw).inc()
 
-    def inc_session_boundary(self, action: str) -> None:
+    def inc_session_boundary(self, event: str) -> None:
         if METRICS_AVAILABLE:
-            eb_session_boundary_total.labels(gateway_id=self._gw, action=action).inc()
+            eb_session_boundary_total.labels(gateway_id=self._gw, event=event).inc()
 
     def inc_session_ttl_touch(self) -> None:
         try:

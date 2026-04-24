@@ -1701,6 +1701,24 @@ class TestDispose:
         assert se_event.payload["event"] == "lifecycle_session_end"
         assert "action" not in se_event.payload
 
+    async def test_lifecycle_session_end_propagates_agent_id(self):
+        """TD-65 follow-up (observer-reverify catch): session_end accepts an ``agent_id``
+        keyword-only kwarg and stamps it on the emitted SESSION_BOUNDARY TraceEvent.
+
+        Previously the lifecycle emission had `agent_id=None, agent_key=None`, leaving
+        the engine-internal signal untraceable by agent. The route now plumbs agent_id
+        through from request.state; this test pins the propagation.
+        """
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        await lc.session_end(SK, SID, agent_id="main")
+        events = [
+            c.args[0] for c in trace.append_event.call_args_list
+            if c.args and c.args[0].event_type == TraceEventType.SESSION_BOUNDARY
+        ]
+        se_event = next(e for e in events if "goals_flushed" in e.payload)
+        assert se_event.agent_id == "main"
+
     async def test_session_end_uses_stored_bootstrap_session_id(self):
         """GF-15: session_end() with empty sid falls back to stored bootstrap session_id."""
         goal_store = AsyncMock()

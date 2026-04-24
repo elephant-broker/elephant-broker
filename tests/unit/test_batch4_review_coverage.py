@@ -519,6 +519,20 @@ class TestPrometheusCounterWiring:
         # Should not raise
         ctx.inc_session_boundary("session_start")
 
+    def test_inc_session_boundary_uses_event_kwarg(self):
+        """TD-65 follow-up: the Prometheus label + helper param are named `event`
+        (not `action`) for consistency with the SESSION_BOUNDARY payload key.
+
+        If the rename is reverted, either (a) the `event=` kwarg below raises TypeError
+        because the param is back to `action`, or (b) the Counter label rejects the
+        value because it was declared with `action`. Either way the test fails, surfacing
+        the regression.
+        """
+        from elephantbroker.runtime.metrics import MetricsContext
+        ctx = MetricsContext("gw-test")
+        # Keyword form pins the parameter rename.
+        ctx.inc_session_boundary(event="session_end")
+
     def test_inc_goal_create_callable(self):
         from elephantbroker.runtime.metrics import MetricsContext
         ctx = MetricsContext("gw-test")
