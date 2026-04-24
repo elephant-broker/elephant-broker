@@ -155,7 +155,6 @@ class ActorDataPoint(DataPoint):
         )
 
     def to_schema(self) -> ActorRef:
-        # Backward compat: old Neo4j nodes may have "team_id" (string) instead of "team_ids" (list)
         raw_team_ids = list(self.team_ids) if self.team_ids else []
         return ActorRef(
             id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
