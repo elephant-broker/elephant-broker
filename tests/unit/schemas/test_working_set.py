@@ -66,6 +66,115 @@ class TestScoringWeights:
         s = WorkingSetScores(turn_relevance=0.8, redundancy_penalty=0.5)
         assert w.weighted_sum(s) == pytest.approx(0.8 - 0.5)
 
+    def test_weighted_sum_default_weights_redundancy_only(self):
+        """G1: default weights * only redundancy_penalty=1.0 -> -0.7."""
+        w = ScoringWeights()
+        s = WorkingSetScores(redundancy_penalty=1.0)
+        assert w.weighted_sum(s) == pytest.approx(-0.7, abs=1e-9)
+
+    def test_weighted_sum_default_weights_contradiction_only(self):
+        """G2: default weights * only contradiction_penalty=1.0 -> -1.0."""
+        w = ScoringWeights()
+        s = WorkingSetScores(contradiction_penalty=1.0)
+        assert w.weighted_sum(s) == pytest.approx(-1.0, abs=1e-9)
+
+    def test_weighted_sum_default_weights_all_scores_one(self):
+        """G3: canonical full-firing sum == 3.1 (schema-derived).
+
+        Positives (1.0+1.0+0.5+0.8+0.6+0.4+0.3+0.5) = 5.1
+        Negatives (-0.7 + -1.0 + -0.3)              = -2.0
+        Total                                        = 3.1
+        """
+        w = ScoringWeights()
+        s = WorkingSetScores(
+            turn_relevance=1.0,
+            session_goal_relevance=1.0,
+            global_goal_relevance=1.0,
+            recency=1.0,
+            successful_use_prior=1.0,
+            confidence=1.0,
+            evidence_strength=1.0,
+            novelty=1.0,
+            redundancy_penalty=1.0,
+            contradiction_penalty=1.0,
+            cost_penalty=1.0,
+        )
+        assert w.weighted_sum(s) == pytest.approx(3.1, abs=1e-9)
+
+    @pytest.mark.parametrize(
+        "field,expected",
+        [
+            ("turn_relevance", 1.0),
+            ("session_goal_relevance", 1.0),
+            ("global_goal_relevance", 0.5),
+            ("recency", 0.8),
+            ("successful_use_prior", 0.6),
+            ("confidence", 0.4),
+            ("evidence_strength", 0.3),
+            ("novelty", 0.5),
+            ("redundancy_penalty", -0.7),
+            ("contradiction_penalty", -1.0),
+            ("cost_penalty", -0.3),
+        ],
+    )
+    def test_weighted_sum_uses_exactly_11_dimensions(self, field, expected):
+        """G4: firing a single dimension at 1.0 (all others 0.0) yields exactly that dim's weight.
+
+        Pins the contract: weighted_sum is a pure linear combination over these 11 fields,
+        no hidden dims, no aux-fields leakage.
+        """
+        s = WorkingSetScores(**{field: 1.0})
+        assert ScoringWeights().weighted_sum(s) == pytest.approx(expected, abs=1e-9)
+
+    def test_weighted_sum_ignores_auxiliary_params(self):
+        """G5: the 5 auxiliary fields (half_life, evidence_refs_for_max, redundancy/contradiction
+        thresholds, confidence_gap) do NOT enter weighted_sum -- pins the isolation contract."""
+        w_default = ScoringWeights()
+        w_extreme = ScoringWeights(
+            recency_half_life_hours=999999,
+            evidence_refs_for_max_score=999,
+            redundancy_similarity_threshold=0.0,
+            contradiction_similarity_threshold=0.0,
+            contradiction_confidence_gap=0.0,
+        )
+        s = WorkingSetScores(turn_relevance=1.0, redundancy_penalty=1.0)
+        assert w_default.weighted_sum(s) == pytest.approx(w_extreme.weighted_sum(s))
+
+    def test_penalty_defaults_are_negative(self):
+        """G6: the 3 penalty dims default negative so that high penalty scores subtract."""
+        w = ScoringWeights()
+        assert w.redundancy_penalty < 0
+        assert w.contradiction_penalty < 0
+        assert w.cost_penalty < 0
+
+    def test_positive_penalty_weight_accepted_by_schema(self):
+        """G7: schema accepts positive penalty weights (no le=0 constraint)."""
+        # Schema permits positive penalty weights by design (#1147 -- no le=0 constraint).
+        # Runtime ScoringTuner + profile presets uphold the negative convention.
+        w = ScoringWeights(contradiction_penalty=1.0)
+        assert w.contradiction_penalty == 1.0
+        s = WorkingSetScores(contradiction_penalty=1.0)
+        assert w.weighted_sum(s) == pytest.approx(1.0, abs=1e-9)
+
+    def test_weighted_sum_zero_weights_returns_zero(self):
+        """G8: zero out all 11 weights -> sum is 0 regardless of scores."""
+        w = ScoringWeights(
+            turn_relevance=0.0, session_goal_relevance=0.0,
+            global_goal_relevance=0.0, recency=0.0,
+            successful_use_prior=0.0, confidence=0.0,
+            evidence_strength=0.0, novelty=0.0,
+            redundancy_penalty=0.0, contradiction_penalty=0.0,
+            cost_penalty=0.0,
+        )
+        s = WorkingSetScores(turn_relevance=1.0, redundancy_penalty=1.0)
+        assert w.weighted_sum(s) == 0.0
+
+    def test_weighted_sum_zero_scores_returns_zero(self):
+        """G9: default WorkingSetScores (all zero) against any weights -> 0."""
+        w = ScoringWeights()
+        s = WorkingSetScores()
+        assert w.weighted_sum(s) == 0.0
+
 
 class TestWorkingSetScores:
     def test_defaults(self):
