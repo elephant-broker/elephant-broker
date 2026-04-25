@@ -48,7 +48,12 @@ class TestGuardOutcome:
         assert result == max_outcome(b, a)
 
     def test_max_outcome_unknown_raises(self):
-        with pytest.raises(ValueError, match="Unknown GuardOutcome"):
+        # #1140 RESOLVED (R2-P2): max_outcome now strict-checks
+        # ``isinstance(x, GuardOutcome)`` before value lookup. A plain
+        # string (even one that isn't a valid outcome value) fails the
+        # type check FIRST, yielding TypeError rather than the prior
+        # ValueError on the unknown-outcome branch.
+        with pytest.raises(TypeError, match="max_outcome.*expected GuardOutcome"):
             max_outcome(GuardOutcome.PASS, "invalid")  # type: ignore[arg-type]
 
 

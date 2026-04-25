@@ -1,6 +1,7 @@
 """Unit tests for the Cognee configuration adapter."""
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -105,3 +106,91 @@ class TestConfigureCognee:
             await configure_cognee(CogneeConfig(), llm_config=llm)
             call_args = mock_config_module.set_llm_config.call_args[0][0]
             assert call_args["llm_provider"] == "openai"
+
+    async def test_sets_telemetry_and_connection_env_vars(self, monkeypatch):
+        """G1: configure_cognee sets COGNEE_DISABLE_TELEMETRY + COGNEE_SKIP_CONNECTION_TEST to 'true'
+        via setdefault semantics (preserves operator-set custom values on re-entry).
+
+        Uses ``monkeypatch`` for env-var manipulation so test teardown auto-restores the
+        pre-test values -- the suite-wide ``COGNEE_DISABLE_TELEMETRY="true"`` (set at
+        ``elephantbroker/__init__.py`` import time) must survive this test so that a
+        later test (``tests/unit/test_deployment_fixes.py::TestCogneeTelemetryEnvVar``)
+        still observes the import-time value.
+        """
+        # Fresh: both env vars absent -> configure_cognee sets them to "true"
+        monkeypatch.delenv("COGNEE_DISABLE_TELEMETRY", raising=False)
+        monkeypatch.delenv("COGNEE_SKIP_CONNECTION_TEST", raising=False)
+        mock_config_module = MagicMock()
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(CogneeConfig())
+        assert os.environ.get("COGNEE_DISABLE_TELEMETRY") == "true"
+        assert os.environ.get("COGNEE_SKIP_CONNECTION_TEST") == "true"
+
+        # setdefault semantics: operator-set custom values must be preserved on re-entry
+        monkeypatch.setenv("COGNEE_DISABLE_TELEMETRY", "custom")
+        monkeypatch.setenv("COGNEE_SKIP_CONNECTION_TEST", "custom")
+        mock_config_module2 = MagicMock()
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module2, MagicMock())):
+            await configure_cognee(CogneeConfig())
+        assert os.environ.get("COGNEE_DISABLE_TELEMETRY") == "custom"
+        assert os.environ.get("COGNEE_SKIP_CONNECTION_TEST") == "custom"
+
+    async def test_init_sets_telemetry_env_var_at_import_time(self):
+        """G2: elephantbroker.__init__ sets COGNEE_DISABLE_TELEMETRY at import time.
+
+        Must happen in __init__.py (not at first configure_cognee call) because Cognee reads
+        this env var at import time -- any cognee import before configure_cognee would phone home.
+        Pins the import-time set in elephantbroker/__init__.py (DEPLOYMENT-FIXES.md §30).
+        """
+        import inspect
+
+        import elephantbroker
+        assert "COGNEE_DISABLE_TELEMETRY" in inspect.getsource(elephantbroker)
+
+    async def test_fallback_emits_warning_log(self, caplog):
+        """G3: When llm_config is None, fallback branch emits a WARNING log.
+
+        Pins the F1 fix from commit 3526837 -- operators must see a loud warning that
+        cognify() will likely fail because the LLM pool is the embedding endpoint.
+        """
+        mock_config_module = MagicMock()
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.adapters.cognee.config"):
+            with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+                await configure_cognee(CogneeConfig())
+        assert "LLM config not provided, falling back to embedding config" in caplog.text
+
+    async def test_fallback_uses_unused_when_embedding_key_empty(self):
+        """G4: Fallback branch uses api_key='unused' when embedding_api_key is empty."""
+        mock_config_module = MagicMock()
+        cfg = CogneeConfig(embedding_api_key="")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, MagicMock())):
+            await configure_cognee(cfg)  # no llm_config -> fallback
+        call_args = mock_config_module.set_llm_config.call_args[0][0]
+        assert call_args["llm_api_key"] == "unused"
+
+    async def test_empty_embedding_endpoint_not_set(self):
+        """G5a: Empty embedding_endpoint must NOT overwrite Cognee's existing default.
+
+        The `if config.embedding_endpoint:` guard at config.py protects Cognee's default
+        from being clobbered by an EB-side empty string.
+        """
+        mock_config_module = MagicMock()
+        mock_embedding_cfg = MagicMock()
+        mock_embedding_cfg.embedding_endpoint = "PRESERVED_DEFAULT"
+        cfg = CogneeConfig(embedding_endpoint="")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, mock_embedding_cfg)):
+            await configure_cognee(cfg)
+        assert mock_embedding_cfg.embedding_endpoint == "PRESERVED_DEFAULT"
+
+    async def test_empty_embedding_api_key_not_set(self):
+        """G5b: Empty embedding_api_key must NOT overwrite Cognee's existing default.
+
+        Same guard pattern as embedding_endpoint -- empty EB config leaves Cognee default intact.
+        """
+        mock_config_module = MagicMock()
+        mock_embedding_cfg = MagicMock()
+        mock_embedding_cfg.embedding_api_key = "PRESERVED_DEFAULT"
+        cfg = CogneeConfig(embedding_api_key="")
+        with patch.dict("sys.modules", _cognee_mocks(mock_config_module, mock_embedding_cfg)):
+            await configure_cognee(cfg)
+        assert mock_embedding_cfg.embedding_api_key == "PRESERVED_DEFAULT"

@@ -7,6 +7,9 @@ default in place:
 * A4 — cognee.neo4j_password must not be empty unless EB_DEV_MODE=true
 * A5 — dataset rename forbidden once /var/lib/elephantbroker/.dataset_lock exists
        unless EB_ALLOW_DATASET_CHANGE=true
+* A6 — gateway.gateway_id must not contain Redis-key or SCAN-glob metacharacters
+       (``:``, ``*``, ``?``, ``[``, ``]``). No env-var opt-out: these characters
+       are operationally unsafe in all environments. (#1516 RESOLVED)
 
 Each test below uses ``monkeypatch.delenv``/``setenv`` to control the relevant
 opt-out env var locally and prove the guard fires (or short-circuits) as
@@ -176,3 +179,49 @@ class TestDatasetLockStartupGuard:
 
         config = _safe_config(cognee=CogneeConfig(neo4j_password="x", default_dataset="new-dataset"))
         _validate_startup_safety(config)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# A6 — gateway_id must not contain Redis-key or scan-glob metacharacters
+# (#1516 RESOLVED in-PR — bundled with TF-FN-017 L1)
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayIdForbiddenCharsStartupGuard:
+    """A6: startup-safety guard for `gateway_id` metacharacters.
+
+    No env-var opt-out (unlike A3/A4/A5) — colons and glob metachars in a
+    gateway_id are operationally unsafe in all environments:
+
+    * ``:`` in gateway_id produces `eb:{gw}:...` Redis keys whose namespace
+      is ambiguous with a nested gateway (e.g., `"gw:prod"` prefix
+      `eb:gw:prod` overlaps `"gw"` key family `eb:gw:prod:...`).
+    * ``*``, ``?``, ``[``, ``]`` in gateway_id propagate verbatim into
+      `RedisKeyBuilder.ws_snapshot_scan_pattern()` /
+      `guard_history_scan_pattern()` outputs. A SCAN with such a pattern
+      would match OTHER gateways' keys, breaking multi-tenant isolation.
+
+    The check lives in `_validate_startup_safety()` so it fires at config
+    load, before any adapter is constructed. `RedisKeyBuilder` intentionally
+    stays permissive — defense in depth: validate at config load, trust at
+    use site. See `redis_keys.py:test_redis_key_builder_accepts_any_gateway_id_*`
+    for the paired permissive-contract test.
+    """
+
+    def test_a6_rejects_gateway_id_with_colons(self, monkeypatch):
+        """Colon in `gateway_id` must raise UnsafeStartupConfigError."""
+        monkeypatch.delenv("EB_ALLOW_DEFAULT_GATEWAY_ID", raising=False)
+        config = _safe_config(gateway=GatewayConfig(gateway_id="gw:prod"))
+        with pytest.raises(UnsafeStartupConfigError, match=r"forbidden characters.*':'"):
+            _validate_startup_safety(config)
+
+    @pytest.mark.parametrize("bad_id", ["gw*", "gw?", "gw[abc]", "gw]"])
+    def test_a6_rejects_gateway_id_with_glob_metacharacters(self, bad_id, monkeypatch):
+        """Redis glob metacharacters (`*`, `?`, `[`, `]`) in `gateway_id` must
+        raise UnsafeStartupConfigError. Parametrized over the four characters
+        that Redis treats as glob metachars in SCAN patterns.
+        """
+        monkeypatch.delenv("EB_ALLOW_DEFAULT_GATEWAY_ID", raising=False)
+        config = _safe_config(gateway=GatewayConfig(gateway_id=bad_id))
+        with pytest.raises(UnsafeStartupConfigError, match="forbidden characters"):
+            _validate_startup_safety(config)

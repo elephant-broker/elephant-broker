@@ -326,6 +326,15 @@ class TestMiddlewareHeaderOverride:
     """Verify X-EB-Gateway-ID header takes precedence over default."""
 
     async def test_header_overrides_default(self):
+        """R2-P1.1: middleware now rejects mismatched X-EB-Gateway-ID with
+        403 when ``default_gateway_id`` is non-empty. The
+        "header-overrides-default" contract still holds when ``default`` is
+        empty (legacy single-tenant / dev fallback), so we flip
+        ``default_gateway_id=""`` here to exercise the
+        header-takes-precedence path. For the cross-tenant reject
+        contract post-R2-P1.1, see
+        ``tests/unit/api/middleware/test_gateway_reject_mismatch.py``.
+        """
         from elephantbroker.api.middleware.gateway import GatewayIdentityMiddleware
         from starlette.requests import Request
         from starlette.datastructures import Headers, State
@@ -336,7 +345,9 @@ class TestMiddlewareHeaderOverride:
             captured_gw["value"] = request.state.gateway_id
             return MagicMock()
 
-        middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="local")
+        # R2-P1.1: empty default disables the mismatch reject; header value
+        # still takes precedence per legacy contract for empty-default config.
+        middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="")
 
         # Build a minimal ASGI request with the gateway header
         scope = {
@@ -518,6 +529,20 @@ class TestPrometheusCounterWiring:
         ctx = MetricsContext("gw-test")
         # Should not raise
         ctx.inc_session_boundary("session_start")
+
+    def test_inc_session_boundary_uses_event_kwarg(self):
+        """TD-65 follow-up: the Prometheus label + helper param are named `event`
+        (not `action`) for consistency with the SESSION_BOUNDARY payload key.
+
+        If the rename is reverted, either (a) the `event=` kwarg below raises TypeError
+        because the param is back to `action`, or (b) the Counter label rejects the
+        value because it was declared with `action`. Either way the test fails, surfacing
+        the regression.
+        """
+        from elephantbroker.runtime.metrics import MetricsContext
+        ctx = MetricsContext("gw-test")
+        # Keyword form pins the parameter rename.
+        ctx.inc_session_boundary(event="session_end")
 
     def test_inc_goal_create_callable(self):
         from elephantbroker.runtime.metrics import MetricsContext

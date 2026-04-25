@@ -270,7 +270,7 @@ class SessionGoalStore:
                 session_id=session_id,
                 session_key=session_key,
                 payload={
-                    "action": "goals_flushed",
+                    "event": "goals_flushed",
                     "session_key": session_key,
                     "goals_flushed": count,
                     "goals_total": len(goals),

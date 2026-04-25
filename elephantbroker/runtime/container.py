@@ -111,6 +111,24 @@ def _validate_startup_safety(config: ElephantBrokerConfig) -> None:
             "For dev/test, set EB_ALLOW_DEFAULT_GATEWAY_ID=true to opt out."
         )
 
+    # --- A6: gateway_id must not contain Redis-key or scan-glob metacharacters ---
+    # (#1516 RESOLVED) Colons make 'eb:{gw}:...' Redis keys ambiguous with nested
+    # namespaces (gateway_id "gw:prod" prefix "eb:gw:prod" overlaps gateway_id
+    # "gw" key family "eb:gw:prod:..."). Glob metacharacters (* ? [ ]) propagate
+    # into RedisKeyBuilder.*_scan_pattern() outputs and would match other gateways'
+    # keys. RedisKeyBuilder remains permissive (defense in depth: validate at
+    # config load, trust at use site).
+    _FORBIDDEN_GW_CHARS = set(":*?[]")
+    invalid = _FORBIDDEN_GW_CHARS & set(gw_id)
+    if invalid:
+        raise UnsafeStartupConfigError(
+            f"Refusing to boot with gateway.gateway_id={gw_id!r}: contains "
+            f"forbidden characters {sorted(invalid)}. Colons create Redis-key "
+            f"namespace ambiguity; * ? [ ] propagate into SCAN patterns and "
+            f"would match other gateways' keys. Use only [a-zA-Z0-9_-] in "
+            f"gateway_id."
+        )
+
     # --- A4: neo4j_password must not be empty ---
     if not config.cognee.neo4j_password and os.environ.get("EB_DEV_MODE", "").lower() != "true":
         raise UnsafeStartupConfigError(
@@ -182,6 +200,11 @@ class RuntimeContainer:
 
         # Shared infrastructure
         self.redis = None  # async Redis client (created in from_config)
+        # OTEL LoggerProvider — held for shutdown (#1181 RESOLVED, TF-FN-019 G11).
+        # `setup_otel_logging()` returns (logger, provider); container retains the
+        # provider so close() can call provider.shutdown() and flush the
+        # BatchLogRecordProcessor buffer before SIGTERM drops the pod.
+        self.otel_logger_provider = None
 
         # Runtime modules (17)
         self.trace_ledger: TraceLedger | None = None
@@ -238,6 +261,10 @@ class RuntimeContainer:
         # Gateway identity infrastructure
         self.redis_keys: RedisKeyBuilder | None = None
         self.metrics_ctx: MetricsContext | None = None
+        # R2-P4 / #1505 RESOLVED: public gateway_id attribute for health
+        # endpoints + any other consumer that needs the boot-time tenant
+        # binding without reaching into config or private metrics state.
+        self.gateway_id: str = ""
 
     @classmethod
     async def from_config(
@@ -264,13 +291,23 @@ class RuntimeContainer:
         log_level = 15 if level_name == "VERBOSE" else getattr(logging, level_name, logging.INFO)
         logging.basicConfig(level=log_level)
 
-        # Configure Cognee SDK (graph/vector/LLM/embedding) before creating adapters
-        await configure_cognee(config.cognee, config.llm)
-
         # --- Gateway identity ---
+        # #1187 / TD-64 RESOLVED (R2-P1): extract gw_id BEFORE configure_cognee
+        # so the gateway id can be threaded into Cognee's vector-db config
+        # (populates Qdrant's per-tenant `database_name` field on every point
+        # payload, enabling cross-gateway dedup isolation downstream). Prior
+        # code ran configure_cognee first, when gw_id was still an unextracted
+        # attribute access on config.gateway — harmless order for other
+        # configure_cognee consumers but blocked the tenant-config threading.
         gw_id = config.gateway.gateway_id
         c.redis_keys = RedisKeyBuilder(gw_id)
         c.metrics_ctx = MetricsContext(gw_id)
+        # R2-P4 / #1505: bind public gateway_id on the container so
+        # /health and /health/ready can include it in the response.
+        c.gateway_id = gw_id
+
+        # Configure Cognee SDK (graph/vector/LLM/embedding) before creating adapters
+        await configure_cognee(config.cognee, config.llm, gateway_id=gw_id)
 
         # --- Shared infrastructure ---
         # Create async Redis client
@@ -289,7 +326,12 @@ class RuntimeContainer:
 
         # --- Adapters ---
         c.graph = GraphAdapter(config.cognee)
-        c.vector = VectorAdapter(config.cognee)
+        # #1187 / TD-64 RESOLVED (R2-P1): VectorAdapter receives gateway_id
+        # so `search_similar` can add a `database_name` FieldCondition to
+        # filter points by tenant. Paired with the configure_cognee
+        # `vector_db_name` threading above — write path stamps tenant id,
+        # read path filters on it.
+        c.vector = VectorAdapter(config.cognee, gateway_id=gw_id)
         c.embeddings = EmbeddingService(config.cognee)
         c.datasets = DatasetManager(config.cognee)
         c.pipeline_runner = PipelineRunner()
@@ -313,10 +355,16 @@ class RuntimeContainer:
 
         # --- Foundational (no adapter deps) ---
         # TraceLedger with optional OTEL log bridge (Phase 9)
+        # #1181 RESOLVED (TF-FN-019 G11): setup_otel_logging returns
+        # (logger, provider) when enabled; container retains provider for
+        # shutdown in close() so the BatchLogRecordProcessor buffer is
+        # flushed on SIGTERM.
         otel_logger = None
         try:
             from elephantbroker.runtime.observability import setup_otel_logging
-            otel_logger = setup_otel_logging(config.infra, gw_id)
+            result = setup_otel_logging(config.infra, gw_id)
+            if result is not None:
+                otel_logger, c.otel_logger_provider = result
         except Exception:
             pass
         c.trace_ledger = TraceLedger(
@@ -752,37 +800,49 @@ class RuntimeContainer:
     async def close(self) -> None:
         """Shut down all adapter connections."""
         if self.graph:
+            logger.info("Closing adapter: %s", "graph")
             await self.graph.close()
         if self.vector:
+            logger.info("Closing adapter: %s", "vector")
             await self.vector.close()
         if self.embeddings:
+            logger.info("Closing adapter: %s", "embeddings")
             await self.embeddings.close()
         if self.llm_client:
+            logger.info("Closing adapter: %s", "llm_client")
             await self.llm_client.close()
         if self.compaction_llm_client and self.compaction_llm_client is not self.llm_client:
+            logger.info("Closing adapter: %s", "compaction_llm_client")
             await self.compaction_llm_client.close()
         # Phase 5 cleanup
         if self.redis:
+            logger.info("Closing adapter: %s", "redis")
             try:
                 await self.redis.aclose()
             except Exception:
                 pass
         if self.rerank:
+            logger.info("Closing adapter: %s", "rerank")
             try:
                 await self.rerank.close()
             except Exception:
                 pass
         if self.procedure_audit:
+            logger.info("Closing adapter: %s", "procedure_audit")
             await self.procedure_audit.close()
         if self.session_goal_audit:
+            logger.info("Closing adapter: %s", "session_goal_audit")
             await self.session_goal_audit.close()
         # Phase 8 cleanup
         if self.org_override_store:
+            logger.info("Closing adapter: %s", "org_override_store")
             await self.org_override_store.close()
         if self.authority_store:
+            logger.info("Closing adapter: %s", "authority_store")
             await self.authority_store.close()
         # Phase 7 cleanup
         if self.hitl_client:
+            logger.info("Closing adapter: %s", "hitl_client")
             try:
                 await self.hitl_client.close()
             except Exception:
@@ -791,13 +851,25 @@ class RuntimeContainer:
         for store_attr in ("tuning_delta_store", "scoring_ledger_store", "consolidation_report_store"):
             store = getattr(self, store_attr, None)
             if store:
+                logger.info("Closing adapter: %s", store_attr)
                 try:
                     await store.close()
                 except Exception:
                     pass
         trace_qc = getattr(self, "trace_query_client", None)
         if trace_qc:
+            logger.info("Closing adapter: %s", "trace_query_client")
             try:
                 trace_qc.close()
+            except Exception:
+                pass
+        # OTEL LoggerProvider shutdown (#1181 RESOLVED, TF-FN-019 G11).
+        # Flushes the BatchLogRecordProcessor buffer so trace events emitted
+        # in the last ~5s of the pod's lifetime actually make it to ClickHouse
+        # instead of being dropped when the process exits.
+        if self.otel_logger_provider:
+            logger.info("Closing adapter: %s", "otel_logger_provider")
+            try:
+                self.otel_logger_provider.shutdown()
             except Exception:
                 pass

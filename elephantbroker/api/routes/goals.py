@@ -267,5 +267,19 @@ async def get_goal(goal_id: uuid.UUID, request: Request):
 @router.put("/{goal_id}")
 async def update_goal(goal_id: uuid.UUID, body: UpdateStatusRequest, request: Request):
     manager = get_goal_manager(request)
-    result = await manager.update_goal_status(goal_id, body.status, confidence=body.confidence)
+    # R2-P10 / #1188 RESOLVED: translate the runtime-layer KeyError
+    # ("Goal not found") to HTTP 404 at the route boundary. Pre-fix the
+    # KeyError propagated past the route, hit the generic Exception
+    # handler in error_handler_middleware, and surfaced as 500 — which
+    # confused both API consumers (looks like a server bug) and ops
+    # dashboards (alerts on 5xx). The runtime convention split is
+    # correct (mutation methods raise, collection getters return empty
+    # — see GoalManager docstrings); the route layer is the right
+    # place to bridge the convention to HTTP status codes.
+    try:
+        result = await manager.update_goal_status(
+            goal_id, body.status, confidence=body.confidence,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Goal not found")
     return result.model_dump(mode="json")

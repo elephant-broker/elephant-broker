@@ -84,18 +84,20 @@ class TestProcedureExecution:
 
 class TestProcedureDefinition:
     def test_valid_creation(self):
-        proc = ProcedureDefinition(name="Deploy process")
+        # R2-P2.1 #1146: is_manual_only=True required when activation_modes
+        # is empty (otherwise model_validator rejects).
+        proc = ProcedureDefinition(name="Deploy process", is_manual_only=True)
         assert proc.version == 1
         assert proc.steps == []
         assert proc.scope == Scope.SESSION
 
     def test_empty_name_rejected(self):
         with pytest.raises(ValidationError):
-            ProcedureDefinition(name="")
+            ProcedureDefinition(name="", is_manual_only=True)
 
     def test_json_round_trip(self):
         step = ProcedureStep(order=0, instruction="Do it")
-        proc = ProcedureDefinition(name="Test proc", steps=[step])
+        proc = ProcedureDefinition(name="Test proc", steps=[step], is_manual_only=True)
         data = proc.model_dump(mode="json")
         restored = ProcedureDefinition.model_validate(data)
         assert len(restored.steps) == 1
@@ -103,11 +105,13 @@ class TestProcedureDefinition:
 
     def test_activation_modes(self):
         act = ProcedureActivation(manual=True)
+        # Non-empty activation_modes → is_manual_only may stay False (default).
         proc = ProcedureDefinition(name="x", activation_modes=[act])
         assert len(proc.activation_modes) == 1
 
     def test_new_fields_default(self):
-        proc = ProcedureDefinition(name="x")
+        # R2-P2.1 #1146: is_manual_only=True needed to pass validator.
+        proc = ProcedureDefinition(name="x", is_manual_only=True)
         assert proc.activation_modes == []
         assert proc.required_evidence == []
         assert proc.red_line_bindings == []

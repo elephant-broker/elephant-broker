@@ -101,12 +101,22 @@ async def session_start(body: SessionStartRequest, request: Request):
                 logger.warning("Subagent parent mapping failed: %s", exc)
 
     # 4. Emit trace event with full identity
+    # TD-65: session_id is promoted to a top-level TraceEvent field so POST /trace/query
+    # can filter by session_id. body.session_id is typed str but production TS plugins
+    # send UUID strings; we tolerate non-UUID strings (e.g., older test fixtures, dev
+    # smoke tests) by falling back to None on parse failure — the raw string is still
+    # preserved in the payload dict.
+    try:
+        parsed_sid = uuid.UUID(body.session_id) if body.session_id else None
+    except (ValueError, TypeError):
+        parsed_sid = None
     trace_event = TraceEvent(
         event_type=TraceEventType.SESSION_BOUNDARY,
         gateway_id=gw_id,
         agent_key=agent_key,
         agent_id=agent_id,
         session_key=body.session_key,
+        session_id=parsed_sid,
         payload={
             "session_key": body.session_key,
             "session_id": body.session_id,
@@ -118,6 +128,16 @@ async def session_start(body: SessionStartRequest, request: Request):
     trace_ledger = getattr(container, "trace_ledger", None)
     if trace_ledger:
         await trace_ledger.append_event(trace_event)
+
+    # TD-65 follow-up: increment eb_session_boundary_total{event="session_start"}
+    # here (not in ContextLifecycle.bootstrap) so the metric fires on every
+    # HTTP session-start signal regardless of context-engine bootstrap state,
+    # pairing 1:1 with the session_end increment in lifecycle.session_end.
+    # Observer Layer B/C reverify confirmed the start time series was missing
+    # before this change.
+    metrics = getattr(container, "metrics_ctx", None)
+    if metrics:
+        metrics.inc_session_boundary("session_start")
 
     logger.info("Session started: key=%s, id=%s, agent_key=%s", body.session_key, body.session_id, agent_key)
 
@@ -212,6 +232,10 @@ async def session_end(body: SessionEndRequest, request: Request):
     if gw_id is None:
         raise HTTPException(status_code=500, detail="gateway_id middleware not installed")
     agent_key = body.agent_key or getattr(request.state, "agent_key", "")
+    # SessionEndRequest has no agent_id field; pull from middleware state so
+    # TraceEvent carries the same identity as the /start emission (observer
+    # re-verify catch — TD-65 follow-up).
+    agent_id = getattr(request.state, "agent_id", "")
 
     # Force-flush buffer if available.
     # In FULL mode, the P1 gate on /memory/ingest-messages skips buffer.add_messages(),
@@ -244,7 +268,10 @@ async def session_end(body: SessionEndRequest, request: Request):
     context_lifecycle = getattr(container, "context_lifecycle", None)
     if context_lifecycle:
         try:
-            cleanup = await context_lifecycle.session_end(body.session_key, body.session_id)
+            cleanup = await context_lifecycle.session_end(
+                body.session_key, body.session_id,
+                agent_id=agent_id, agent_key=agent_key,
+            )
             if isinstance(cleanup, dict):
                 goals_flushed = cleanup.get("goals_flushed", 0)
         except Exception as exc:
@@ -262,11 +289,19 @@ async def session_end(body: SessionEndRequest, request: Request):
                 logger.warning("Session goal flush failed: %s", exc)
 
     # Emit trace event
+    # TD-65: session_id is promoted to a top-level TraceEvent field so POST /trace/query
+    # can filter by session_id. See /sessions/start for the non-UUID fallback rationale.
+    try:
+        parsed_sid = uuid.UUID(body.session_id) if body.session_id else None
+    except (ValueError, TypeError):
+        parsed_sid = None
     trace_event = TraceEvent(
         event_type=TraceEventType.SESSION_BOUNDARY,
         gateway_id=gw_id,
         agent_key=agent_key,
+        agent_id=agent_id,
         session_key=body.session_key,
+        session_id=parsed_sid,
         payload={
             "session_key": body.session_key,
             "session_id": body.session_id,
