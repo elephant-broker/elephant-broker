@@ -327,8 +327,10 @@ tenant's state, not just the failing one. The runtime already scopes all
 persistent state by `gateway_id`:
 
 - **Neo4j:** every node carries a `gateway_id` property and every Cypher query MUST include `WHERE ... gateway_id = $gateway_id` (strict, no IS NULL fallback). See `CLAUDE.md § Gateway Identity`.
-- **Qdrant:** dataset names are `{gateway_id}__{base}` via `cognee.add(dataset_name=...)`. Collections are per-gateway.
+- **Qdrant:** dataset names are `{gateway_id}__{base}` via `cognee.add(dataset_name=...)`. Collections are per-gateway. Per-tenant payloads carry `database_name=<gateway_id>` (R2-P1) and `VectorAdapter.search_similar` automatically filters on it.
 - **Redis:** all keys are prefixed `eb:{gateway_id}:` via `RedisKeyBuilder(gateway_id)`. Never hardcode `f"eb:..."`.
+
+**Single-tenant-per-process enforcement (R2-P1.1):** `GatewayIdentityMiddleware` rejects any inbound HTTP request whose `X-EB-Gateway-ID` header does not match the container's startup `EB_GATEWAY_ID` with HTTP 403. Multi-gateway deployment requires multiple EB processes — one per gateway — because Cognee's process-singleton Qdrant adapter binds `database_name` once at config time, making multi-gateway-per-process fundamentally unworkable. **Override only via `EB_ALLOW_CROSS_GATEWAY_HEADER=true` for L2 testing — NEVER set in production.** See `runtime/middleware/gateway.py` and `tests/unit/api/middleware/test_gateway_reject_mismatch.py`.
 
 To wipe ONE gateway's state without touching neighbors, use these three
 commands (substitute your failing `$GW`):

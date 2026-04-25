@@ -27,7 +27,11 @@ def _make_app(default_gw: str = "local"):
 
 @pytest.mark.asyncio
 async def test_extracts_all_four_headers():
-    app = _make_app()
+    # R2-P1.1: matching default_gw to header value so the new mismatch
+    # reject does not fire — this test exercises the extraction path,
+    # not the reject path. The reject path is covered separately in
+    # `test_gateway_reject_mismatch.py`.
+    app = _make_app("gw-test")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/echo", headers={
@@ -67,7 +71,10 @@ async def test_sets_empty_string_when_header_missing_and_no_default():
 
 @pytest.mark.asyncio
 async def test_passes_through_to_next_handler():
-    app = _make_app()
+    # R2-P1.1: matching default to header so the new mismatch reject
+    # does not fire — this is a passthrough sanity test, not a reject
+    # test.
+    app = _make_app("gw-1")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/echo", headers={"X-EB-Gateway-ID": "gw-1"})
@@ -80,6 +87,9 @@ async def test_extracts_fifth_actor_id_header():
 
     CLAUDE.md Gateway Identity section formerly listed 4 headers; this test + D16
     doc-fix brings it in sync with the shipped code at gateway.py:37.
+
+    R2-P1.1: this test does NOT send X-EB-Gateway-ID, so the new mismatch
+    reject does not fire — the default-fallback path is exercised.
     """
     app = _make_app()
     transport = ASGITransport(app=app)
@@ -121,17 +131,21 @@ async def test_agent_key_follows_expected_format_convention():
     convention for `X-EB-Agent-Key`.
 
     CLAUDE.md Gateway Identity section defines `agent_key = {gateway_id}:{agentId}`.
-    The middleware does NOT validate/enforce this — it extracts headers verbatim
-    (that's #1493 territory, separately pinned). This test documents the shape a
-    compliant caller is expected to send and verifies that when the caller does
-    follow the convention, the three state fields (`gateway_id`, `agent_id`,
-    `agent_key`) are internally consistent on the server side.
+    The middleware does NOT validate/enforce the agent_key shape itself — it
+    extracts agent_key verbatim. (Pre-R2-P1.1 the gateway_id header was also
+    extracted verbatim; that part is now bounded by the mismatch reject —
+    see `test_gateway_reject_mismatch.py`.) This test documents the
+    agent_key shape a compliant caller is expected to send and verifies
+    that when the caller does follow the convention, the three state
+    fields (`gateway_id`, `agent_id`, `agent_key`) are internally
+    consistent on the server side.
 
     If this invariant ever ships with server-side synthesis (e.g., middleware
     deriving `agent_key` from `gateway_id` + `agent_id` when absent), update
     this test AND the CLAUDE.md Gateway Identity section.
     """
-    app = _make_app()
+    # R2-P1.1: matching default to header to avoid mismatch reject.
+    app = _make_app("gw-prod")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/echo", headers={
@@ -148,27 +162,46 @@ async def test_agent_key_follows_expected_format_convention():
 
 
 @pytest.mark.asyncio
-async def test_headers_accept_injection_payloads_documented_prod_risk():
-    """Pins PROD risk #1493 — GatewayIdentityMiddleware does NO validation on X-EB-*
-    headers. Cypher-injection payloads, null bytes, and megabyte-scale string headers
-    all pass through into request.state verbatim.
+async def test_injection_gateway_id_header_rejected_post_R2P1_1_fix(monkeypatch):
+    """G7 FLIPPED (#1493 RESOLVED — R2-P1.1): pre-R2-P1.1 the middleware
+    silently accepted ANY ``X-EB-Gateway-ID`` value (including
+    Cypher-injection payloads, null-byte sequences, megabyte-scale
+    strings) and stamped it verbatim onto ``request.state.gateway_id``.
+    R2-P1.1 added boundary-level enforcement: any header that does not
+    equal the container's startup gateway_id is rejected with 403,
+    closing the cross-tenant-via-header bypass.
 
-    Downstream RedisKeyBuilder + MetricsContext + Cypher-stamp call sites have their
-    own character-set assumptions; a sanitizing pass here would be the safer place to
-    enforce them. If validation is added, update this test and #1493 in the plan.
+    This subsumes the original #1493 PROD pin: an injection payload
+    in ``X-EB-Gateway-ID`` is now blocked at the boundary, never
+    reaching ``request.state``. (The other two headers covered by the
+    old pin — ``X-EB-Agent-Key`` and ``X-EB-Session-Key`` — are still
+    accepted verbatim; they're not gateway-isolation keys, just
+    request-context tags. Their downstream consumers — A6 startup
+    safety on gateway_id; RedisKeyBuilder's char checks; etc — apply
+    sanitization at use site. A future #1493 follow-up could add a
+    suffix pass for those two headers, but it's not the
+    cross-gateway-bypass surface the original pin documented.)
+
+    Pre-fix: this test pinned `_make_app()` + injection-payload
+    `X-EB-Gateway-ID` header → 200 OK + value stamped on
+    ``request.state``. Post-fix: same input → 403 reject because the
+    injection payload is not equal to the container's
+    ``default_gateway_id``.
     """
-    app = _make_app()
+    monkeypatch.delenv("EB_ALLOW_CROSS_GATEWAY_HEADER", raising=False)
+    app = _make_app("local")  # default_gateway_id="local"
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/echo", headers={
             "X-EB-Gateway-ID": "'; DROP TABLE users; --",
-            # ASCII-only control chars (proves absence of null-byte rejection —
-            # httpx normalizes \x00 so we test the next-nearest observable case)
             "X-EB-Agent-Key": "\x01\x02\x03",
             "X-EB-Session-Key": "a" * 1000,
         })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["gateway_id"] == "'; DROP TABLE users; --"
-        assert data["agent_key"] == "\x01\x02\x03"
-        assert data["session_key"] == "a" * 1000
+    # R2-P1.1: injection payload != "local" → 403 reject.
+    assert resp.status_code == 403
+    body = resp.json()
+    assert "Cross-gateway request rejected" in body["detail"]
+    # The non-gateway-isolation headers (agent_key, session_key) never
+    # reached request.state because the gateway-mismatch reject fired
+    # first — proves the injection payload is no longer observable from
+    # the rest of the request lifecycle.

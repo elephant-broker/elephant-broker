@@ -382,7 +382,16 @@ class TestMiddlewareDefaultGateway:
         assert middleware._default == "local"
 
     async def test_header_overrides_default(self):
-        """Explicit header value takes precedence over default."""
+        """Explicit header value takes precedence over default.
+
+        R2-P1.1: middleware now rejects mismatched X-EB-Gateway-ID with 403.
+        The "header overrides default" contract still holds when ``default``
+        is empty (legacy single-tenant / dev fallback), since the reject
+        branch requires ``self._default`` to be truthy. We flip the default
+        to "" here so the test continues to exercise the
+        header-takes-precedence path. For the cross-tenant reject contract
+        post-R2-P1.1, see ``test_gateway_reject_mismatch.py``.
+        """
         from elephantbroker.api.middleware.gateway import GatewayIdentityMiddleware
         from starlette.requests import Request
         from starlette.datastructures import State
@@ -393,7 +402,9 @@ class TestMiddlewareDefaultGateway:
             captured_gw["value"] = request.state.gateway_id
             return MagicMock()
 
-        middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="local")
+        # R2-P1.1: empty default disables the mismatch reject; header value
+        # still takes precedence per legacy contract for empty-default config.
+        middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="")
         scope = {
             "type": "http", "method": "GET", "path": "/health",
             "headers": [(b"x-eb-gateway-id", b"gw-explicit")],
