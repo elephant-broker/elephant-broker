@@ -155,15 +155,25 @@ class TestEmbeddingService:
         ))
         assert svc._endpoint == "http://test:8811/v1"
 
-    async def test_embed_batch_missing_data_key_raises_keyerror(self):
-        """G5: Malformed responses (no "data" key) raise uncaught KeyError at
-        response.json()["data"].
+    async def test_embed_batch_returns_empty_on_malformed_response_post_1156_fix(self, caplog):
+        """G5 FLIPPED (#1156 RESOLVED — R2-P8): Malformed responses (no
+        ``data`` key, non-dict items, missing ``index`` / ``embedding``
+        sub-keys) no longer raise uncaught ``KeyError`` / ``TypeError``.
 
-        Pins documented GAP #1156 -- the caller must handle KeyError. EmbeddingService
-        intentionally does NOT swallow or translate the error. If a future change adds
-        defensive handling here (e.g., translate to a typed exception), update this
-        test and the TF-FN-009 plan.
+        Pre-fix: ``embed_batch`` did direct ``response.json()["data"]``
+        access — a transient LLM API glitch that returned
+        ``{"object": "list"}`` (no ``data`` key) crashed the whole
+        ingest / retrieval pipeline with an uncaught KeyError.
+
+        Post-fix: the parsing block is wrapped in
+        ``try/except (KeyError, TypeError)`` and returns an **empty
+        list** as a graceful-degradation safety net, with a WARNING log
+        naming the underlying error and the texts batch size.
+        Downstream callers (turn-ingest, working-set scoring, rerank,
+        consolidation) skip the work for the affected batch and retry
+        next call — pipeline survives transient upstream errors.
         """
+        import logging
         svc = _make_service()
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         resp = MagicMock(spec=httpx.Response)
@@ -172,5 +182,37 @@ class TestEmbeddingService:
         resp.json.return_value = {"object": "list"}  # no "data" key
         mock_client.post.return_value = resp
         svc._client = mock_client
-        with pytest.raises(KeyError):
-            await svc.embed_batch(["x"])
+
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.runtime.adapters.cognee.embeddings"):
+            result = await svc.embed_batch(["x"])
+
+        # R2-P8: graceful return of [] (instead of KeyError raise).
+        assert result == []
+        # WARNING log emitted with diagnostic context.
+        assert "embed_batch malformed response" in caplog.text
+        assert "graceful-degradation safety net" in caplog.text
+        assert "#1156" in caplog.text
+
+    async def test_embed_batch_returns_empty_on_malformed_item_shape_post_1156_fix(self, caplog):
+        """G5-bis (R2-P8): the safety net also catches malformed
+        per-item shapes — the response has the ``data`` key but
+        individual items are missing ``index`` (TypeError on sort) or
+        ``embedding`` (KeyError in comprehension). Both flow through the
+        same except branch.
+        """
+        import logging
+        svc = _make_service()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        # data key present but item missing "embedding"
+        resp.json.return_value = {"data": [{"index": 0}]}
+        mock_client.post.return_value = resp
+        svc._client = mock_client
+
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.runtime.adapters.cognee.embeddings"):
+            result = await svc.embed_batch(["x"])
+
+        assert result == []
+        assert "embed_batch malformed response" in caplog.text
