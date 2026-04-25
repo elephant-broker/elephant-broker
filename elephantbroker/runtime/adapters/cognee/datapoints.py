@@ -195,6 +195,20 @@ class GoalDataPoint(DataPoint):
     # Phase 7: auto-goal tracking metadata (source_type, source_system, etc.)
     # Named goal_meta to avoid collision with DataPoint.metadata (Cognee index_fields)
     # Type is dict (not str) because Neo4j round-trips JSON strings as native dicts
+    # via clean_graph_props (`{`-prefix deserialization at runtime/graph_utils.py).
+    #
+    # **Storage str-coercion (TF-FN-020 G3 defensive note, R2-P3):**
+    # ``GoalDataPoint.from_schema`` stores ``dict(goal.metadata)`` raw, but the
+    # downstream ``GoalDataPoint.to_schema`` at line 226-227 explicitly coerces
+    # every value to ``str`` (``goal_metadata = {str(k): str(v) for k, v in ...}``)
+    # because the destination schema is ``GoalState.metadata: dict[str, str]``.
+    # Round-trip consequence: ``int`` / ``float`` / ``bool`` / nested-dict values
+    # passed via ``GoalState.metadata`` survive the storage hop, but reconstruct
+    # as their ``str`` representation (e.g., ``42`` → ``"42"``, ``True`` → ``"True"``).
+    # If a future caller needs preserved-type metadata round-trip, change
+    # ``GoalState.metadata`` from ``dict[str, str]`` to ``dict[str, Any]``
+    # AND drop the ``str(v)`` coercion at line 227. Or add a separate
+    # ``goal_metadata_typed`` field that bypasses str-coercion.
     goal_meta: dict[str, Any] = {}
     metadata: dict[str, Any] = {"index_fields": ["title", "description"]}
 

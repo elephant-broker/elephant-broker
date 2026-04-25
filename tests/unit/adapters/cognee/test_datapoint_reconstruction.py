@@ -143,22 +143,28 @@ class TestGoalDataPointJsonDictPipeline:
 
 class TestProcedureDataPointJsonStringPipeline:
     def test_procedure_datapoint_steps_json_pipeline_bypasses_clean_graph_props(self):
-        """G4 (TF-FN-020): ``ProcedureDataPoint`` uses the ``*_json: str``
-        workaround pattern (``steps_json`` at ``datapoints.py:265``,
-        plus ``red_line_bindings_json`` and ``approval_requirements_json``).
-        The DataPoint field type is ``str`` and the class's own
-        ``to_schema()`` at ``datapoints.py:~295`` explicitly calls
+        """G4 (TF-FN-020 — UPDATED post R2-P3): ``ProcedureDataPoint`` uses
+        the ``*_json: str`` workaround pattern (``steps_json`` at
+        ``datapoints.py:265``, plus ``red_line_bindings_json`` and
+        ``approval_requirements_json``). The DataPoint field type is
+        ``str`` and the class's own ``to_schema()`` explicitly calls
         ``json.loads()`` on each.
 
-        Paired with G1 (``test_json_array_string_NOT_deserialized_pin_1163``):
-        ``clean_graph_props`` sees a JSON array string (``[``-prefix) and
-        does NOT deserialise it — exactly what ProcedureDataPoint
-        depends on. If G1 ever flips (graph_utils starts deserialising
-        ``[``-prefix), this pipeline would break: ``steps_json`` arrives
-        as a list instead of a string, and ``ProcedureDataPoint(**props)``
-        fails type validation.
+        **R2-P3 contract update:** previously the bypass relied on
+        ``clean_graph_props`` deserialising ONLY ``{``-prefix strings
+        (TF-FN-020 G1 pin). Post-#1163 fix, ``clean_graph_props`` now
+        deserialises both ``{`` AND ``[`` prefixes BUT explicitly opts
+        out of any key whose name ends in ``_json``. So the
+        ProcedureDataPoint contract is preserved by the explicit
+        ``*_json`` skip-suffix rule rather than the prior
+        list-deserialisation gap. Paired with the new
+        ``test_clean_graph_props_skips_json_suffix_keys_for_strings`` in
+        ``test_graph_utils.py`` which pins the selective rule.
 
-        So G1 + G4 together pin both sides of the implicit contract.
+        If a future refactor drops the ``*_json`` opt-out OR renames the
+        ``steps_json`` field to something without that suffix, this
+        pipeline breaks (the str-typed field receives a list, raising
+        ValidationError on ``ProcedureDataPoint(**props)``).
         """
         eb_id = str(uuid.uuid4())
         now = datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC)

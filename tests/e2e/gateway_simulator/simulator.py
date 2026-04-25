@@ -134,8 +134,10 @@ class OpenClawGatewaySimulator:
 
     async def simulate_procedure_create(self, name: str, steps: list[dict] | None = None):
         """Simulate POST /procedures."""
+        # #1146: is_manual_only=True required by R2-P2.1 validator; matches
+        # factories.py make_procedure_definition default for test procedures.
         r = await self.client.post("/procedures/", json={
-            "name": name, "steps": steps or [],
+            "name": name, "steps": steps or [], "is_manual_only": True,
         })
         return r.json()
 
