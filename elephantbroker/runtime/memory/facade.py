@@ -220,6 +220,23 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         profile_name: str = "default", auto_recall: bool = False,
         caller_gateway_id: str = "",
     ) -> list[FactAssertion]:
+        # R2-P9 / #1166 RESOLVED: ``min_score`` is intentionally inert on
+        # the facade fallback path — it has no profile-driven scoring
+        # framework. Real score-filtering lives behind
+        # ``RetrievalOrchestrator`` (Phase 4) which is invoked when
+        # ``profile_name`` is supplied to the route layer. To avoid
+        # callers silently expecting filtering, emit a one-shot WARNING
+        # the first time a non-zero ``min_score`` is supplied to a
+        # given facade instance. Once-per-instance flag prevents log
+        # flood under high-throughput callers.
+        if min_score > 0.0 and not getattr(self, "_min_score_warned", False):
+            self._log.warning(
+                "facade.search min_score=%.2f ignored — facade fallback path has no "
+                "profile-driven scoring. Pass profile_name to enable RetrievalOrchestrator "
+                "scoring + min_score filtering. (Logged once per facade instance.)",
+                min_score,
+            )
+            self._min_score_warned = True
         results: dict[str, FactAssertion] = {}
 
         # Stage 1: Semantic — Cognee graph-aware search
@@ -391,10 +408,18 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             conditions.append("f.session_key = $session_key")
             params["session_key"] = session_key
         where = " AND ".join(conditions)
+        # R2-P9 / #1177 RESOLVED: drop the ``OPTIONAL MATCH (f)-[r]->(target)``
+        # + ``collect({type, target})`` clauses. The previous shape collected
+        # relations on every record but the consumer at search() :265-274
+        # reads only ``rec["props"]`` — every relations tuple was discarded
+        # in Python after a full Cypher round-trip. Removing the OPTIONAL
+        # MATCH cuts the Neo4j work to a single label scan + WHERE filter.
+        # If a future feature wires relations into the FactAssertion surface,
+        # restore the collect() clause and update the schema in the same
+        # commit.
         cypher = (
             f"MATCH (f:FactDataPoint) WHERE {where} "
-            "OPTIONAL MATCH (f)-[r]->(target) "
-            "RETURN properties(f) AS props, collect({type: type(r), target: properties(target)}) AS relations "
+            "RETURN properties(f) AS props "
             "LIMIT $limit"
         )
         return cypher, params
@@ -983,6 +1008,23 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
     @traced
     async def decay(self, fact_id: uuid.UUID, factor: float) -> FactAssertion:
+        # R2-P9 / #1184 RESOLVED: reject factor outside ``[0.0, 1.0]``.
+        # Pre-fix the body computed ``max(0.0, min(1.0, fact.confidence
+        # * factor))`` — a caller passing factor>1.0 got back a fact
+        # whose confidence had been multiplied UP and then clamped at
+        # 1.0, which contradicted the function name ("decay" implies
+        # monotonic decrease). Caller audit (researcher's R2-P9 brief):
+        # the consolidation pipeline only ever passes factor < 1.0,
+        # so explicit validation here is a no-op for the current
+        # callers and a guardrail for future ones. Use
+        # ``promote_scope`` / a new ``boost`` API for confidence
+        # increases — don't overload decay.
+        if not (0.0 <= factor <= 1.0):
+            raise ValueError(
+                f"decay factor must be in [0.0, 1.0], got {factor}. "
+                "Confidence increases require a separate API; decay is "
+                "monotonic-decrease only."
+            )
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")

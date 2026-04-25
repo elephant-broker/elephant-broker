@@ -1,21 +1,20 @@
-"""TF-FN-019 G8 — MemoryStoreFacade.search() structural Cypher collects
-relations but the facade discards them.
+"""TF-FN-019 G8 FLIPPED — MemoryStoreFacade.search() structural Cypher
+no longer collects relations (#1177 RESOLVED — R2-P9).
 
-PROD #1177 pin. The structural query in ``_build_search_cypher()``
-(facade.py:385-390) returns ``collect({type: type(r), target: properties(target)})
-AS relations`` alongside ``properties(f) AS props``. The search() consumer
-at facade.py:~265-274 only reads ``rec["props"]`` and never touches
-``rec["relations"]``.
+Pre-fix: the structural query in ``_build_structural_query()``
+(facade.py around 393-399) emitted
+``OPTIONAL MATCH (f)-[r]->(target) ... collect({type, target}) AS
+relations`` alongside ``properties(f) AS props``. The
+``search()`` consumer at facade.py read only ``rec["props"]`` and
+discarded ``rec["relations"]`` — every relation tuple cost a Neo4j
+round-trip without reaching Python.
 
-Two issues:
-1. The database wastes cycles collecting relations that never reach Python.
-2. A consumer expecting relations (e.g., to build a hierarchy) would need
-   to either make a second round-trip or change the search contract.
-
-Pin the dead-relations behavior so a future fix that either (a) removes
-``collect(...)`` from the Cypher or (b) propagates relations to the
-FactAssertion surface will flip this test and force an explicit contract
-change.
+Post-R2-P9: the OPTIONAL MATCH + collect() are gone. The Cypher is
+now a single ``MATCH (f:FactDataPoint) WHERE ... RETURN
+properties(f) AS props LIMIT $limit`` — same shape the consumer
+already used. If a future feature wires relations into the
+FactAssertion surface, restore the collect() clause and update the
+schema in the same commit (this test will surface the regression).
 """
 from __future__ import annotations
 
@@ -30,17 +29,11 @@ from elephantbroker.schemas.base import Scope
 from tests.fixtures.factories import make_fact_assertion
 
 
-async def test_structural_query_collects_relations_but_facade_discards_them():
-    """G8 (#1177): the structural search Cypher collects `relations` but
-    the Python search consumer reads only `props`, so every relation
-    tuple the DB produces is thrown away.
-
-    Strategy: mock `graph.query_cypher` to return records carrying BOTH
-    `props` and `relations`. Assert the returned FactAssertion list has
-    no relations-derived data — FactAssertion has no place for relations
-    today. The assertion is structural: the schema has no
-    `.relations` / `.related_*` field, and nothing in the return pipeline
-    would know to emit one.
+async def test_search_structural_cypher_does_not_collect_relations_post_R2P9_fix():
+    """G8 FLIPPED (#1177 RESOLVED — R2-P9): the structural search Cypher
+    no longer contains ``OPTIONAL MATCH`` or ``collect(`` — the
+    relation-tuple collection that the consumer always discarded is
+    gone, cutting the Neo4j work to a label scan + WHERE filter.
     """
     graph = AsyncMock()
     vector = AsyncMock()
@@ -50,12 +43,6 @@ async def test_structural_query_collects_relations_but_facade_discards_them():
         graph, vector, embeddings, TraceLedger(), dataset_name="t",
     )
     fact = make_fact_assertion()
-    # Carefully crafted `relations` list — would be meaningful data if
-    # consumed. Asserting that it's discarded is the point.
-    relations_payload = [
-        {"type": "SERVES_GOAL", "target": {"eb_id": str(uuid.uuid4()), "title": "goal-a"}},
-        {"type": "ABOUT_ACTOR", "target": {"eb_id": str(uuid.uuid4()), "display_name": "actor-b"}},
-    ]
     graph.query_cypher = AsyncMock(return_value=[{
         "props": {
             "eb_id": str(fact.id), "text": fact.text, "category": "general",
@@ -63,18 +50,23 @@ async def test_structural_query_collects_relations_but_facade_discards_them():
             "eb_updated_at": 0, "use_count": 0, "successful_use_count": 0,
             "provenance_refs": [], "target_actor_ids": [], "goal_ids": [],
         },
-        "relations": relations_payload,
     }])
-    results = await facade.search("q", scope=Scope.SESSION)
-    assert len(results) == 1
-    returned_fact = results[0]
-    # FactAssertion has no field that could carry arbitrary relation tuples;
-    # verify structurally: no attribute named `relations`, and the sibling
-    # fields that COULD carry related-entity ids (target_actor_ids,
-    # goal_ids) are empty because they were not populated from relations.
-    assert not hasattr(returned_fact, "relations"), (
-        "FactAssertion gained a `relations` field — relations are no "
-        "longer discarded. Update this test and #1177."
+    await facade.search("q", scope=Scope.SESSION)
+    # query_cypher was called — extract the Cypher string from the call args.
+    call_args = graph.query_cypher.call_args
+    cypher = call_args.args[0] if call_args.args else call_args.kwargs.get("cypher", "")
+
+    # Post-fix: no OPTIONAL MATCH, no collect( — the slim shape only.
+    assert "OPTIONAL MATCH" not in cypher, (
+        "Structural search Cypher still contains OPTIONAL MATCH — the "
+        "relation-collect was supposed to be dropped in R2-P9. If a "
+        "future feature wired relations into FactAssertion, update this "
+        "test and #1177 / TF-FN-019 G8."
     )
-    assert returned_fact.target_actor_ids == []
-    assert returned_fact.goal_ids == []
+    assert "collect(" not in cypher, (
+        "Structural search Cypher still contains collect( — the relation-"
+        "tuple collection was supposed to be dropped in R2-P9."
+    )
+    # Defensive: the slim shape MUST still RETURN properties(f) AS props
+    # for the consumer at search() to work.
+    assert "properties(f) AS props" in cypher

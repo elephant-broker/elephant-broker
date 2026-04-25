@@ -116,19 +116,22 @@ def test_effective_short_name_or_id_contract_and_padded_alternative():
 # G3 #1166 — facade.search(min_score=...) parameter is DEAD
 # ---------------------------------------------------------------------------
 
-async def test_facade_search_min_score_parameter_is_dead():
-    """G3 (#1166): ``MemoryStoreFacade.search()`` accepts a ``min_score``
-    parameter (facade.py:207) but the function body never reads it.
+async def test_facade_search_min_score_logged_but_ignored_post_R2P9_fix(caplog):
+    """G3 FLIPPED (#1166 RESOLVED — R2-P9): ``MemoryStoreFacade.search()``
+    still accepts ``min_score`` (facade fallback path has no profile-
+    driven scoring framework — that lives behind
+    ``RetrievalOrchestrator``), but a non-zero ``min_score`` now emits a
+    one-shot WARNING log directing the caller to pass ``profile_name``
+    for real filtering.
 
-    The structural fallback query uses no similarity score filter; the
-    semantic stage depends on Cognee which has its own score threshold.
-    Callers passing ``min_score=0.9`` get back the same results as
-    callers passing ``min_score=0.0``.
-
-    Pin: passing min_score=0.99 vs min_score=0.0 against the same mock
-    dataset returns the same number of facts. Fix would either wire
-    min_score to a score-filter step or remove the dead parameter.
+    Pre-fix: the parameter was silently ignored — callers passing 0.99
+    got the same results as callers passing 0.0 with no diagnostic.
+    Post-fix: the warning surfaces the gap once per facade instance
+    (flag-protected to avoid log flood under high-throughput callers).
+    Subsequent calls with ``min_score>0`` from the same facade are
+    silent.
     """
+    import logging
     graph = AsyncMock()
     vector = AsyncMock()
     embeddings = AsyncMock()
@@ -144,16 +147,63 @@ async def test_facade_search_min_score_parameter_is_dead():
             "eb_updated_at": 0, "use_count": 0, "successful_use_count": 0,
             "provenance_refs": [], "target_actor_ids": [], "goal_ids": [],
         },
-        "relations": [],
     }])
-    # High min_score and low min_score should yield the same count — proof
-    # that the parameter is unused.
-    high = await facade.search("q", scope=Scope.SESSION, min_score=0.99)
-    low = await facade.search("q", scope=Scope.SESSION, min_score=0.0)
-    assert len(high) == len(low), (
-        f"min_score appears to filter results ({len(high)} vs {len(low)}) — "
-        "the dead-parameter pin is obsolete; update this test and #1166."
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.memory.facade"):
+        high = await facade.search("q", scope=Scope.SESSION, min_score=0.99)
+        # Second call with min_score>0 must NOT re-warn (once-per-instance).
+        caplog.clear()
+        await facade.search("q", scope=Scope.SESSION, min_score=0.5)
+        # min_score=0 path also stays silent.
+        await facade.search("q", scope=Scope.SESSION, min_score=0.0)
+
+    # Filter to ONLY min_score-related warnings — the facade emits other
+    # unrelated WARNs (e.g., "Batch fetch of cognee_data_ids failed" from
+    # the search() consumer when the mock dataset can't fulfill the
+    # batch-fetch path) which would falsely fail a blanket
+    # `new_warnings == []` assertion. The once-per-instance flag we're
+    # pinning is specifically about the min_score gate, not about
+    # silencing every WARN emitted from the facade module.
+    new_min_score_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "min_score" in r.getMessage().lower()
+    ]
+    assert new_min_score_warnings == [], (
+        f"Expected silent subsequent calls (min_score-related only); "
+        f"got {len(new_min_score_warnings)} new min_score WARNs: "
+        f"{[r.getMessage() for r in new_min_score_warnings]}"
     )
+    # The instance flag is set after the first non-zero call.
+    assert getattr(facade, "_min_score_warned", False) is True
+    # The first call's warning must contain the documented hint.
+    # (caplog.clear was called between calls; check the original message
+    # via the facade's log adapter is hard to retrieve, so we just verify
+    # the flag was flipped which proves the WARN branch ran.)
+
+
+async def test_facade_search_min_score_warns_on_first_nonzero_call_post_R2P9_fix(caplog):
+    """G3-bis (R2-P9): the first call with ``min_score>0`` against a
+    fresh facade emits the documented WARN. Pins the message contents
+    so a future log refactor that drops the ``profile_name`` hint
+    surfaces here.
+    """
+    import logging
+    graph = AsyncMock()
+    vector = AsyncMock()
+    embeddings = AsyncMock()
+    embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+    facade = MemoryStoreFacade(
+        graph, vector, embeddings, TraceLedger(), dataset_name="t",
+    )
+    graph.query_cypher = AsyncMock(return_value=[])
+
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.memory.facade"):
+        await facade.search("q", scope=Scope.SESSION, min_score=0.7)
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("min_score=0.70 ignored" in m for m in msgs), (
+        f"Expected min_score=0.70 ignored warning; got: {msgs}"
+    )
+    assert any("Pass profile_name to enable RetrievalOrchestrator" in m for m in msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -189,21 +239,19 @@ def test_max_outcome_rejects_non_guardoutcome_inputs():
 # G5 #1184 — decay(factor > 1.0) increases then clamps
 # ---------------------------------------------------------------------------
 
-async def test_facade_decay_with_factor_above_1_increases_then_clamps():
-    """G5 (#1184): ``MemoryStoreFacade.decay(fact_id, factor)``
-    (facade.py:964 region) computes
-    ``max(0.0, min(1.0, fact.confidence * factor))``.
+async def test_decay_rejects_factor_above_one_post_R2P9_fix():
+    """G5 FLIPPED (#1184 RESOLVED — R2-P9): ``MemoryStoreFacade.decay``
+    now rejects factors outside ``[0.0, 1.0]`` with ``ValueError``.
 
-    ``factor > 1.0`` would multiply confidence above 1.0; the ``min(1.0, ...)``
-    clamps it back to 1.0. The function name "decay" implies monotonic
-    decrease, but mathematically ``decay(0.5, factor=3.0)`` yields 1.0 —
-    an INCREASE followed by a clamp. Callers intuitively passing a
-    "scaling factor" above 1 don't get what the name suggests; they get
-    full confidence.
+    Pre-fix: ``factor > 1.0`` would multiply confidence above 1.0 and
+    the ``min(1.0, ...)`` clamp would silently give the caller a
+    1.0-confidence fact — contradicting the function name's
+    monotonic-decrease semantics.
 
-    Pin: decay(factor=3.0) against a 0.4-confidence fact produces 1.0.
-    Fix would either reject factor>1.0 with ValueError or rename to
-    ``scale_confidence`` and document the two-way monotonicity.
+    Post-fix: explicit guard at the top of ``decay()`` raises
+    ``ValueError`` for any factor outside the closed unit interval.
+    Confidence increases require a separate API path (e.g.,
+    ``promote_scope``); ``decay`` is monotonic-decrease only.
     """
     graph = AsyncMock()
     vector = AsyncMock()
@@ -213,22 +261,43 @@ async def test_facade_decay_with_factor_above_1_increases_then_clamps():
         graph, vector, embeddings, TraceLedger(), dataset_name="t",
     )
     fact = make_fact_assertion(confidence=0.4)
+    # Above-range factor → ValueError.
+    with pytest.raises(ValueError, match=r"decay factor must be in \[0\.0, 1\.0\]"):
+        await facade.decay(fact.id, 3.0)
+    # Below-range (negative) factor → ValueError.
+    with pytest.raises(ValueError, match=r"decay factor must be in \[0\.0, 1\.0\]"):
+        await facade.decay(fact.id, -0.1)
+
+
+async def test_decay_accepts_boundary_values_post_R2P9_fix():
+    """G5-boundary (R2-P9): factor=0.0 and factor=1.0 are inclusive
+    bounds — both are accepted. Pins the boundaries so a future
+    off-by-one (e.g., switching to a strict-less-than check) surfaces
+    here.
+    """
+    graph = AsyncMock()
+    vector = AsyncMock()
+    embeddings = AsyncMock()
+    embeddings.embed_text = AsyncMock(return_value=[0.1] * 1024)
+    facade = MemoryStoreFacade(
+        graph, vector, embeddings, TraceLedger(), dataset_name="t",
+    )
+    fact = make_fact_assertion(confidence=0.5)
     graph.get_entity = AsyncMock(return_value={
         "eb_id": str(fact.id), "text": fact.text, "category": "general",
-        "scope": "session", "confidence": 0.4, "eb_created_at": 0,
+        "scope": "session", "confidence": 0.5, "eb_created_at": 0,
         "eb_updated_at": 0, "use_count": 0, "successful_use_count": 0,
         "provenance_refs": [], "target_actor_ids": [], "goal_ids": [],
     })
-    # Inline the add_data_points patch: we don't care about storage here,
-    # only that the returned fact carries the clamped confidence.
+
     from unittest.mock import patch
     with patch("elephantbroker.runtime.memory.facade.add_data_points", new_callable=AsyncMock):
-        result = await facade.decay(fact.id, 3.0)
-    assert result.confidence == 1.0, (
-        f"Expected decay(factor=3.0) on 0.4 to clamp at 1.0; got "
-        f"{result.confidence}. If the function now rejects factor>1.0, "
-        "update this test and #1184."
-    )
+        # factor=0 → confidence drops to 0.
+        zero_result = await facade.decay(fact.id, 0.0)
+        assert zero_result.confidence == 0.0
+        # factor=1 → confidence unchanged.
+        one_result = await facade.decay(fact.id, 1.0)
+        assert one_result.confidence == 0.5
 
 
 # ---------------------------------------------------------------------------
