@@ -108,7 +108,15 @@ def get_tracer(module_name: str) -> Tracer:
 def traced(fn: F) -> F:
     """Async decorator that wraps a function in an OTEL span.
 
-    Extracts gateway identity from kwargs into span attributes.
+    Extracts gateway identity from kwargs into span attributes. When the
+    wrapped function is an instance method (``args[0]`` is ``self``) and the
+    identity is not passed as a kwarg, falls back to reading
+    ``self._<attr_name>`` (e.g., ``self._gateway_id``) so methods on
+    facade/runtime modules that stash identity on the instance still emit
+    spans tagged with the right tenant. R2-P6 / #1510 RESOLVED — the prior
+    behavior produced anonymous spans for instance-method calls outside
+    HTTP request context (worker pipelines, CLI entrypoints).
+
     Sets span status to ERROR on exception.
     """
     module = fn.__module__ or "unknown"
@@ -120,9 +128,12 @@ def traced(fn: F) -> F:
         with tracer.start_as_current_span(name) as span:
             span.set_attribute("module", module)
             span.set_attribute("method", fn.__name__)
-            # Extract identity attributes
+            # Extract identity attributes — kwargs first, then self._<attr>
+            # fallback for bound-method calls outside HTTP context (#1510).
             for attr_name in ("session_id", "gateway_id", "agent_key", "agent_id", "session_key"):
                 val = kwargs.get(attr_name)
+                if val is None and args:
+                    val = getattr(args[0], f"_{attr_name}", None)
                 if val is not None:
                     span.set_attribute(attr_name, str(val))
             try:

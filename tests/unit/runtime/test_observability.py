@@ -211,18 +211,24 @@ class TestOTELInstrumentation:
         msg, _ = adapter.process("hello", {})
         assert msg == "hello"
 
-    async def test_traced_does_not_extract_self_gateway_id_documented_prod_risk(self, in_memory_spans):
-        """Pins documented PROD risk #1510 — `@traced` extracts identity ONLY from
-        kwargs. Methods that stash `self._gateway_id` (e.g., MemoryStoreFacade)
-        produce spans WITHOUT the `gateway_id` attribute when they don't pass it
-        as a kwarg.
+    async def test_traced_extracts_self_gateway_id_fallback_post_1510_fix(self, in_memory_spans):
+        """G9 FLIPPED (#1510 RESOLVED — R2-P6): `@traced` now falls back to
+        ``self._<attr>`` when the identity is not passed as a kwarg. For
+        bound-method calls (``args[0]`` is ``self``) on classes that stash
+        identity on the instance — MemoryStoreFacade, ContextEngineFacade,
+        worker pipelines, ebrun CLI entrypoints — the span is now tagged
+        with ``gateway_id`` (and the other 4 attrs) automatically.
 
-        If `@traced` is updated to fall back to reading `self._gateway_id`, update
-        this test, the TF-FN-015 plan, and file a TD.
+        Pre-R2-P6 this test pinned the documented PROD risk: spans were
+        emitted WITHOUT identity attributes for instance-method calls
+        outside HTTP request context. Post-fix the same test setup
+        produces a span WITH ``gateway_id="gw-stashed-on-self"``.
         """
         class MyModule:
             def __init__(self) -> None:
                 self._gateway_id = "gw-stashed-on-self"
+                self._agent_key = "gw-stashed-on-self:worker-7"
+                self._session_key = "agent:main:main"
 
             @traced
             async def method(self):
@@ -232,5 +238,29 @@ class TestOTELInstrumentation:
         await instance.method()  # NO kwargs supplied
         spans = in_memory_spans.get_finished_spans()
         assert len(spans) == 1
-        # `@traced` reads kwargs only; `self._gateway_id` is invisible to it.
-        assert "gateway_id" not in spans[0].attributes
+        attrs = spans[0].attributes
+        # R2-P6: self._<attr> fallback is exercised — all three stashed
+        # attrs surface on the span.
+        assert attrs["gateway_id"] == "gw-stashed-on-self"
+        assert attrs["agent_key"] == "gw-stashed-on-self:worker-7"
+        assert attrs["session_key"] == "agent:main:main"
+
+    async def test_traced_kwargs_override_self_fallback(self, in_memory_spans):
+        """G9-bis (R2-P6): explicit kwarg takes precedence over the
+        ``self._<attr>`` fallback. Documents the precedence order so a
+        future refactor that swaps the two checks surfaces here.
+        """
+        class MyModule:
+            def __init__(self) -> None:
+                self._gateway_id = "gw-on-self"
+
+            @traced
+            async def method(self, *, gateway_id: str = ""):
+                return gateway_id
+
+        instance = MyModule()
+        await instance.method(gateway_id="gw-from-kwarg")
+        spans = in_memory_spans.get_finished_spans()
+        assert len(spans) == 1
+        # kwarg wins; self._gateway_id is the fallback only when kwarg absent
+        assert spans[0].attributes["gateway_id"] == "gw-from-kwarg"
