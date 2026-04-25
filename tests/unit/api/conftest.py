@@ -84,6 +84,8 @@ def container(mock_graph, mock_vector, mock_embeddings):
     # Gateway identity
     c.redis_keys = RedisKeyBuilder("local")
     c.metrics_ctx = MetricsContext("local")
+    # R2-P4 / #1505: public gateway_id attribute used by health endpoints.
+    c.gateway_id = "local"
 
     # Phase 4: mock LLM client
     c.llm_client = AsyncMock()
@@ -135,6 +137,22 @@ def container(mock_graph, mock_vector, mock_embeddings):
     c._bootstrap_checked = False
 
     return c
+
+
+@pytest.fixture(autouse=True)
+def _clear_llm_probe_cache():
+    """R2-P4 / #9: clear the module-level LLM probe cache between tests.
+
+    The /health/ready route caches the LLM probe per-gateway for 60s to
+    avoid token burn on K8s readinessProbe loops. The cache is module-
+    scoped so without explicit clearing, results leak between tests
+    (a "down" mock from one test would mask the "ok" expectation of the
+    next test). Autouse so all API tests see a fresh cache.
+    """
+    from elephantbroker.api.routes import health as _health_module
+    _health_module._llm_probe_cache.clear()
+    yield
+    _health_module._llm_probe_cache.clear()
 
 
 @pytest.fixture(autouse=True)

@@ -1,28 +1,29 @@
-"""TF-FN-019 G15 — /health/ready couples to VectorAdapter's private
-``_get_client()`` method.
+"""TF-FN-019 G15 FLIPPED — /health/ready uses VectorAdapter's public
+``ping()`` method (#1189 RESOLVED — R2-P4).
 
-PROD #1189 pin. ``api/routes/health.py:47`` reaches into
+Pre-R2-P4: ``api/routes/health.py:47`` reached into
 ``container.vector._get_client()`` — a leading-underscore name that
 conventionally signals "internal implementation detail, not part of the
-public API."
+public API." Pinned as documented coupling.
 
-Consequences:
-* The health endpoint breaks silently if VectorAdapter is refactored to
-  rename / remove ``_get_client`` — because refactors of private methods
-  don't go through a deprecation cycle.
-* Substituting a different vector adapter (e.g., for tests or for a
-  future multi-backend configuration) requires the same private method
-  contract to be honored, defeating the purpose of the IVectorAdapter
-  interface.
+R2-P4: VectorAdapter gained a public ``ping()`` method
+(``elephantbroker/runtime/adapters/cognee/vector.py``) that performs the
+connectivity probe (``_get_client + get_collections``) and raises on
+failure. The health route now calls ``await container.vector.ping()``.
 
-Pin the coupling so any future refactor that drops ``_get_client``
-surfaces as a broken pin test and forces either a public accessor
-(e.g., a ``ping()`` method on the adapter interface) or a direct Qdrant
-client dep injection.
+This test pins the post-fix shape:
+* The health route source contains ``vector.ping(`` — the public call.
+* The health route source does NOT contain ``vector._get_client(`` —
+  the private coupling is closed.
 
-Cross-flow: TF-FN-012 (health endpoints) covered the success/failure
-shape; this test adds the private-method coupling surface that was
-deferred.
+If a future refactor reverts to direct private-method access (or
+substitutes a different private API), this pin breaks and forces an
+explicit re-evaluation. If the adapter contract evolves further
+(e.g., ``ping()`` is renamed to ``health_check()``), update both this
+test and the route in the same commit.
+
+Cross-flow: TF-FN-012 (health endpoints) covers the success/failure
+shape; this test pins the public-vs-private API surface.
 """
 from __future__ import annotations
 
@@ -31,16 +32,20 @@ import inspect
 from elephantbroker.api.routes import health
 
 
-def test_health_ready_calls_vector_private_get_client():
-    """G15 (#1189): the /health/ready route body contains a direct
-    reference to ``vector._get_client()``. Pin this string-level coupling
-    so a refactor drop forces an explicit endpoint update.
+def test_health_ready_uses_vector_ping_public_method():
+    """G15 FLIPPED (#1189 RESOLVED — R2-P4): the /health/ready route body
+    references the public ``vector.ping()`` accessor and no longer
+    references the private ``_get_client()`` accessor.
     """
     src = inspect.getsource(health)
-    # The health.py module body must contain the private-method call.
-    assert "vector._get_client" in src, (
+    assert "vector.ping(" in src, (
         "The /health/ready endpoint no longer references "
-        "`vector._get_client()`. If it was switched to a public accessor "
-        "or the adapter gained a ping() method, update this test and "
-        "remove the #1189 pin — the private-method coupling is closed."
+        "`vector.ping()`. If the adapter contract was refactored "
+        "(e.g., the public probe method was renamed), update this "
+        "test and the health route in the same commit."
+    )
+    assert "vector._get_client(" not in src, (
+        "The /health/ready endpoint regressed to using the private "
+        "`vector._get_client()` accessor. Use the public `ping()` "
+        "method instead — see VectorAdapter.ping() for the contract."
     )

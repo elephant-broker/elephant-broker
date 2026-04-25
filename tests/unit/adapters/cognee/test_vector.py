@@ -160,3 +160,39 @@ class TestVectorAdapter:
         call_kwargs = mock_client.delete.call_args.kwargs
         assert isinstance(call_kwargs["points_selector"], PointIdsList)
         assert call_kwargs["points_selector"].points == ["some-eb-id-not-uuid-format"]
+
+    # ------------------------------------------------------------------
+    # R2-P4 / #1189 RESOLVED — public ping() probe method
+    # ------------------------------------------------------------------
+
+    async def test_ping_calls_get_collections_on_success(self):
+        """G4 (R2-P4): ``ping()`` obtains the async client and calls
+        ``get_collections()`` — works on an empty Qdrant deployment, no
+        collection required. Returns None on success.
+        """
+        adapter = _make_adapter()
+        mock_client = AsyncMock()
+        mock_client.get_collections = AsyncMock(return_value=MagicMock())
+        adapter._client = mock_client
+
+        result = await adapter.ping()
+        assert result is None
+        mock_client.get_collections.assert_awaited_once()
+
+    async def test_ping_raises_on_qdrant_failure(self):
+        """G5 (R2-P4): ``ping()`` does NOT swallow exceptions. Caller
+        (the /health/ready route) catches and reports the error
+        verbatim — preserves the operational debugging affordance the
+        pre-fix inline ``_get_client + get_collections`` provided.
+        """
+        adapter = _make_adapter()
+        mock_client = AsyncMock()
+        mock_client.get_collections = AsyncMock(side_effect=ConnectionError("qdrant down"))
+        adapter._client = mock_client
+
+        try:
+            await adapter.ping()
+        except ConnectionError as exc:
+            assert "qdrant down" in str(exc)
+        else:
+            raise AssertionError("ping() must not swallow underlying exceptions")

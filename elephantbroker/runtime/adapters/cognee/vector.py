@@ -51,6 +51,23 @@ class VectorAdapter:
             self._client = AsyncQdrantClient(url=self._url)
         return self._client
 
+    async def ping(self) -> None:
+        """Lightweight Qdrant connectivity probe — raises on failure.
+
+        R2-P4 / #1189 RESOLVED: this is the public connectivity check for
+        ``/health/ready``. Internally it obtains the async client and lists
+        collections (works on an empty Qdrant deployment, no collection
+        required). Replaces the prior coupling where the health route
+        reached into ``vector._get_client()`` directly — a leading-
+        underscore name that conventionally signals "internal
+        implementation detail, not part of the public API."
+
+        Raises whatever the underlying client raises so callers can log
+        the original error message + observe latency.
+        """
+        client = await self._get_client()
+        await client.get_collections()
+
     def _gateway_filter(self) -> FieldCondition | None:
         """Return a ``database_name=<gateway_id>`` filter condition, or
         ``None`` when the adapter is gateway-agnostic (``gateway_id=""``).

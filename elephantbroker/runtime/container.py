@@ -261,6 +261,10 @@ class RuntimeContainer:
         # Gateway identity infrastructure
         self.redis_keys: RedisKeyBuilder | None = None
         self.metrics_ctx: MetricsContext | None = None
+        # R2-P4 / #1505 RESOLVED: public gateway_id attribute for health
+        # endpoints + any other consumer that needs the boot-time tenant
+        # binding without reaching into config or private metrics state.
+        self.gateway_id: str = ""
 
     @classmethod
     async def from_config(
@@ -298,6 +302,9 @@ class RuntimeContainer:
         gw_id = config.gateway.gateway_id
         c.redis_keys = RedisKeyBuilder(gw_id)
         c.metrics_ctx = MetricsContext(gw_id)
+        # R2-P4 / #1505: bind public gateway_id on the container so
+        # /health and /health/ready can include it in the response.
+        c.gateway_id = gw_id
 
         # Configure Cognee SDK (graph/vector/LLM/embedding) before creating adapters
         await configure_cognee(config.cognee, config.llm, gateway_id=gw_id)
