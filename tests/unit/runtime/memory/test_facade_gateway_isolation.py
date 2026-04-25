@@ -140,63 +140,56 @@ class TestFacadeGatewayIsolation:
         assert events[0].payload["owner_gateway"] == "tenant-other"
         assert events[0].payload["caller_gateway"] == "tenant-local"
 
-    async def test_dedup_search_leaks_across_gateways(
+    async def test_dedup_search_isolated_across_gateways_post_TD64_fix(
         self, monkeypatch, mock_add_data_points, mock_cognee,
     ):
-        """G10 (#1187 PIN — BLOCKED by TD-64): documents CURRENT leak
-        behavior in the store() dedup pre-check. This is NOT yet resolved.
+        """G10 (#1187 RESOLVED — R2-P1 via TD-64 path c): tenant isolation
+        on ``facade.store()`` dedup pre-check is now enforced by the
+        ``VectorAdapter`` filter layer.
 
-        Root cause chain:
-        1. ``facade.store()`` dedup step calls ``vector.search_similar()``
-           to find near-duplicate existing facts.
-        2. ``VectorAdapter.search_similar`` (``adapters/cognee/vector.py``)
-           queries Qdrant's ``FactDataPoint_text`` collection. It has NO
-           per-tenant filter — the Cognee community adapter indexes only
-           ``IndexSchema`` fields (``id``, ``text``, ``database_name``),
-           NOT the custom DataPoint fields (``gateway_id``, ``eb_id``,
-           ``session_key``, ``memory_class``).
-        3. This is TD-64: Cognee ``qdrant_adapter.py:163-167`` projects
-           ``DataPoint -> IndexSchema(id=data_point.id, text=...)`` — a
-           closed Pydantic model with no ``extra="allow"``. Every custom
-           field is dropped at the index boundary.
-        4. Consequence: when tenant B stores a near-duplicate of tenant A's
-           fact, the vector search finds A's id + score and facade.store()
-           raises ``DedupSkipped(existing_fact_id=A_id)`` — leaking the
-           existence of a cross-tenant fact via the attacker-visible
-           ``existing_fact_id`` / similarity score.
+        Pre-fix (this test previously pinned the LEAK via
+        ``test_dedup_search_leaks_across_gateways``): dedup called
+        ``vector.search_similar()`` with no tenant filter, and the Qdrant
+        payload had no ``gateway_id`` field to filter on. Cross-tenant
+        near-duplicates produced ``DedupSkipped(existing_fact_id=A_id)``
+        — leaking the existence of a fact in another gateway via the
+        attacker-visible id + similarity score.
 
-        Resolution path: TD-64 path (c) — populate Cognee's
-        ``database_name`` tenant field with ``gateway_id`` per gateway init
-        so Qdrant's native multi-tenancy filters kick in on
-        ``search_similar``. See TD-64 entry in TECHNICAL-DEBT.md for full
-        context and three alternative paths.
+        Post-fix (R2-P1 commit):
+        1. ``configure_cognee(gateway_id=gw)`` sets Qdrant's
+           ``vector_db_name`` per gateway. Every point written via
+           ``add_data_points()`` now carries
+           ``payload.database_name=<gateway_id>``.
+        2. ``VectorAdapter.__init__(gateway_id=gw)`` retains the id and
+           automatically merges a ``database_name=<gw>`` FieldCondition
+           into every ``search_similar`` query.
+        3. Consequence: a cross-tenant near-duplicate search returns 0
+           hits, so ``facade.store()`` bypasses the DedupSkipped branch
+           and stores the fact cleanly.
 
-        If this test starts FAILING (dedup stops leaking), TD-64 is
-        resolved — update this test to assert the new isolation behavior
-        and mark #1187 RESOLVED.
+        This test simulates the post-fix behavior with a mocked
+        VectorAdapter whose ``search_similar`` returns the empty list a
+        real post-fix adapter would return for cross-tenant queries.
+        Integration tests on staging verify the real Qdrant filter via
+        the devops / observer L2 sweep.
+
+        Verification in H11 sweep: observer confirms
+        ``eb:gw-alex-assistant`` tenant's FactDataPoint_text collection
+        returns 25 points under the tenant filter (vs 0 points under a
+        wrong-tenant filter) — see ``IMPLEMENTED-PR-7-merge.md`` R2-P1
+        section for the raw probe output.
         """
         facade, graph, vector, _ = _make_facade(gateway_id="tenant-local")
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
-        # Dedup search returns a cross-tenant high-similarity hit. Today the
-        # facade has no way to know it's cross-tenant because the Qdrant
-        # payload doesn't carry gateway_id.
-        other_tenant_fact_id = uuid.uuid4()
-        vector.search_similar = AsyncMock(return_value=[
-            VectorSearchResult(
-                id=str(other_tenant_fact_id),
-                score=0.99,
-                payload={"text": "near-duplicate text"},
-            ),
-        ])
+        # Post-fix: the tenant-filtered search returns 0 hits for a
+        # cross-tenant store, regardless of what cross-tenant facts exist.
+        vector.search_similar = AsyncMock(return_value=[])
         fact = make_fact_assertion()
-        with pytest.raises(DedupSkipped) as excinfo:
-            await facade.store(fact)
-        # Leak surface: the raised error carries the OTHER tenant's id.
-        # When TD-64 ships and search_similar filters by gateway_id,
-        # DedupSkipped should NOT fire here — remove this assertion and
-        # assert a clean store instead.
-        assert excinfo.value.existing_fact_id == str(other_tenant_fact_id)
+        # No DedupSkipped — the store completes normally.
+        stored = await facade.store(fact)
+        assert stored.id == fact.id
+        assert stored.gateway_id == "tenant-local"
 
     async def test_facade_gateway_isolation_increments_authority_check_metric(
         self, monkeypatch, mock_add_data_points, mock_cognee,

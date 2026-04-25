@@ -287,13 +287,20 @@ class RuntimeContainer:
         log_level = 15 if level_name == "VERBOSE" else getattr(logging, level_name, logging.INFO)
         logging.basicConfig(level=log_level)
 
-        # Configure Cognee SDK (graph/vector/LLM/embedding) before creating adapters
-        await configure_cognee(config.cognee, config.llm)
-
         # --- Gateway identity ---
+        # #1187 / TD-64 RESOLVED (R2-P1): extract gw_id BEFORE configure_cognee
+        # so the gateway id can be threaded into Cognee's vector-db config
+        # (populates Qdrant's per-tenant `database_name` field on every point
+        # payload, enabling cross-gateway dedup isolation downstream). Prior
+        # code ran configure_cognee first, when gw_id was still an unextracted
+        # attribute access on config.gateway — harmless order for other
+        # configure_cognee consumers but blocked the tenant-config threading.
         gw_id = config.gateway.gateway_id
         c.redis_keys = RedisKeyBuilder(gw_id)
         c.metrics_ctx = MetricsContext(gw_id)
+
+        # Configure Cognee SDK (graph/vector/LLM/embedding) before creating adapters
+        await configure_cognee(config.cognee, config.llm, gateway_id=gw_id)
 
         # --- Shared infrastructure ---
         # Create async Redis client
@@ -312,7 +319,12 @@ class RuntimeContainer:
 
         # --- Adapters ---
         c.graph = GraphAdapter(config.cognee)
-        c.vector = VectorAdapter(config.cognee)
+        # #1187 / TD-64 RESOLVED (R2-P1): VectorAdapter receives gateway_id
+        # so `search_similar` can add a `database_name` FieldCondition to
+        # filter points by tenant. Paired with the configure_cognee
+        # `vector_db_name` threading above — write path stamps tenant id,
+        # read path filters on it.
+        c.vector = VectorAdapter(config.cognee, gateway_id=gw_id)
         c.embeddings = EmbeddingService(config.cognee)
         c.datasets = DatasetManager(config.cognee)
         c.pipeline_runner = PipelineRunner()
