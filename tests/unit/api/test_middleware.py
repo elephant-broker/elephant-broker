@@ -66,17 +66,29 @@ class TestErrorHandlerMiddleware:
         assert result.status_code == 422
         assert "Validation error on GET /test" in caplog.text
 
-    async def test_permission_error_falls_to_500_documented_gap(self):
-        """Pins documented GAP #1170 — PermissionError is NOT mapped to 403; it falls
-        through to the generic Exception handler and returns 500.
+    async def test_permission_error_maps_to_403_post_R2P5_fix(self):
+        """G6 FLIPPED (#1170 RESOLVED — R2-P5): the middleware now maps
+        ``PermissionError`` to HTTP 403 in its fallback path, matching
+        the route-level handlers (memory.py promote_scope/promote_class/
+        update/delete) that already explicitly catch PermissionError and
+        return 403.
 
-        If a future fix adds a PermissionError handler at 403 (for cross-gateway delete
-        rejections etc.), update this test, the flow plan, and file a TD.
+        Pre-R2-P5 the middleware fell through to the generic Exception
+        handler and returned 500 — pinned in TF-FN-014 G6 as documented
+        gap. The fix adds an explicit ``except PermissionError`` branch
+        between the KeyError (404) branch and the ValueError (422) branch.
+
+        Cross-gateway facade rejections + any future tenant-isolation
+        raises now surface as 403 regardless of whether the route caught
+        them locally or let them propagate to the middleware fallback.
         """
         request = _make_request()
         call_next = AsyncMock(side_effect=PermissionError("denied"))
         result = await error_handler_middleware(request, call_next)
-        assert result.status_code == 500
+        assert result.status_code == 403
+        body = result.body.decode()
+        assert "forbidden" in body
+        assert "denied" in body
 
 
 class TestAuthMiddleware:

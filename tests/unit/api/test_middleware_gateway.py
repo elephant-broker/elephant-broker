@@ -162,34 +162,33 @@ async def test_agent_key_follows_expected_format_convention():
 
 
 @pytest.mark.asyncio
-async def test_injection_gateway_id_header_rejected_post_R2P1_1_fix(monkeypatch):
-    """G7 FLIPPED (#1493 RESOLVED — R2-P1.1): pre-R2-P1.1 the middleware
-    silently accepted ANY ``X-EB-Gateway-ID`` value (including
-    Cypher-injection payloads, null-byte sequences, megabyte-scale
-    strings) and stamped it verbatim onto ``request.state.gateway_id``.
-    R2-P1.1 added boundary-level enforcement: any header that does not
-    equal the container's startup gateway_id is rejected with 403,
-    closing the cross-tenant-via-header bypass.
+async def test_injection_gateway_id_header_rejected_post_R2P5_charset_validation(monkeypatch):
+    """G7 FLIPPED-AGAIN (#1493 fully RESOLVED — R2-P5 charset validation
+    + R2-P1.1 mismatch reject):
 
-    This subsumes the original #1493 PROD pin: an injection payload
-    in ``X-EB-Gateway-ID`` is now blocked at the boundary, never
-    reaching ``request.state``. (The other two headers covered by the
-    old pin — ``X-EB-Agent-Key`` and ``X-EB-Session-Key`` — are still
-    accepted verbatim; they're not gateway-isolation keys, just
-    request-context tags. Their downstream consumers — A6 startup
-    safety on gateway_id; RedisKeyBuilder's char checks; etc — apply
-    sanitization at use site. A future #1493 follow-up could add a
-    suffix pass for those two headers, but it's not the
-    cross-gateway-bypass surface the original pin documented.)
+    Pre-R2-P1.1: the middleware silently accepted ANY ``X-EB-*`` value,
+    including Cypher-injection payloads / null bytes / megabyte-scale
+    strings, and stamped them verbatim onto ``request.state``.
 
-    Pre-fix: this test pinned `_make_app()` + injection-payload
-    `X-EB-Gateway-ID` header → 200 OK + value stamped on
-    ``request.state``. Post-fix: same input → 403 reject because the
-    injection payload is not equal to the container's
-    ``default_gateway_id``.
+    R2-P1.1: closed the cross-tenant-via-header bypass — mismatched
+    gateway_id rejected with 403.
+
+    R2-P5 (this commit): adds explicit charset + length validation on
+    ALL FIVE X-EB-* headers (``[a-zA-Z0-9_-:]``, max 255 chars; gateway_id
+    additionally rejects ``: * ? [ ]`` per A6 / TF-FN-017 startup safety).
+    The charset check runs BEFORE the mismatch check so injection
+    payloads can't slip through the EB_ALLOW_CROSS_GATEWAY_HEADER escape
+    hatch either.
+
+    Same input as the pre-fix pin (injection payload + control bytes +
+    1000-char session_key) now hits the charset validator first and
+    returns **400 Bad Request** with the offending characters listed.
+    The agent_key/session_key headers (which the original #1493 pin also
+    documented as accepting injection) are now charset-checked too —
+    closes the full surface, not just the gateway_id-bypass piece.
     """
     monkeypatch.delenv("EB_ALLOW_CROSS_GATEWAY_HEADER", raising=False)
-    app = _make_app("local")  # default_gateway_id="local"
+    app = _make_app("local")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/echo", headers={
@@ -197,11 +196,12 @@ async def test_injection_gateway_id_header_rejected_post_R2P1_1_fix(monkeypatch)
             "X-EB-Agent-Key": "\x01\x02\x03",
             "X-EB-Session-Key": "a" * 1000,
         })
-    # R2-P1.1: injection payload != "local" → 403 reject.
-    assert resp.status_code == 403
+    # R2-P5: charset validator fires first → 400 Bad Request with
+    # detail naming the offending characters. The injection payload is
+    # NEVER observable from request.state.
+    assert resp.status_code == 400
     body = resp.json()
-    assert "Cross-gateway request rejected" in body["detail"]
-    # The non-gateway-isolation headers (agent_key, session_key) never
-    # reached request.state because the gateway-mismatch reject fired
-    # first — proves the injection payload is no longer observable from
-    # the rest of the request lifecycle.
+    # The first invalid header in the validation order is X-EB-Gateway-ID,
+    # so the detail names that header and lists its forbidden chars.
+    assert "X-EB-Gateway-ID" in body["detail"]
+    assert "forbidden characters" in body["detail"]
