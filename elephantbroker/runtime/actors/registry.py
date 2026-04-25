@@ -8,6 +8,7 @@ from cognee.tasks.storage import add_data_points
 
 from elephantbroker.runtime.adapters.cognee.datapoints import ActorDataPoint
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
+from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.runtime.interfaces.actor_registry import IActorRegistry
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.schemas.actor import ActorRef, ActorRelationship, ActorType, RelationshipType
@@ -31,7 +32,16 @@ class ActorRegistry(IActorRegistry):
         # Phase 8: Create MEMBER_OF edges for each team
         for team_id in actor.team_ids:
             try:
+                # R2-P7 / link-spam guard: validate team belongs to the
+                # caller's gateway. PermissionError surfaces as 403 via
+                # R2-P5 middleware; runtime errors stay best-effort
+                # (silent skip per pre-existing contract).
+                await assert_same_gateway(self._graph, str(team_id), self._gateway_id)
                 await self._graph.add_relation(str(actor.id), str(team_id), "MEMBER_OF")
+            except PermissionError:
+                # Re-raise so cross-gateway link attempt becomes 403,
+                # not a silent best-effort skip.
+                raise
             except Exception:
                 pass  # Edge creation is best-effort
 

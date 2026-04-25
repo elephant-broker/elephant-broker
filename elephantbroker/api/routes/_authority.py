@@ -13,8 +13,21 @@ from elephantbroker.runtime.interfaces.actor_registry import IActorRegistry
 from elephantbroker.runtime.profiles.authority_store import AuthorityRuleStore
 from elephantbroker.schemas.actor import ActorRef, ActorType
 
-# Actions allowed during bootstrap mode (empty actor graph)
-BOOTSTRAP_ACTIONS = frozenset({"create_org", "create_team", "register_actor"})
+# Actions allowed during bootstrap mode (empty actor graph).
+# R2-P7: add ``add_team_member`` / ``remove_team_member`` so the
+# bootstrap workflow is complete — pre-fix you could create a team
+# in bootstrap mode but not assign anyone to it (no admin actor yet
+# exists to authorize the assignment, but you can't bootstrap one
+# *into* the team either). The R2-P7 link-spam guard now provides
+# the cross-gateway rejection at the route layer regardless of
+# bootstrap state, so the security posture is preserved.
+BOOTSTRAP_ACTIONS = frozenset({
+    "create_org",
+    "create_team",
+    "register_actor",
+    "add_team_member",
+    "remove_team_member",
+})
 
 
 async def check_authority(

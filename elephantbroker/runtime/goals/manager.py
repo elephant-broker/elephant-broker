@@ -13,6 +13,7 @@ from cognee.tasks.storage import add_data_points
 from elephantbroker.runtime.adapters.cognee.datapoints import GoalDataPoint
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
+from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.runtime.interfaces.goal_manager import IGoalManager
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.schemas.goal import GoalHierarchy, GoalState, GoalStatus
@@ -50,11 +51,24 @@ class GoalManager(IGoalManager):
         await cognee.add(goal_text, dataset_name=self._dataset_name)
 
         if goal.parent_goal_id:
+            # R2-P7 / link-spam guard: validate parent goal belongs to
+            # the same gateway. PermissionError → 403 via R2-P5
+            # middleware. Best-effort: skips check if parent missing.
+            await assert_same_gateway(self._graph, str(goal.parent_goal_id), self._gateway_id)
             await self._graph.add_relation(str(goal.id), str(goal.parent_goal_id), "CHILD_OF")
         # Create OWNS_GOAL edges for owner actors (best-effort)
         for owner_id in goal.owner_actor_ids:
             try:
+                # R2-P7 / link-spam guard: validate owner actor belongs
+                # to the same gateway. PermissionError surfaces here
+                # (NOT swallowed by the inner except — re-raised below)
+                # so the cross-gateway link attempt becomes a 403.
+                await assert_same_gateway(self._graph, str(owner_id), self._gateway_id)
                 await self._graph.add_relation(str(owner_id), str(goal.id), "OWNS_GOAL")
+            except PermissionError:
+                # Re-raise PermissionError unswallowed — security-policy
+                # rejection must surface as 403, not a silent skip.
+                raise
             except Exception as exc:
                 logger.warning("Failed to create OWNS_GOAL edge: actor=%s goal=%s error=%s", owner_id, goal.id, exc)
         await self._trace.append_event(

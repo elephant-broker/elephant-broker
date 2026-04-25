@@ -16,6 +16,7 @@ from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
+from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.scrub_buffer import IScrubBuffer
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
@@ -187,6 +188,14 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             raise
 
     async def _try_add_edge(self, source: str, target: str, rel_type: str) -> int:
+        # R2-P7 / link-spam guard: validate target's gateway_id BEFORE
+        # entering the metrics try/except so PermissionError propagates
+        # to the caller. The R2-P5 error-handler middleware converts
+        # PermissionError → HTTP 403; the existing best-effort edge-
+        # failure path (return 0 + WARN log) is reserved for *runtime*
+        # failures (driver disconnect, MERGE conflicts), not for
+        # security-policy rejections.
+        await assert_same_gateway(self._graph, target, self._gateway_id)
         try:
             await self._graph.add_relation(source, target, rel_type)
             if self._metrics:

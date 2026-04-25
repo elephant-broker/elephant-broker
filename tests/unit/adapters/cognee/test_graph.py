@@ -300,13 +300,22 @@ class TestGraphAdapter:
         cypher = session.run.call_args[0][0]
         assert "gateway_id" not in cypher
 
-    async def test_add_relation_does_not_sanitize_hyphens_documented_gap(self):
-        """Pins documented GAP #1165 (TF-FN-007 step 20) -- only spaces are sanitized via
-        .replace(' ', '_'), hyphens pass through unchanged.
+    async def test_add_relation_sanitizes_hyphens_post_R2P7_fix(self):
+        """G20 FLIPPED (#1165 RESOLVED — R2-P7): ``add_relation`` now
+        applies strict charset sanitization (``[^A-Za-z0-9_]`` →
+        ``_``) so hyphens are replaced with underscores instead of
+        passing through to the Cypher literal.
 
-        Cypher 5 rejects hyphens in relationship-type identifiers; callers must not pass
-        hyphenated relation types until this gap is closed. If hyphen sanitization is
-        added to add_relation, update this test and the plan.
+        Pre-fix: ``relation_type.upper().replace(" ", "_")`` only
+        stripped spaces. Cypher 5 rejected the resulting
+        ``[r:HAS-CHILD]`` clause at runtime — callers had to know to
+        pre-sanitize, which the contract didn't enforce.
+
+        Post-fix: the new ``_sanitize_rel_type()`` helper handles
+        hyphens, dots, and any other non-identifier character. The
+        legacy ``OWNS_GOAL`` / ``CREATED_BY`` shapes (already
+        alphanumeric+underscore) are unchanged — sanitization is
+        idempotent on clean inputs.
         """
         adapter = _make_adapter()
         driver, session = _mock_driver_with_result([])
@@ -314,4 +323,6 @@ class TestGraphAdapter:
 
         await adapter.add_relation("a", "b", "has-child", {})
         cypher = session.run.call_args[0][0]
-        assert "HAS-CHILD" in cypher
+        # Post-fix: hyphen → underscore in the relationship-type literal.
+        assert "HAS_CHILD" in cypher
+        assert "HAS-CHILD" not in cypher
