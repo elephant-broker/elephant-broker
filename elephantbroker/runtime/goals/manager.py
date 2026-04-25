@@ -93,6 +93,24 @@ class GoalManager(IGoalManager):
         return goals
 
     async def get_goal_hierarchy(self, root_goal_id: uuid.UUID) -> GoalHierarchy:
+        """Return the goal hierarchy rooted at ``root_goal_id``.
+
+        Returns an empty :class:`GoalHierarchy` if the root is missing —
+        this follows the EB **collection-getter convention**: read-side
+        methods that return a container/list shape (``GoalHierarchy``,
+        ``list[FactAssertion]``, ``dict[str, ...]``) return an empty
+        instance for "not found" rather than raising. Callers iterate
+        the result without branching on a sentinel.
+
+        Counterpart: :meth:`update_goal_status` follows the
+        **mutation-method convention** and raises ``KeyError`` for the
+        same "missing goal" condition (#1188 EB convention alignment,
+        researcher's R2-P10 audit). Both behaviors are correct per
+        their respective method classes — if you need consistent
+        error-shape across the pair, translate at the route boundary
+        (see :func:`api.routes.goals.update_goal` which catches
+        ``KeyError`` and returns 404).
+        """
         root_entity = await self._graph.get_entity(str(root_goal_id))
         if root_entity is None:
             return GoalHierarchy()
@@ -120,6 +138,22 @@ class GoalManager(IGoalManager):
 
     async def update_goal_status(self, goal_id: uuid.UUID, status: GoalStatus,
                                  confidence: float | None = None) -> GoalState:
+        """Mutate a goal's status (and optionally confidence).
+
+        Raises ``KeyError(f"Goal not found: {goal_id}")`` if the goal
+        does not exist — this follows the EB **mutation-method
+        convention**: write-side methods raise on missing target so
+        callers cannot silently fail to mutate. The route layer
+        (``api/routes/goals.update_goal``) translates this to HTTP
+        404 per #1188 R2-P10 fix.
+
+        Counterpart: :meth:`get_goal_hierarchy` follows the
+        **collection-getter convention** and returns an empty
+        :class:`GoalHierarchy` for the same condition. Both behaviors
+        are correct per their respective method classes — researcher's
+        R2-P10 audit confirmed this against the EB-wide convention
+        survey.
+        """
         entity = await self._graph.get_entity(str(goal_id))
         if entity is None:
             raise KeyError(f"Goal not found: {goal_id}")

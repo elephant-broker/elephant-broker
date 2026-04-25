@@ -1,24 +1,36 @@
 """TF-FN-019 G12 — GoalManager.get_goal_hierarchy and update_goal_status
-disagree on the "entity not found" shape.
+follow two distinct EB conventions for "entity not found" (#1188 —
+R2-P10: documented as **correct alignment**, not inconsistency).
 
-PROD #1188 pin. Two adjacent methods on ``GoalManager`` disagree on how
-to handle a goal_id that does not resolve in Neo4j:
+Researcher's R2-P10 audit (option c) surveyed every read/mutate site
+in the EB runtime and confirmed two distinct conventions:
 
-* ``get_goal_hierarchy(root_goal_id)`` at ``goals/manager.py:81-84``
-  returns an empty ``GoalHierarchy()`` silently when the root entity is
-  missing (TF-FN-002 G10 already pins this).
+* **Collection-getter convention** — read-side methods that return a
+  container/list shape (``GoalHierarchy``, ``list[FactAssertion]``,
+  ``dict[str, ...]``) return an empty instance for "not found" rather
+  than raising. Callers iterate the result without branching on a
+  sentinel.
 
-* ``update_goal_status(goal_id, ...)`` at ``goals/manager.py:107-111``
-  raises ``KeyError(f"Goal not found: {goal_id}")`` when the entity is
-  missing.
+* **Mutation-method convention** — write-side methods raise
+  ``KeyError`` (or ``PermissionError``) for the same condition so
+  callers cannot silently fail to mutate. The route layer translates
+  to HTTP 404.
 
-Both are "read a goal by id and act on it" flows. Callers handling the
-pair have to branch on the return shape (empty hierarchy vs. exception)
-even though the underlying condition is identical.
+``get_goal_hierarchy`` correctly follows the first convention;
+``update_goal_status`` correctly follows the second. The two
+behaviors are NOT inconsistent — they're aligned with the two
+conventions. The actual #1188 bug was at the **route layer**:
+``api/routes/goals.py update_goal`` did not catch the runtime
+``KeyError``, which surfaced as HTTP 500 instead of 404. R2-P10
+fixed the route bridge and added the pin in
+``test_goals_route_404.py``.
 
-Pin: document the inconsistency so a future harmonization — either
-align both on empty return, OR align both on raise — will flip this
-test and force an explicit unification.
+This test pins the runtime contract: **both behaviors are intended**
+and a future "harmonization" attempt that aligns them on a single
+shape (e.g., make ``get_goal_hierarchy`` raise too) would force a
+broader audit of the entire EB runtime. The pin shape is unchanged
+from the pre-R2-P10 version; only the docstring is updated to
+reflect the convention-alignment interpretation.
 """
 from __future__ import annotations
 
@@ -33,8 +45,17 @@ from elephantbroker.schemas.goal import GoalStatus
 
 
 async def test_get_goal_hierarchy_returns_empty_for_missing_root_but_update_status_raises():
-    """G12 (#1188): the same "goal not found" condition yields two
-    different shapes depending on which GoalManager method is called.
+    """G12 (#1188 — R2-P10): the same "goal not found" condition
+    yields two different shapes per EB convention:
+
+    * Collection-getter (``get_goal_hierarchy``) → empty container.
+    * Mutation-method (``update_goal_status``) → ``KeyError``.
+
+    This test pins both behaviors so a future "harmonization" that
+    aligns them on a single shape forces an audit of the entire
+    EB runtime convention. The route layer (api/routes/goals.py)
+    bridges the mutation-method KeyError to HTTP 404 — see
+    test_goals_route_404.py for that pin.
     """
     graph = AsyncMock()
     graph.get_entity = AsyncMock(return_value=None)  # missing in both cases
@@ -43,11 +64,11 @@ async def test_get_goal_hierarchy_returns_empty_for_missing_root_but_update_stat
 
     missing_id = uuid.uuid4()
 
-    # Path A: get_goal_hierarchy returns empty, no exception.
+    # Path A: collection-getter convention → empty container, no exception.
     hierarchy = await manager.get_goal_hierarchy(missing_id)
     assert hierarchy.root_goals == []
     assert hierarchy.children == {}
 
-    # Path B: update_goal_status raises KeyError with the same condition.
+    # Path B: mutation-method convention → KeyError on the same condition.
     with pytest.raises(KeyError, match="Goal not found"):
         await manager.update_goal_status(missing_id, GoalStatus.COMPLETED)
