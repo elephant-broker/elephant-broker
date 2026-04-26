@@ -16,7 +16,7 @@ from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
-from elephantbroker.runtime.identity_utils import assert_same_gateway
+from elephantbroker.runtime.identity_utils import assert_same_gateway, assert_same_gateway_batch
 from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.scrub_buffer import IScrubBuffer
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
@@ -149,7 +149,29 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             dp = FactDataPoint.from_schema(fact, cognee_data_id=captured_data_id)
             await add_data_points([dp])
 
-            # Graph edges (best-effort)
+            # Graph edges (best-effort). Batch gateway pre-check (M6) reduces
+            # N+1 Cypher round-trips to 1 for the common case.
+            edge_targets: list[str] = []
+            if fact.source_actor_id:
+                edge_targets.append(str(fact.source_actor_id))
+            edge_targets.extend(str(t) for t in fact.target_actor_ids)
+            edge_targets.extend(str(g) for g in fact.goal_ids)
+            try:
+                await assert_same_gateway_batch(self._graph, edge_targets, self._gateway_id)
+            except PermissionError:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={
+                        "action": "edge_store_batch",
+                        "fact_id": str(fact.id),
+                        "target_count": len(edge_targets),
+                        "gateway_id": self._gateway_id,
+                    },
+                ))
+                if self._metrics:
+                    self._metrics.inc_authority_check(action="edge_store", result="denied")
+                raise
+
             edges_created = 0
             if fact.source_actor_id:
                 edges_created += await self._try_add_edge(str(fact.id), str(fact.source_actor_id), "CREATED_BY")

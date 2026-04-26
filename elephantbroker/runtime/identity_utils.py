@@ -34,6 +34,10 @@ class _GraphLike(Protocol):
     async def get_entity(self, entity_id: str, *, gateway_id: str | None = ...) -> dict[str, Any] | None: ...
 
 
+class _GraphCypherLike(Protocol):
+    async def query_cypher(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]: ...
+
+
 async def assert_same_gateway(
     graph: _GraphLike,
     target_id: str,
@@ -77,4 +81,33 @@ async def assert_same_gateway(
             f"Cross-gateway link rejected: target {target_id!r} "
             f"belongs to gateway {target_gw!r}, caller is {expected_gw!r}. "
             f"R2-P7 link-spam guard."
+        )
+
+
+async def assert_same_gateway_batch(
+    graph: _GraphCypherLike | None,
+    ids: list[str],
+    expected_gw: str,
+) -> None:
+    """Batch variant of ``assert_same_gateway`` — one Cypher round-trip
+    for N target IDs instead of N ``get_entity`` calls.
+
+    Same best-effort skip rules: graph is None, ids empty, expected_gw
+    empty → silently return. Raises ``PermissionError`` on the first
+    violating node found.
+    """
+    if graph is None or not ids or not expected_gw:
+        return
+    rows = await graph.query_cypher(
+        "MATCH (n) WHERE n.eb_id IN $ids "
+        "AND n.gateway_id <> '' AND n.gateway_id <> $expected_gw "
+        "RETURN n.eb_id AS id, n.gateway_id AS gw LIMIT 1",
+        {"ids": ids, "expected_gw": expected_gw},
+    )
+    if rows:
+        row = rows[0]
+        raise PermissionError(
+            f"Cross-gateway link rejected: target {row['id']!r} "
+            f"belongs to gateway {row['gw']!r}, caller is {expected_gw!r}. "
+            f"R2-P7 link-spam guard (batch)."
         )
