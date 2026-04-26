@@ -210,7 +210,9 @@ async def create_team(body: CreateTeamRequest, request: Request):
         org_id=body.org_id, eb_id=team_id,
     )
     await add_data_points([dp])
-    # BELONGS_TO edge: team → org
+    # BELONGS_TO edge: team → org. No assert_same_gateway — Org/TeamDataPoint
+    # have no gateway_id (Phase 8: business entities span gateways). The _auth
+    # call above provides access control.
     await container.graph.add_relation(team_id, body.org_id, "BELONGS_TO")
 
     await container.trace_ledger.append_event(TraceEvent(

@@ -70,6 +70,8 @@ async def assert_same_gateway(
         expected_gw: caller's gateway id (typically
             ``self._gateway_id`` on a runtime module).
     """
+    # TOCTOU accepted: GatewayIdentityMiddleware rejects cross-gateway requests
+    # at the HTTP boundary; this check is defense-in-depth only.
     if graph is None:
         return
     entity = await graph.get_entity(target_id)

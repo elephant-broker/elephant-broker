@@ -38,6 +38,10 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     """Create FastAPI app with all routes and middleware.
 
     Accepts a pre-built RuntimeContainer so tests can inject mocked adapters.
+
+    Takes ownership of *container*; ``await container.close()`` is called on
+    app shutdown via the lifespan context manager. Do not pass the same
+    container to multiple ``create_app()`` calls.
     """
     # Lifespan: yield on startup; close container on shutdown.
     @asynccontextmanager

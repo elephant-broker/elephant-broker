@@ -28,6 +28,10 @@ def _sanitize_rel_type(relation_type: str) -> str:
     The result is upper-cased first (preserves the existing convention)
     then any disallowed character is replaced with ``_``. Idempotent:
     sanitizing an already-clean type (e.g., ``OWNS_GOAL``) is a no-op.
+
+    Permissive: accepts types starting with digits or underscores
+    (e.g., ``'3rd_party'`` -> ``'3RD_PARTY'``). Neo4j allows these
+    for relationship types though it diverges from node label rules.
     """
     return _SAFE_REL_TYPE.sub("_", relation_type.upper())
 

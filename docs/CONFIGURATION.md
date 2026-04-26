@@ -107,6 +107,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 |----------|----------|---------|------|---------|----------------|---------|--------------|
 | `EB_GATEWAY_ID` | **Yes** (TS plugins require it; Python defaults to `"local"`) | `"local"` (Python), none/fail (TS) | string | Python runtime, TS plugins, Docker, `ebrun` CLI | `gw-prod`, `gw-prod-assistant`, `local` | No | Yes |
 | `EB_GATEWAY_SHORT_NAME` | No | First 8 chars of `EB_GATEWAY_ID` | string | Python runtime, TS plugins | `prod`, `admin` | No | Yes |
+| `EB_ALLOW_CROSS_GATEWAY_HEADER` | No | `false` | bool (`"true"`/`"false"`) | Python runtime | `true` (L2 testing only) | No | No |
 | `EB_ORG_ID` | No | `None` | string | Python runtime, Docker | `org-acme-uuid` | No | Yes |
 | `EB_TEAM_ID` | No | `None` | string | Python runtime, Docker | `team-backend-uuid` | No | Yes |
 | `EB_ACTOR_ID` | No | `""` (falls back to `~/.elephantbroker/config.json`) | string | `ebrun` CLI only | UUID | No | No |
@@ -1077,6 +1078,8 @@ Every profile is a `ProfilePolicy` object containing 13 top-level fields and 8 n
 **Source:** `elephantbroker/schemas/working_set.py`
 
 Controls the weighted sum used in working-set budget competition. Each candidate fact is scored on 11 dimensions; the weight vector determines which dimensions matter most. The `weighted_sum()` method computes the final score.
+
+**Constraint (R2-P2, #1147):** `redundancy_penalty`, `contradiction_penalty`, and `cost_penalty` must be ≤ 0.0 (negative). Positive values raise `ValidationError` at `from_yaml()` startup. All shipped profile presets use negative values; operator YAML overrides with positive penalty values must be corrected.
 
 | Field | Type | Default | Runtime Impact |
 |-------|------|---------|----------------|

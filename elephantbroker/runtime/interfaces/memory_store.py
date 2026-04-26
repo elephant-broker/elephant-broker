@@ -9,7 +9,13 @@ from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 
 
 class IMemoryStoreFacade(ABC):
-    """Unified facade for storing, searching, and managing memory facts."""
+    """Unified facade for storing, searching, and managing memory facts.
+
+    Security: methods accepting ``caller_gateway_id`` enforce gateway
+    ownership — the concrete ``MemoryStoreFacade`` raises ``PermissionError``
+    (HTTP 403 via error middleware) on cross-gateway access. Test stubs that
+    omit this check skip the security boundary.
+    """
 
     @abstractmethod
     async def store(
