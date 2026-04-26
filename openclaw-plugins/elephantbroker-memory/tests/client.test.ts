@@ -144,4 +144,35 @@ describe("ElephantBrokerClient", () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
     await expect(client.update("abc", { text: "x" })).rejects.toMatchObject({ status: 500 });
   });
+
+  // H3: procedures.create must send is_manual_only to pass the R2-P2.1 validator
+  it("createProcedure sends is_manual_only: true by default", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "proc-1", name: "test" }),
+    });
+    await client.createProcedure({
+      name: "deploy",
+      steps: [{ order: 1, instruction: "run deploy" }],
+    });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.is_manual_only).toBe(true);
+    expect(body.activation_modes).toBeUndefined();
+  });
+
+  it("createProcedure forwards explicit activation_modes", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "proc-2", name: "test" }),
+    });
+    await client.createProcedure({
+      name: "deploy",
+      steps: [{ order: 1, instruction: "run deploy" }],
+      is_manual_only: false,
+      activation_modes: ["on_goal_active"],
+    });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.is_manual_only).toBe(false);
+    expect(body.activation_modes).toEqual(["on_goal_active"]);
+  });
 });

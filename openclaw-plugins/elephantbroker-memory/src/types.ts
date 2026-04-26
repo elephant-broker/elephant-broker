@@ -189,6 +189,7 @@ export interface ProcedureDefinition {
   scope: Scope;
   steps: ProcedureStep[];
   activation_modes: ProcedureActivation[];
+  is_manual_only: boolean;
   required_evidence: ProofRequirement[];
   red_line_bindings: string[];
   enabled: boolean;
