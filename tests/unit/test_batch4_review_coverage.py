@@ -318,22 +318,17 @@ class TestPostWithRetry429:
 
 
 # ---------------------------------------------------------------------------
-# TODO-12-504: Fix lying test_header_overrides_default
+# L6: renamed from test_header_overrides_default (TODO-12-504 / TODO-7-081)
 # ---------------------------------------------------------------------------
 
 
 class TestMiddlewareHeaderOverride:
-    """Verify X-EB-Gateway-ID header takes precedence over default."""
+    """Verify X-EB-Gateway-ID header used when default is empty."""
 
-    async def test_header_overrides_default(self):
-        """R2-P1.1: middleware now rejects mismatched X-EB-Gateway-ID with
-        403 when ``default_gateway_id`` is non-empty. The
-        "header-overrides-default" contract still holds when ``default`` is
-        empty (legacy single-tenant / dev fallback), so we flip
-        ``default_gateway_id=""`` here to exercise the
-        header-takes-precedence path. For the cross-tenant reject
-        contract post-R2-P1.1, see
-        ``tests/unit/api/middleware/test_gateway_reject_mismatch.py``.
+    async def test_header_used_when_default_is_empty(self):
+        """Non-empty header used when default is empty (legacy/dev fallback).
+
+        For the non-empty-default + mismatch contract, see test_gateway_reject_mismatch.py.
         """
         from elephantbroker.api.middleware.gateway import GatewayIdentityMiddleware
         from starlette.requests import Request

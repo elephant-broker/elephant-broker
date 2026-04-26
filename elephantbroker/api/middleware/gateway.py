@@ -51,6 +51,7 @@ def _validate_header(name: str, value: str, *, gateway_id_strict: bool) -> str |
             f"{name} contains forbidden characters {sorted(bad_chars)!r}; "
             f"allowed charset: alphanumeric, _, -, :"
         )
+    # Two-phase: general charset (allows :) then gateway_id-strict (rejects :).
     if gateway_id_strict:
         gw_forbidden = set(value) & _GATEWAY_ID_FORBIDDEN
         if gw_forbidden:

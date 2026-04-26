@@ -45,7 +45,6 @@ def _make_app(default_gw: str = ""):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_valid_charset_passes_for_all_five_headers(monkeypatch):
     """G1 (R2-P5): canonical clean values for all 5 X-EB-* headers are
     accepted. Documents the allowed-charset shape: alphanumeric + ``_-:``.
@@ -117,7 +116,6 @@ async def test_forbidden_charset_rejected_with_400(monkeypatch, header_name, bad
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_overlong_header_rejected_with_400(monkeypatch):
     """G3 (R2-P5): a header longer than 255 chars is rejected with 400.
     Closes the megabyte-stuffing surface the original #1493 pin
@@ -135,7 +133,6 @@ async def test_overlong_header_rejected_with_400(monkeypatch):
     assert "exceeds max" in body["detail"]
 
 
-@pytest.mark.asyncio
 async def test_exactly_255_char_header_accepted(monkeypatch):
     """G3-boundary (R2-P5): exactly 255 chars is the cap (inclusive).
     Documents the boundary so a future off-by-one regression surfaces.
@@ -192,7 +189,6 @@ async def test_gateway_id_rejects_a6_forbidden_chars(monkeypatch, bad_gateway_id
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_charset_check_fires_even_under_escape_hatch(monkeypatch):
     """G5 (R2-P5): even when ``EB_ALLOW_CROSS_GATEWAY_HEADER=true``
     bypasses the R2-P1.1 mismatch reject, the charset validator still

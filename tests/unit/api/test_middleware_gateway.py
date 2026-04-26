@@ -25,7 +25,6 @@ def _make_app(default_gw: str = "local"):
     return app
 
 
-@pytest.mark.asyncio
 async def test_extracts_all_four_headers():
     # R2-P1.1: matching default_gw to header value so the new mismatch
     # reject does not fire — this test exercises the extraction path,
@@ -47,7 +46,6 @@ async def test_extracts_all_four_headers():
         assert data["session_key"] == "agent:main:main"
 
 
-@pytest.mark.asyncio
 async def test_falls_back_to_default_when_headers_missing():
     app = _make_app("my-default")
     transport = ASGITransport(app=app)
@@ -59,7 +57,6 @@ async def test_falls_back_to_default_when_headers_missing():
         assert data["agent_id"] == ""
 
 
-@pytest.mark.asyncio
 async def test_sets_empty_string_when_header_missing_and_no_default():
     app = _make_app("")
     transport = ASGITransport(app=app)
@@ -69,7 +66,6 @@ async def test_sets_empty_string_when_header_missing_and_no_default():
         assert data["gateway_id"] == ""
 
 
-@pytest.mark.asyncio
 async def test_passes_through_to_next_handler():
     # R2-P1.1: matching default to header so the new mismatch reject
     # does not fire — this is a passthrough sanity test, not a reject
@@ -81,7 +77,6 @@ async def test_passes_through_to_next_handler():
         assert resp.status_code == 200
 
 
-@pytest.mark.asyncio
 async def test_extracts_fifth_actor_id_header():
     """G3 (#1174): The 5th X-EB-Actor-Id header is extracted into request.state.actor_id.
 
@@ -99,7 +94,6 @@ async def test_extracts_fifth_actor_id_header():
         assert data["actor_id"] == "actor-uuid-123"
 
 
-@pytest.mark.asyncio
 async def test_empty_gateway_id_header_triggers_default_fallback():
     """G1 (TF-FN-016): an EXPLICITLY empty `X-EB-Gateway-ID` header (as opposed to
     a missing header) falls through to `default_gateway_id`.
@@ -125,7 +119,6 @@ async def test_empty_gateway_id_header_triggers_default_fallback():
         assert data["gateway_id"] == "fallback-gw"
 
 
-@pytest.mark.asyncio
 async def test_agent_key_follows_expected_format_convention():
     """G2 (TF-FN-016, #555): pins the documented `{gateway_id}:{agentId}` format
     convention for `X-EB-Agent-Key`.
@@ -161,7 +154,6 @@ async def test_agent_key_follows_expected_format_convention():
         assert data["agent_key"].startswith(data["gateway_id"] + ":")
 
 
-@pytest.mark.asyncio
 async def test_injection_gateway_id_header_rejected_post_R2P5_charset_validation(monkeypatch):
     """G7 FLIPPED-AGAIN (#1493 fully RESOLVED — R2-P5 charset validation
     + R2-P1.1 mismatch reject):

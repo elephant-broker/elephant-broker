@@ -39,7 +39,6 @@ def _make_app(default_gw: str = "gw-a"):
     return app
 
 
-@pytest.mark.asyncio
 async def test_middleware_rejects_mismatched_gateway_header(monkeypatch):
     """R2-P1.1 G1: a request whose X-EB-Gateway-ID header conflicts with
     the container's configured gateway_id is rejected with 403 and a
@@ -58,7 +57,6 @@ async def test_middleware_rejects_mismatched_gateway_header(monkeypatch):
     assert "EB_ALLOW_CROSS_GATEWAY_HEADER" in body["detail"]
 
 
-@pytest.mark.asyncio
 async def test_middleware_accepts_matching_gateway_header(monkeypatch):
     """R2-P1.1 G2: a request whose header matches the container's
     gateway_id passes through untouched — the matching case is the
@@ -73,7 +71,6 @@ async def test_middleware_accepts_matching_gateway_header(monkeypatch):
     assert resp.json()["gateway_id"] == "gw-a"
 
 
-@pytest.mark.asyncio
 async def test_middleware_accepts_empty_header_using_default(monkeypatch):
     """R2-P1.1 G3 (regression guard): a request with no X-EB-Gateway-ID
     header gets the container default stamped on request.state — the
@@ -91,7 +88,6 @@ async def test_middleware_accepts_empty_header_using_default(monkeypatch):
     assert resp.json()["gateway_id"] == "gw-a"
 
 
-@pytest.mark.asyncio
 async def test_middleware_allows_mismatch_when_env_set(monkeypatch):
     """R2-P1.1 G4 (escape hatch): EB_ALLOW_CROSS_GATEWAY_HEADER=true
     bypasses the reject. The mismatched header value is then stamped
@@ -112,7 +108,6 @@ async def test_middleware_allows_mismatch_when_env_set(monkeypatch):
     assert resp.json()["gateway_id"] == "gw-b"
 
 
-@pytest.mark.asyncio
 async def test_bypass_mismatch_emits_warning_log(monkeypatch, caplog):
     """M4: bypass active + mismatched header emits WARNING log."""
     import logging
@@ -128,7 +123,6 @@ async def test_bypass_mismatch_emits_warning_log(monkeypatch, caplog):
     assert "gw-a" in caplog.text
 
 
-@pytest.mark.asyncio
 async def test_bypass_matching_header_no_warning(monkeypatch, caplog):
     """M4-bis: bypass active + matching header → no warning (no-op path)."""
     import logging
@@ -142,7 +136,6 @@ async def test_bypass_matching_header_no_warning(monkeypatch, caplog):
     assert "Cross-gateway header bypass" not in caplog.text
 
 
-@pytest.mark.asyncio
 async def test_charset_rejection_emits_warning_log(monkeypatch, caplog):
     """L1: charset/length rejection (400) emits WARNING log."""
     import logging
@@ -156,7 +149,6 @@ async def test_charset_rejection_emits_warning_log(monkeypatch, caplog):
     assert "Gateway middleware rejected request (400)" in caplog.text
 
 
-@pytest.mark.asyncio
 async def test_mismatch_rejection_emits_warning_log(monkeypatch, caplog):
     """L1: cross-gateway mismatch rejection (403) emits WARNING log."""
     import logging

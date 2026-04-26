@@ -39,18 +39,9 @@ def create_app(container: RuntimeContainer) -> FastAPI:
 
     Accepts a pre-built RuntimeContainer so tests can inject mocked adapters.
     """
-    # #1508 / F2 fix (TD-65 2nd follow-up): register container.close() on FastAPI
-    # shutdown via lifespan context manager. Previously no @app.on_event("shutdown")
-    # or lifespan= kwarg existed, so container.close() was never invoked on SIGTERM
-    # and the 14 "Closing adapter: ..." INFO logs in container.py:755-813 were dead
-    # code (devops Layer B/C verified 0 hits across a full day's shutdowns). Now:
-    # TestClient (and uvicorn in prod) trigger lifespan startup + shutdown
-    # automatically, driving close() → Redis locks released, adapter connections
-    # torn down cleanly, F2 logs actually emit. See IMPLEMENTED-PR-7-merge.md for
-    # the discovery cycle.
+    # Lifespan: yield on startup; close container on shutdown.
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # No startup actions — container is constructed before create_app() runs.
         yield
         await container.close()
 
