@@ -264,3 +264,12 @@ class TestOTELInstrumentation:
         assert len(spans) == 1
         # kwarg wins; self._gateway_id is the fallback only when kwarg absent
         assert spans[0].attributes["gateway_id"] == "gw-from-kwarg"
+
+
+class TestSetupOtelLoggingAnnotation:
+    def test_return_annotation_is_tuple_or_none(self):
+        """M8: setup_otel_logging must declare its return type annotation."""
+        import inspect
+        from elephantbroker.runtime.observability import setup_otel_logging
+        sig = inspect.signature(setup_otel_logging)
+        assert sig.return_annotation != inspect.Parameter.empty

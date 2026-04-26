@@ -4,7 +4,10 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk._logs import Logger as OTELLogger, LoggerProvider
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -61,7 +64,7 @@ def setup_tracing(config: InfraConfig, gateway_id: str = "") -> TracerProvider:
     return provider
 
 
-def setup_otel_logging(config: InfraConfig, gateway_id: str = ""):
+def setup_otel_logging(config: InfraConfig, gateway_id: str = "") -> tuple[OTELLogger, LoggerProvider] | None:
     """Configure OTEL LoggerProvider for TraceLedger event export to ClickHouse.
 
     Returns ``(Logger, LoggerProvider)`` tuple if configured, ``None``
