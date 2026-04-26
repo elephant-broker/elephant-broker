@@ -275,15 +275,10 @@ class ProcedureDataPoint(DataPoint):
     eb_id: str = ""
     gateway_id: str = ""
     decision_domain: str | None = None
-    # #1146 RESOLVED (R2-P2.1): mirrors ProcedureDefinition.is_manual_only
-    # so the flag survives graph round-trip. Legacy procedures stored before
-    # R2-P2.1 don't have this field and arrive as the default (False); the
-    # to_schema / to_schema_from_dict auto-infer compensates to keep the
-    # new model_validator happy (see those methods for the back-compat
-    # logic).
     is_manual_only: bool = False
     # Stored as JSON strings for graph persistence
     steps_json: str = "[]"
+    activation_modes_json: str = "[]"
     red_line_bindings_json: str = "[]"
     approval_requirements_json: str = "[]"
     metadata: dict[str, Any] = {"index_fields": ["name", "description"]}
@@ -307,13 +302,14 @@ class ProcedureDataPoint(DataPoint):
             # survives graph round-trip.
             is_manual_only=getattr(proc, "is_manual_only", False),
             steps_json=json.dumps([s.model_dump(mode="json") for s in proc.steps]) if proc.steps else "[]",
+            activation_modes_json=json.dumps([m.model_dump(mode="json") for m in proc.activation_modes]) if proc.activation_modes else "[]",
             red_line_bindings_json=json.dumps(proc.red_line_bindings) if proc.red_line_bindings else "[]",
             approval_requirements_json=json.dumps(proc.approval_requirements) if proc.approval_requirements else "[]",
         )
 
     def to_schema(self) -> ProcedureDefinition:
         import json
-        from elephantbroker.schemas.procedure import ProcedureStep
+        from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureStep
         steps = []
         try:
             raw = json.loads(self.steps_json) if self.steps_json else []
@@ -330,21 +326,16 @@ class ProcedureDataPoint(DataPoint):
             approval_requirements = json.loads(self.approval_requirements_json) if self.approval_requirements_json else []
         except Exception:
             pass
-        # #1146 RESOLVED (R2-P2.1): legacy-reconstruction auto-infer.
-        # ProcedureDefinition's new model_validator requires
-        # `activation_modes OR is_manual_only`. This DP path does NOT
-        # currently persist activation_modes (orthogonal follow-up TD —
-        # the storage schema lacks an `activation_modes_json` field), so
-        # every reconstructed procedure arrives with activation_modes=[].
-        # To satisfy the validator without breaking every graph read:
-        #   - Honor stored is_manual_only when True.
-        #   - Otherwise (stored False, or legacy record with no flag),
-        #     auto-infer is_manual_only=True because the reconstructed
-        #     activation_modes is always empty today.
-        # A truly auto-triggered procedure cannot survive round-trip via
-        # this DP path today — round-trip fidelity on activation_modes
-        # is a separate IMPLEMENTED-PR-7-merge.md follow-up note.
-        is_manual_only = True  # activation_modes not persisted → always manual-only on read
+        activation_modes = []
+        try:
+            raw_am = json.loads(self.activation_modes_json) if self.activation_modes_json else []
+            activation_modes = [ProcedureActivation(**m) for m in raw_am]
+        except Exception:
+            pass
+        # Legacy back-compat: if no activation_modes survived the round-trip
+        # (either legacy record or parse failure), infer is_manual_only=True
+        # so the model_validator (#1146) doesn't reject the reconstruction.
+        is_manual_only = self.is_manual_only if activation_modes else (self.is_manual_only or True)
         return ProcedureDefinition(
             id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
             name=self.name,
@@ -357,6 +348,7 @@ class ProcedureDataPoint(DataPoint):
             gateway_id=self.gateway_id,
             decision_domain=self.decision_domain,
             steps=steps,
+            activation_modes=activation_modes,
             red_line_bindings=red_line_bindings,
             approval_requirements=approval_requirements,
             is_manual_only=is_manual_only,
@@ -366,7 +358,7 @@ class ProcedureDataPoint(DataPoint):
     def to_schema_from_dict(cls, d: dict) -> ProcedureDefinition:
         """Reconstruct ProcedureDefinition from a graph entity dict."""
         import json
-        from elephantbroker.schemas.procedure import ProcedureStep
+        from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureStep
         steps = []
         steps_raw = d.get("steps_json") or d.get("steps", "[]")
         if isinstance(steps_raw, str):
@@ -395,14 +387,18 @@ class ProcedureDataPoint(DataPoint):
                 pass
         elif isinstance(ar_raw, list):
             approval_requirements = ar_raw
-        # #1146 RESOLVED (R2-P2.1): same auto-infer as to_schema() — the
-        # reconstructed activation_modes list is always empty today
-        # (activation_modes_json not yet in storage schema — orthogonal
-        # follow-up TD), so unconditionally mark as manual-only to
-        # satisfy ProcedureDefinition's new model_validator. Applies
-        # uniformly to legacy records (no stored is_manual_only field)
-        # and post-fix records.
-        is_manual_only = True
+        activation_modes = []
+        am_raw = d.get("activation_modes_json") or d.get("activation_modes", "[]")
+        if isinstance(am_raw, str):
+            try:
+                raw_am = json.loads(am_raw)
+                activation_modes = [ProcedureActivation(**m) for m in raw_am]
+            except Exception:
+                pass
+        elif isinstance(am_raw, list):
+            activation_modes = [ProcedureActivation(**m) if isinstance(m, dict) else m for m in am_raw]
+        stored_manual = d.get("is_manual_only", True)
+        is_manual_only = stored_manual if activation_modes else (stored_manual or True)
         return ProcedureDefinition(
             id=uuid.UUID(d["eb_id"]) if d.get("eb_id") else uuid.uuid4(),
             name=d.get("name", ""),
@@ -410,6 +406,7 @@ class ProcedureDataPoint(DataPoint):
             scope=d.get("scope", "session"),
             decision_domain=d.get("decision_domain"),
             steps=steps,
+            activation_modes=activation_modes,
             red_line_bindings=red_line_bindings,
             approval_requirements=approval_requirements,
             gateway_id=d.get("gateway_id", ""),
