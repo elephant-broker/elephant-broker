@@ -249,7 +249,7 @@ class TestSessionRoutes:
     async def test_session_start_increments_session_boundary_metric(self, client, container):
         """TD-65 follow-up (observer-reverify catch): POST /sessions/start now increments
         `eb_session_boundary_total{event="session_start"}` so the metric fires 1:1 with the
-        session_end increment in ContextLifecycle.session_end.
+        session_end increment in the session_end route (M1 moved from lifecycle to route).
 
         Previously the start increment was inside ContextLifecycle.bootstrap, which was a
         poor proxy — bootstrap can fire multiple times per session on re-bootstrap after
@@ -291,3 +291,46 @@ class TestSessionRoutes:
             "gateway_id": "gw-attacker",
         })
         assert r.status_code == 200
+
+    async def test_session_end_fires_session_boundary_metric(self, client, container):
+        """M1: POST /sessions/end increments eb_session_boundary_total{event="session_end"}
+        unconditionally from the HTTP route, regardless of tier.
+
+        Pre-fix: the metric lived inside ContextLifecycle.session_end(), only
+        reachable in FULL tier. MEMORY_ONLY deployments never incremented the
+        session_end counter, causing the start/end pair to diverge perpetually.
+        """
+        from unittest.mock import MagicMock
+        original = container.metrics_ctx.inc_session_boundary
+        spy = MagicMock(wraps=original)
+        container.metrics_ctx.inc_session_boundary = spy
+
+        await client.post("/sessions/end", json={
+            "session_key": "agent:main:main",
+            "session_id": "abc-123",
+        })
+        calls = [c.args[0] for c in spy.call_args_list if c.args]
+        assert "session_end" in calls, (
+            f"POST /sessions/end must call inc_session_boundary('session_end'); "
+            f"observed calls: {calls!r}"
+        )
+
+    async def test_session_end_metric_fires_without_context_lifecycle(self, client, container):
+        """M1-bis: in MEMORY_ONLY tier (no context_lifecycle), the session_end
+        metric still fires from the route — this was the missing path pre-fix.
+        """
+        from unittest.mock import MagicMock
+        container.context_lifecycle = None
+        original = container.metrics_ctx.inc_session_boundary
+        spy = MagicMock(wraps=original)
+        container.metrics_ctx.inc_session_boundary = spy
+
+        await client.post("/sessions/end", json={
+            "session_key": "agent:main:main",
+            "session_id": "abc-123",
+        })
+        calls = [c.args[0] for c in spy.call_args_list if c.args]
+        assert "session_end" in calls, (
+            f"MEMORY_ONLY: session_end metric must fire from route; "
+            f"observed calls: {calls!r}"
+        )

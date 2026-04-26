@@ -1265,9 +1265,6 @@ class ContextLifecycle:
                          "goals_flushed": goals_flushed},
             ))
 
-        if self._metrics:
-            self._metrics.inc_session_boundary("session_end")
-
         return {"goals_flushed": goals_flushed}
 
     # ==================================================================
