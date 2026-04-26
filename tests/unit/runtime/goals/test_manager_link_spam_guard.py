@@ -20,6 +20,7 @@ import pytest
 
 from elephantbroker.runtime.goals.manager import GoalManager
 from elephantbroker.schemas.goal import GoalState, GoalStatus
+from elephantbroker.schemas.trace import TraceEventType
 
 
 def _make_goal(parent_goal_id=None, owner_actor_ids=None) -> GoalState:
@@ -63,6 +64,11 @@ async def test_set_goal_rejects_cross_gateway_parent_for_CHILD_OF():
     assert "gw-b" in str(excinfo.value)
     # CHILD_OF add_relation never called.
     graph.add_relation.assert_not_awaited()
+    # R2-001: AUTHORITY_CHECK_FAILED trace emitted
+    trace.append_event.assert_awaited()
+    event = trace.append_event.call_args[0][0]
+    assert event.event_type == TraceEventType.AUTHORITY_CHECK_FAILED
+    assert event.payload["action"] == "set_goal"
 
 
 @pytest.mark.asyncio
@@ -95,3 +101,8 @@ async def test_set_goal_rejects_cross_gateway_owner_for_OWNS_GOAL():
     assert "gw-b" in str(excinfo.value)
     # OWNS_GOAL add_relation never called.
     graph.add_relation.assert_not_awaited()
+    # R2-001: AUTHORITY_CHECK_FAILED trace emitted
+    trace.append_event.assert_awaited()
+    event = trace.append_event.call_args[0][0]
+    assert event.event_type == TraceEventType.AUTHORITY_CHECK_FAILED
+    assert event.payload["action"] == "set_goal"

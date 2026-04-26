@@ -39,8 +39,10 @@ class ActorRegistry(IActorRegistry):
                 await assert_same_gateway(self._graph, str(team_id), self._gateway_id)
                 await self._graph.add_relation(str(actor.id), str(team_id), "MEMBER_OF")
             except PermissionError:
-                # Re-raise so cross-gateway link attempt becomes 403,
-                # not a silent best-effort skip.
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={"action": "register_actor", "target": str(team_id), "gateway_id": self._gateway_id},
+                ))
                 raise
             except Exception:
                 pass  # Edge creation is best-effort

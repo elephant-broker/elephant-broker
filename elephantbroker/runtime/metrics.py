@@ -348,6 +348,11 @@ def inc_search_stage_failure(stage: str, exception_type: str, gateway_id: str = 
         ).inc()
 
 
+def inc_cross_gateway_header_bypass(gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_cross_gateway_header_bypass_total.labels(gateway_id=gateway_id).inc()
+
+
 # --- Phase 5 safe helpers ---
 
 def inc_working_set_build(profile_name: str, status: str = "ok", gateway_id: str = "") -> None:

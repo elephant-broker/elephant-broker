@@ -17,6 +17,7 @@ import pytest
 
 from elephantbroker.runtime.actors.registry import ActorRegistry
 from elephantbroker.schemas.actor import ActorRef, ActorType
+from elephantbroker.schemas.trace import TraceEventType
 
 
 def _make_actor(team_ids=None) -> ActorRef:
@@ -59,3 +60,8 @@ async def test_register_actor_rejects_cross_gateway_team_for_MEMBER_OF():
     assert "R2-P7" in str(excinfo.value)
     assert "gw-b" in str(excinfo.value)
     graph.add_relation.assert_not_awaited()
+    # R2-001: AUTHORITY_CHECK_FAILED trace emitted
+    trace.append_event.assert_awaited()
+    event = trace.append_event.call_args[0][0]
+    assert event.event_type == TraceEventType.AUTHORITY_CHECK_FAILED
+    assert event.payload["action"] == "register_actor"

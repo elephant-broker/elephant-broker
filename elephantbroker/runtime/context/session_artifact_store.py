@@ -9,6 +9,7 @@ from elephantbroker.runtime.observability import GatewayLoggerAdapter
 from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.artifact import SessionArtifact, ToolArtifact
 from elephantbroker.schemas.config import ElephantBrokerConfig
+from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 
 class SessionArtifactStore:
@@ -162,7 +163,11 @@ class SessionArtifactStore:
                     await assert_same_gateway(graph, str(result.goal_id), self._gateway_id)
                     await graph.add_relation(artifact_node_id, str(result.goal_id), "SERVES_GOAL")
                 except PermissionError:
-                    # Re-raise so cross-gateway link attempt becomes 403.
+                    if self._trace:
+                        await self._trace.append_event(TraceEvent(
+                            event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                            payload={"action": "promote_artifact", "target": str(result.goal_id), "gateway_id": self._gateway_id},
+                        ))
                     raise
                 except Exception:
                     pass

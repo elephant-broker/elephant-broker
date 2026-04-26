@@ -19,6 +19,7 @@ import pytest
 
 from elephantbroker.runtime.context.session_artifact_store import SessionArtifactStore
 from elephantbroker.schemas.artifact import ToolArtifact
+from elephantbroker.schemas.trace import TraceEventType
 
 
 @pytest.mark.asyncio
@@ -94,3 +95,9 @@ async def test_promote_to_persistent_rejects_cross_gateway_goal_for_SERVES_GOAL(
         if c.args and c.args[2] == "SERVES_GOAL"
     ]
     assert serves_goal_calls == []
+    # R2-001: AUTHORITY_CHECK_FAILED trace emitted
+    trace_ledger = store._trace
+    trace_ledger.append_event.assert_awaited()
+    event = trace_ledger.append_event.call_args[0][0]
+    assert event.event_type == TraceEventType.AUTHORITY_CHECK_FAILED
+    assert event.payload["action"] == "promote_artifact"

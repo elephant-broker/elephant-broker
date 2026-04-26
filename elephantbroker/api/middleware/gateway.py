@@ -167,10 +167,8 @@ class GatewayIdentityMiddleware(BaseHTTPMiddleware):
                 "Cross-gateway header bypass: header=%s default=%s source=%s",
                 header_gw, self._default, request.client,
             )
-            from elephantbroker.runtime.metrics import METRICS_AVAILABLE
-            if METRICS_AVAILABLE:
-                from elephantbroker.runtime.metrics import eb_cross_gateway_header_bypass_total
-                eb_cross_gateway_header_bypass_total.labels(gateway_id=self._default).inc()
+            from elephantbroker.runtime.metrics import inc_cross_gateway_header_bypass
+            inc_cross_gateway_header_bypass(gateway_id=self._default)
 
         request.state.gateway_id = header_gw or self._default
         request.state.agent_key = header_agent_key

@@ -51,10 +51,14 @@ class GoalManager(IGoalManager):
         await cognee.add(goal_text, dataset_name=self._dataset_name)
 
         if goal.parent_goal_id:
-            # R2-P7 / link-spam guard: validate parent goal belongs to
-            # the same gateway. PermissionError → 403 via R2-P5
-            # middleware. Best-effort: skips check if parent missing.
-            await assert_same_gateway(self._graph, str(goal.parent_goal_id), self._gateway_id)
+            try:
+                await assert_same_gateway(self._graph, str(goal.parent_goal_id), self._gateway_id)
+            except PermissionError:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={"action": "set_goal", "target": str(goal.parent_goal_id), "gateway_id": self._gateway_id},
+                ))
+                raise
             await self._graph.add_relation(str(goal.id), str(goal.parent_goal_id), "CHILD_OF")
         # Create OWNS_GOAL edges for owner actors (best-effort)
         for owner_id in goal.owner_actor_ids:
@@ -66,8 +70,10 @@ class GoalManager(IGoalManager):
                 await assert_same_gateway(self._graph, str(owner_id), self._gateway_id)
                 await self._graph.add_relation(str(owner_id), str(goal.id), "OWNS_GOAL")
             except PermissionError:
-                # Re-raise PermissionError unswallowed — security-policy
-                # rejection must surface as 403, not a silent skip.
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={"action": "set_goal", "target": str(owner_id), "gateway_id": self._gateway_id},
+                ))
                 raise
             except Exception as exc:
                 logger.warning("Failed to create OWNS_GOAL edge: actor=%s goal=%s error=%s", owner_id, goal.id, exc)

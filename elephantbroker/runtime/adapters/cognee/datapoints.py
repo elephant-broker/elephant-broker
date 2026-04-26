@@ -335,7 +335,7 @@ class ProcedureDataPoint(DataPoint):
         # Legacy back-compat: if no activation_modes survived the round-trip
         # (either legacy record or parse failure), infer is_manual_only=True
         # so the model_validator (#1146) doesn't reject the reconstruction.
-        is_manual_only = self.is_manual_only if activation_modes else (self.is_manual_only or True)
+        is_manual_only = self.is_manual_only if activation_modes else True
         return ProcedureDefinition(
             id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
             name=self.name,
@@ -398,7 +398,7 @@ class ProcedureDataPoint(DataPoint):
         elif isinstance(am_raw, list):
             activation_modes = [ProcedureActivation(**m) if isinstance(m, dict) else m for m in am_raw]
         stored_manual = d.get("is_manual_only", True)
-        is_manual_only = stored_manual if activation_modes else (stored_manual or True)
+        is_manual_only = stored_manual if activation_modes else True
         return ProcedureDefinition(
             id=uuid.UUID(d["eb_id"]) if d.get("eb_id") else uuid.uuid4(),
             name=d.get("name", ""),
