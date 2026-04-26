@@ -719,6 +719,7 @@ EB tools to document (24 total):
 - 5 memory: `memory_store`, `memory_search`, `memory_get`, `memory_update`, `memory_forget`
 - 5 session goals: `session_goals_list`, `goal_create`, `session_goals_update_status`, `session_goals_add_blocker`, `session_goals_progress`
 - 4 procedures: `procedure_create`, `procedure_activate`, `procedure_complete_step`, `procedure_session_status`
+  > **Migration note (R2-P2.1, #1146):** `POST /procedures/` now requires either `activation_modes: [...]` (non-empty) OR `is_manual_only: true`. The default (`is_manual_only: false` + empty `activation_modes`) returns 422. The TS memory plugin's `procedures.create` defaults `is_manual_only: true` automatically (PR #7, H3); direct-API callers must update.
 - 2 artifacts: `artifact_search`, `create_artifact`
 - 2 guards: `guards_list`, `guard_status`
 - 6 admin: `admin_create_org`, `admin_create_team`, `admin_register_actor`, `admin_add_member`, `admin_remove_member`, `admin_merge_actors`

@@ -560,7 +560,7 @@ Path prefix: `gateway.*`
 | `gateway.team_id` | `str \| None` | `None` | `EB_TEAM_ID` | -- | Team ID binding the gateway to a team within an org | None = no team-level scope filtering; wrong value = data leaks across teams | `None` / `"team-eng"` / `"team-eng"` |
 | `gateway.agent_authority_level` | `int` | `0` | `EB_AGENT_AUTHORITY_LEVEL` | `ge=0` | Default authority level for the agent actor (used by guard autonomy classification) | Too high = agent bypasses safety guards; too low = excessive HITL approvals | `0` / `0` / `1` |
 
-Computed property: `gateway.effective_short_name` returns `gateway_short_name` if nonempty, else `gateway_id[:8]`.
+Computed property: `gateway.effective_short_name_or_id` returns `gateway_short_name` if nonempty, else `gateway_id[:8]`. The fixed-width variant `effective_short_name_padded` zero-pads or truncates to exactly 8 characters for log alignment.
 
 ---
 
