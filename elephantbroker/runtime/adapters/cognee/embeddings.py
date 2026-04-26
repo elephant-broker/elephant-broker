@@ -36,7 +36,7 @@ class EmbeddingService:
     async def embed_text(self, text: str) -> list[float]:
         """Embed a single text string and return the embedding vector."""
         results = await self.embed_batch([text])
-        return results[0]
+        return results[0] if results else []
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts in a single request.

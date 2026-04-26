@@ -216,3 +216,18 @@ class TestEmbeddingService:
 
         assert result == []
         assert "embed_batch malformed response" in caplog.text
+
+    async def test_embed_text_returns_empty_when_embed_batch_returns_empty(self):
+        """H1: embed_text() must not IndexError when embed_batch() returns [].
+
+        R2-P8 made embed_batch() return [] on malformed upstream 200s.
+        embed_text() did ``results[0]`` without guarding, converting a
+        gracefully-handled degradation into an IndexError on hot paths
+        (dedup, search, health probes).
+        """
+        svc = _make_service()
+        svc.embed_batch = AsyncMock(return_value=[])
+
+        result = await svc.embed_text("hello")
+        assert result == []
+        svc.embed_batch.assert_awaited_once_with(["hello"])
