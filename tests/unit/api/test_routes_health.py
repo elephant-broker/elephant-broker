@@ -165,3 +165,20 @@ class TestHealthRoutes:
         assert "gateway_id" in data
         assert data["gateway_id"] == "local"
         assert data["status"] == ("ready" if data["ready"] else "unhealthy")
+
+    async def test_ready_returns_200_when_optional_infra_not_configured(self, client, container):
+        """M5: tier deployment without optional infra returns 200 (not 503).
+
+        Components returning "not configured" (e.g., embedding, LLM in a
+        MEMORY_ONLY tier that omits them) must not fail the all_ok roll-up.
+        Pre-fix: all_ok checked status == "ok" only, so "not configured"
+        mapped to 503.
+        """
+        container.embeddings = None
+        container.llm_client = None
+        r = await client.get("/health/ready")
+        data = r.json()
+        assert r.status_code == 200
+        assert data["ready"] is True
+        assert data["checks"]["embedding"]["status"] == "not configured"
+        assert data["checks"]["llm"]["status"] == "not configured"

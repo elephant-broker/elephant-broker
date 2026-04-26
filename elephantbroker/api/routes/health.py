@@ -119,7 +119,7 @@ async def ready(request: Request):
     else:
         checks["llm"] = {"status": "not configured"}
 
-    all_ok = all(c.get("status") == "ok" for c in checks.values())
+    all_ok = all(c.get("status") in ("ok", "not configured") for c in checks.values())
     # R2-P4 / #11 RESOLVED: return HTTP 503 when any sub-check fails so
     # K8s readinessProbe can detect unhealthy pods. Pre-fix the route
     # always returned 200 (FastAPI default), even when ``ready=False``.
