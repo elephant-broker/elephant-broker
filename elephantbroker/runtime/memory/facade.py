@@ -68,6 +68,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self._metrics = metrics
         self._ingest_buffer = ingest_buffer
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
+        self._min_score_warned: bool = False
 
     @traced
     async def store(
@@ -259,7 +260,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         # the first time a non-zero ``min_score`` is supplied to a
         # given facade instance. Once-per-instance flag prevents log
         # flood under high-throughput callers.
-        if min_score > 0.0 and not getattr(self, "_min_score_warned", False):
+        if min_score > 0.0 and not self._min_score_warned:
             self._log.warning(
                 "facade.search min_score=%.2f ignored — facade fallback path has no "
                 "profile-driven scoring. Pass profile_name to enable RetrievalOrchestrator "

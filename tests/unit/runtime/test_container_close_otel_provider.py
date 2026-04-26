@@ -83,3 +83,20 @@ async def test_container_close_tolerates_missing_otel_provider():
     # otel_logger_provider defaults to None per __init__ change.
     assert container.otel_logger_provider is None
     await container.close()  # no raise
+
+
+@pytest.mark.asyncio
+async def test_close_logs_swallowed_exception_at_debug(caplog):
+    """L4: container.close() logs adapter close failures at DEBUG level
+    instead of silently swallowing them with bare `except: pass`."""
+    from unittest.mock import AsyncMock
+    container = RuntimeContainer()
+    mock_redis = AsyncMock()
+    mock_redis.aclose = AsyncMock(side_effect=ConnectionError("redis gone"))
+    container.redis = mock_redis
+
+    with caplog.at_level(logging.DEBUG, logger="elephantbroker.runtime.container"):
+        await container.close()
+
+    assert "Close failed for redis" in caplog.text
+    assert "redis gone" in caplog.text

@@ -127,6 +127,7 @@ class GatewayIdentityMiddleware(BaseHTTPMiddleware):
         ):
             err = _validate_header(name, value, gateway_id_strict=gw_strict)
             if err is not None:
+                logger.warning("Gateway middleware rejected request (400): %s | source=%s", err, request.client)
                 return JSONResponse(
                     status_code=400,
                     content={"detail": err},
@@ -141,18 +142,18 @@ class GatewayIdentityMiddleware(BaseHTTPMiddleware):
             and header_gw != self._default
             and not self._allow_cross
         ):
+            detail = (
+                f"Cross-gateway request rejected: header "
+                f"X-EB-Gateway-ID={header_gw!r} does not match "
+                f"container gateway_id={self._default!r}. "
+                f"EB is single-tenant-per-process; spin up a "
+                f"separate EB process for each gateway. "
+                f"For testing, set EB_ALLOW_CROSS_GATEWAY_HEADER=true."
+            )
+            logger.warning("Gateway middleware rejected request (403): %s | source=%s", detail, request.client)
             return JSONResponse(
                 status_code=403,
-                content={
-                    "detail": (
-                        f"Cross-gateway request rejected: header "
-                        f"X-EB-Gateway-ID={header_gw!r} does not match "
-                        f"container gateway_id={self._default!r}. "
-                        f"EB is single-tenant-per-process; spin up a "
-                        f"separate EB process for each gateway. "
-                        f"For testing, set EB_ALLOW_CROSS_GATEWAY_HEADER=true."
-                    )
-                },
+                content={"detail": detail},
             )
 
         if (

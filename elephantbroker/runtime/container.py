@@ -819,14 +819,14 @@ class RuntimeContainer:
             logger.info("Closing adapter: %s", "redis")
             try:
                 await self.redis.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Close failed for redis: %s", exc)
         if self.rerank:
             logger.info("Closing adapter: %s", "rerank")
             try:
                 await self.rerank.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Close failed for rerank: %s", exc)
         if self.procedure_audit:
             logger.info("Closing adapter: %s", "procedure_audit")
             await self.procedure_audit.close()
@@ -845,8 +845,8 @@ class RuntimeContainer:
             logger.info("Closing adapter: %s", "hitl_client")
             try:
                 await self.hitl_client.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Close failed for hitl_client: %s", exc)
         # Phase 9 cleanup
         for store_attr in ("tuning_delta_store", "scoring_ledger_store", "consolidation_report_store"):
             store = getattr(self, store_attr, None)
@@ -854,15 +854,15 @@ class RuntimeContainer:
                 logger.info("Closing adapter: %s", store_attr)
                 try:
                     await store.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Close failed for %s: %s", store_attr, exc)
         trace_qc = getattr(self, "trace_query_client", None)
         if trace_qc:
             logger.info("Closing adapter: %s", "trace_query_client")
             try:
                 trace_qc.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Close failed for trace_query_client: %s", exc)
         # OTEL LoggerProvider shutdown (#1181 RESOLVED, TF-FN-019 G11).
         # Flushes the BatchLogRecordProcessor buffer so trace events emitted
         # in the last ~5s of the pod's lifetime actually make it to ClickHouse
@@ -871,5 +871,5 @@ class RuntimeContainer:
             logger.info("Closing adapter: %s", "otel_logger_provider")
             try:
                 self.otel_logger_provider.shutdown()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Close failed for otel_logger_provider: %s", exc)

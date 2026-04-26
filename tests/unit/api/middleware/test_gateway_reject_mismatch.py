@@ -140,3 +140,32 @@ async def test_bypass_matching_header_no_warning(monkeypatch, caplog):
             resp = await client.get("/echo", headers={"X-EB-Gateway-ID": "gw-a"})
     assert resp.status_code == 200
     assert "Cross-gateway header bypass" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_charset_rejection_emits_warning_log(monkeypatch, caplog):
+    """L1: charset/length rejection (400) emits WARNING log."""
+    import logging
+    monkeypatch.delenv("EB_ALLOW_CROSS_GATEWAY_HEADER", raising=False)
+    app = _make_app(default_gw="gw-a")
+    transport = ASGITransport(app=app)
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.api.middleware.gateway"):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/echo", headers={"X-EB-Gateway-ID": "gw-a; DROP TABLE"})
+    assert resp.status_code == 400
+    assert "Gateway middleware rejected request (400)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mismatch_rejection_emits_warning_log(monkeypatch, caplog):
+    """L1: cross-gateway mismatch rejection (403) emits WARNING log."""
+    import logging
+    monkeypatch.delenv("EB_ALLOW_CROSS_GATEWAY_HEADER", raising=False)
+    app = _make_app(default_gw="gw-a")
+    transport = ASGITransport(app=app)
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.api.middleware.gateway"):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/echo", headers={"X-EB-Gateway-ID": "gw-b"})
+    assert resp.status_code == 403
+    assert "Gateway middleware rejected request (403)" in caplog.text
+    assert "gw-b" in caplog.text
