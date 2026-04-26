@@ -1,7 +1,9 @@
 """Tool artifact store interface."""
 from __future__ import annotations
 
+import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from elephantbroker.schemas.artifact import ArtifactHash, ToolArtifact
 
@@ -15,7 +17,17 @@ class IToolArtifactStore(ABC):
         ...
 
     @abstractmethod
-    async def search_artifacts(self, query: str, max_results: int = 10) -> list[ToolArtifact]:
+    async def search_artifacts(
+        self,
+        query: str,
+        max_results: int = 10,
+        *,
+        tool_name: str | None = None,
+        actor_id: uuid.UUID | None = None,
+        goal_id: uuid.UUID | None = None,
+        tags: list[str] | None = None,
+        created_after: datetime | None = None,
+    ) -> list[ToolArtifact]:
         """Search stored artifacts by query."""
         ...
 

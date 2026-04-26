@@ -1,8 +1,10 @@
 """Tests for ToolArtifactStore."""
+import inspect
 from unittest.mock import AsyncMock
 
 from elephantbroker.runtime.adapters.cognee.datapoints import ArtifactDataPoint
 from elephantbroker.runtime.artifacts.store import ToolArtifactStore
+from elephantbroker.runtime.interfaces.artifact_store import IToolArtifactStore
 from elephantbroker.runtime.trace.ledger import TraceLedger
 from tests.fixtures.factories import make_tool_artifact
 
@@ -132,3 +134,17 @@ class TestArtifactStore:
         result = await store.get_by_hash(ArtifactHash(value=digest))
         assert result is not None
         assert result.content == content
+
+
+class TestArtifactStoreABCConformance:
+    def test_search_artifacts_abc_signature_matches_concrete(self):
+        """H5: ABC and concrete search_artifacts must accept the same kwargs."""
+        abc_sig = inspect.signature(IToolArtifactStore.search_artifacts)
+        concrete_sig = inspect.signature(ToolArtifactStore.search_artifacts)
+        abc_params = set(abc_sig.parameters.keys())
+        concrete_params = set(concrete_sig.parameters.keys())
+        assert abc_params == concrete_params, (
+            f"ABC/concrete signature drift: "
+            f"ABC-only={abc_params - concrete_params}, "
+            f"concrete-only={concrete_params - abc_params}"
+        )
