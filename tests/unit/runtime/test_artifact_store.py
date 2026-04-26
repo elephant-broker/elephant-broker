@@ -6,6 +6,7 @@ from elephantbroker.runtime.adapters.cognee.datapoints import ArtifactDataPoint
 from elephantbroker.runtime.artifacts.store import ToolArtifactStore
 from elephantbroker.runtime.interfaces.artifact_store import IToolArtifactStore
 from elephantbroker.runtime.trace.ledger import TraceLedger
+from elephantbroker.schemas.artifact import ArtifactHash
 from tests.fixtures.factories import make_tool_artifact
 
 
@@ -123,17 +124,34 @@ class TestArtifactStore:
         content = "hello world"
         digest = hashlib.sha256(content.encode()).hexdigest()
         art = make_tool_artifact(content=content)
+        art.content_hash = ArtifactHash(value=digest)
         dp = ArtifactDataPoint.from_schema(art)
         props = {
             "eb_id": dp.eb_id, "tool_name": dp.tool_name, "summary": dp.summary,
-            "content": content, "eb_created_at": dp.eb_created_at,
+            "content": content, "content_hash": digest,
+            "eb_created_at": dp.eb_created_at,
             "token_estimate": dp.token_estimate, "tags": dp.tags,
         }
         graph.query_cypher = AsyncMock(return_value=[{"props": props}])
-        from elephantbroker.schemas.artifact import ArtifactHash
         result = await store.get_by_hash(ArtifactHash(value=digest))
         assert result is not None
         assert result.content == content
+        assert result.content_hash is not None
+        assert result.content_hash.value == digest
+
+    async def test_get_by_hash_returns_none_on_miss(self):
+        store, graph, _, _, _ = self._make()
+        graph.query_cypher = AsyncMock(return_value=[])
+        result = await store.get_by_hash(ArtifactHash(value="nonexistent"))
+        assert result is None
+
+    async def test_from_schema_persists_content_hash(self):
+        import hashlib
+        art = make_tool_artifact(content="test content")
+        digest = hashlib.sha256(b"test content").hexdigest()
+        art.content_hash = ArtifactHash(value=digest)
+        dp = ArtifactDataPoint.from_schema(art)
+        assert dp.content_hash == digest
 
 
 class TestArtifactStoreABCConformance:

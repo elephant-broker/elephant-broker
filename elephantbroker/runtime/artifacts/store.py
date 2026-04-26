@@ -165,17 +165,15 @@ class ToolArtifactStore(IToolArtifactStore):
 
     async def get_by_hash(self, content_hash: ArtifactHash) -> ToolArtifact | None:
         cypher = (
-            "MATCH (a:ArtifactDataPoint) WHERE a.gateway_id = $gateway_id "
-            "RETURN properties(a) AS props"
+            "MATCH (a:ArtifactDataPoint) "
+            "WHERE a.gateway_id = $gateway_id AND a.content_hash = $hash "
+            "RETURN properties(a) AS props LIMIT 1"
         )
-        records = await self._graph.query_cypher(cypher, {"gateway_id": self._gateway_id})
-        for rec in records:
-            props = rec["props"]
-            # Check if the content hash matches by hashing stored content
-            content = props.get("content", "")
-            digest = hashlib.sha256(content.encode()).hexdigest()
-            if digest == content_hash.value:
-                clean_props = clean_graph_props(props)
-                dp = ArtifactDataPoint(**clean_props)
-                return dp.to_schema()
-        return None
+        records = await self._graph.query_cypher(
+            cypher, {"gateway_id": self._gateway_id, "hash": content_hash.value},
+        )
+        if not records:
+            return None
+        clean_props = clean_graph_props(records[0]["props"])
+        dp = ArtifactDataPoint(**clean_props)
+        return dp.to_schema()

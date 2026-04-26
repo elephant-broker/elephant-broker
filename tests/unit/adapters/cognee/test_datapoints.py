@@ -613,11 +613,11 @@ class TestDataPointContractLimits:
         not field-access."""
         assert "evidence_refs" not in ClaimDataPoint.model_fields
 
-    def test_artifact_datapoint_does_not_carry_content_hash(self):
-        """G6: ArtifactHash is lost on DataPoint round-trip (#156). Pins the contract
-        that content hashing is done outside the DataPoint surface; callers that need
-        hashes must look them up via ToolArtifactStore.get_by_hash()."""
-        assert "content_hash" not in ArtifactDataPoint.model_fields
+    def test_artifact_datapoint_carries_content_hash_for_O1_lookup(self):
+        """M7 FLIPPED (TODO-7-064): ArtifactDataPoint now persists content_hash
+        so get_by_hash() can use a single Cypher equality filter (O(1)) instead
+        of loading all artifacts and re-hashing in Python (O(n))."""
+        assert "content_hash" in ArtifactDataPoint.model_fields
 
 
 class TestAllDataPointsGatewayIdFallback:

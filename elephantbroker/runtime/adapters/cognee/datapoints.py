@@ -509,6 +509,7 @@ class ArtifactDataPoint(DataPoint):
     tool_name: str
     summary: str = ""
     content: str = ""
+    content_hash: str = ""
     session_id: str | None = None
     actor_id: str | None = None
     goal_id: str | None = None
@@ -526,6 +527,7 @@ class ArtifactDataPoint(DataPoint):
             tool_name=art.tool_name,
             summary=art.summary,
             content=art.content,
+            content_hash=art.content_hash.value if art.content_hash else "",
             session_id=str(art.session_id) if art.session_id else None,
             actor_id=str(art.actor_id) if art.actor_id else None,
             goal_id=str(art.goal_id) if art.goal_id else None,
@@ -537,11 +539,13 @@ class ArtifactDataPoint(DataPoint):
         )
 
     def to_schema(self) -> ToolArtifact:
+        from elephantbroker.schemas.artifact import ArtifactHash
         return ToolArtifact(
             artifact_id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
             tool_name=self.tool_name,
             summary=self.summary,
             content=self.content,
+            content_hash=ArtifactHash(value=self.content_hash) if self.content_hash else None,
             session_id=uuid.UUID(self.session_id) if self.session_id else None,
             actor_id=uuid.UUID(self.actor_id) if self.actor_id else None,
             goal_id=uuid.UUID(self.goal_id) if self.goal_id else None,
