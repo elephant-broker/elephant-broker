@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from elephantbroker.runtime.memory.facade import MemoryStoreFacade
+from elephantbroker.schemas.trace import TraceEventType
 
 
 @pytest.mark.asyncio
@@ -44,7 +45,7 @@ async def test_try_add_edge_rejects_cross_gateway_target():
         graph=graph,
         vector=MagicMock(),
         embeddings=MagicMock(),
-        trace_ledger=MagicMock(),
+        trace_ledger=AsyncMock(),
         dataset_name="test",
         gateway_id="gw-a",
     )
@@ -74,7 +75,7 @@ async def test_try_add_edge_allows_same_gateway_target():
         graph=graph,
         vector=MagicMock(),
         embeddings=MagicMock(),
-        trace_ledger=MagicMock(),
+        trace_ledger=AsyncMock(),
         dataset_name="test",
         gateway_id="gw-a",
     )
@@ -83,3 +84,49 @@ async def test_try_add_edge_allows_same_gateway_target():
     # Edge created — return value is the count of edges added.
     assert result == 1
     graph.add_relation.assert_awaited_once_with("src-1", "tgt-1", "ABOUT_ACTOR")
+
+
+@pytest.mark.asyncio
+async def test_try_add_edge_emits_trace_and_metric_on_cross_gateway():
+    """M2: cross-gateway edge rejection must emit AUTHORITY_CHECK_FAILED
+    trace event + inc_authority_check metric before re-raising.
+
+    Pre-fix: _try_add_edge called assert_same_gateway outside the
+    try block — PermissionError propagated with zero observability.
+    All 4 other cross-tenant rejection sites in the same file
+    (promote_scope, promote_class, update, get_by_id) emit both.
+    """
+    graph = AsyncMock()
+    graph.get_entity = AsyncMock(return_value={"gateway_id": "gw-b", "eb_id": "tgt-1"})
+    graph.add_relation = AsyncMock()
+
+    trace_ledger = AsyncMock()
+    trace_ledger.append_event = AsyncMock()
+
+    metrics = MagicMock()
+    metrics.inc_authority_check = MagicMock()
+
+    facade = MemoryStoreFacade(
+        graph=graph,
+        vector=MagicMock(),
+        embeddings=MagicMock(),
+        trace_ledger=trace_ledger,
+        dataset_name="test",
+        gateway_id="gw-a",
+        metrics=metrics,
+    )
+
+    with pytest.raises(PermissionError):
+        await facade._try_add_edge("src-1", "tgt-1", "ABOUT_ACTOR")
+
+    # Trace event emitted
+    trace_ledger.append_event.assert_awaited_once()
+    event = trace_ledger.append_event.call_args[0][0]
+    assert event.event_type == TraceEventType.AUTHORITY_CHECK_FAILED
+    assert event.payload["action"] == "edge_store"
+    assert event.payload["rel_type"] == "ABOUT_ACTOR"
+
+    # Metric incremented
+    metrics.inc_authority_check.assert_called_once_with(
+        action="edge_store", result="denied",
+    )

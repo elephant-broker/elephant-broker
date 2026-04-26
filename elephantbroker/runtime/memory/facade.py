@@ -188,14 +188,22 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             raise
 
     async def _try_add_edge(self, source: str, target: str, rel_type: str) -> int:
-        # R2-P7 / link-spam guard: validate target's gateway_id BEFORE
-        # entering the metrics try/except so PermissionError propagates
-        # to the caller. The R2-P5 error-handler middleware converts
-        # PermissionError → HTTP 403; the existing best-effort edge-
-        # failure path (return 0 + WARN log) is reserved for *runtime*
-        # failures (driver disconnect, MERGE conflicts), not for
-        # security-policy rejections.
-        await assert_same_gateway(self._graph, target, self._gateway_id)
+        try:
+            await assert_same_gateway(self._graph, target, self._gateway_id)
+        except PermissionError:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "edge_store",
+                    "rel_type": rel_type,
+                    "source": source[:8],
+                    "target": target[:8],
+                    "gateway_id": self._gateway_id,
+                },
+            ))
+            if self._metrics:
+                self._metrics.inc_authority_check(action="edge_store", result="denied")
+            raise
         try:
             await self._graph.add_relation(source, target, rel_type)
             if self._metrics:
