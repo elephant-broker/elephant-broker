@@ -110,3 +110,33 @@ async def test_middleware_allows_mismatch_when_env_set(monkeypatch):
     # With escape hatch, header value is stamped — useful for L2 probes
     # exercising cross-tenant rejection at the facade layer.
     assert resp.json()["gateway_id"] == "gw-b"
+
+
+@pytest.mark.asyncio
+async def test_bypass_mismatch_emits_warning_log(monkeypatch, caplog):
+    """M4: bypass active + mismatched header emits WARNING log."""
+    import logging
+    monkeypatch.setenv("EB_ALLOW_CROSS_GATEWAY_HEADER", "true")
+    app = _make_app(default_gw="gw-a")
+    transport = ASGITransport(app=app)
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.api.middleware.gateway"):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/echo", headers={"X-EB-Gateway-ID": "gw-b"})
+    assert resp.status_code == 200
+    assert "Cross-gateway header bypass" in caplog.text
+    assert "gw-b" in caplog.text
+    assert "gw-a" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bypass_matching_header_no_warning(monkeypatch, caplog):
+    """M4-bis: bypass active + matching header → no warning (no-op path)."""
+    import logging
+    monkeypatch.setenv("EB_ALLOW_CROSS_GATEWAY_HEADER", "true")
+    app = _make_app(default_gw="gw-a")
+    transport = ASGITransport(app=app)
+    with caplog.at_level(logging.WARNING, logger="elephantbroker.api.middleware.gateway"):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/echo", headers={"X-EB-Gateway-ID": "gw-a"})
+    assert resp.status_code == 200
+    assert "Cross-gateway header bypass" not in caplog.text

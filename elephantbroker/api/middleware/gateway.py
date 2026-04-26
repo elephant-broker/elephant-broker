@@ -1,12 +1,15 @@
 """Gateway identity middleware — extracts 5 identity headers into request.state."""
 from __future__ import annotations
 
+import logging
 import os
 import string
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+
+logger = logging.getLogger(__name__)
 
 
 # #1493 RESOLVED (R2-P5): X-EB-* header charset enforcement. Allowed
@@ -151,6 +154,21 @@ class GatewayIdentityMiddleware(BaseHTTPMiddleware):
                     )
                 },
             )
+
+        if (
+            header_gw
+            and self._default
+            and header_gw != self._default
+            and self._allow_cross
+        ):
+            logger.warning(
+                "Cross-gateway header bypass: header=%s default=%s source=%s",
+                header_gw, self._default, request.client,
+            )
+            from elephantbroker.runtime.metrics import METRICS_AVAILABLE
+            if METRICS_AVAILABLE:
+                from elephantbroker.runtime.metrics import eb_cross_gateway_header_bypass_total
+                eb_cross_gateway_header_bypass_total.labels(gateway_id=self._default).inc()
 
         request.state.gateway_id = header_gw or self._default
         request.state.agent_key = header_agent_key

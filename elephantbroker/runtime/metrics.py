@@ -237,6 +237,11 @@ try:
     eb_bootstrap_mode_active = Gauge(
         "eb_bootstrap_mode_active", "Bootstrap mode", ["gateway_id"],
     )
+    eb_cross_gateway_header_bypass_total = Counter(
+        "eb_cross_gateway_header_bypass_total",
+        "Cross-gateway header bypass via EB_ALLOW_CROSS_GATEWAY_HEADER",
+        ["gateway_id"],
+    )
 
     METRICS_AVAILABLE = True
 except ImportError:
@@ -821,6 +826,10 @@ class MetricsContext:
     def inc_authority_check(self, action: str, result: str) -> None:
         if METRICS_AVAILABLE:
             eb_authority_checks_total.labels(gateway_id=self._gw, action=action, result=result).inc()
+
+    def inc_cross_gateway_header_bypass(self) -> None:
+        if METRICS_AVAILABLE:
+            eb_cross_gateway_header_bypass_total.labels(gateway_id=self._gw).inc()
 
     def inc_admin_op(self, operation: str, status: str) -> None:
         if METRICS_AVAILABLE:
