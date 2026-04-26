@@ -32,7 +32,10 @@ router = APIRouter()
 # flapping and matches K8s expectations.
 # ---------------------------------------------------------------------------
 _llm_probe_cache: dict[str, tuple[float, dict]] = {}
-_LLM_PROBE_TTL_SEC = 60.0
+_embedding_probe_cache: dict[str, tuple[float, dict]] = {}
+_PROBE_TTL_SEC = 60.0
+_PROBE_CACHE_MAX = 100
+_LLM_PROBE_TTL_SEC = _PROBE_TTL_SEC
 
 
 @router.get("/")
@@ -84,15 +87,25 @@ async def ready(request: Request):
     else:
         checks["qdrant"] = {"status": "not configured"}
 
-    # Embedding service connectivity
+    # Embedding service connectivity — cached per-gateway (L3, mirrors LLM cache)
     if container.embeddings:
-        t0 = time.monotonic()
-        try:
-            await container.embeddings.embed_text("health check")
-            checks["embedding"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
-        except Exception as exc:
-            logger.warning("%s health check failed: %s", "Embedding", exc)
-            checks["embedding"] = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
+        gw_id_emb = container.gateway_id
+        now_emb = time.monotonic()
+        cached_emb = _embedding_probe_cache.get(gw_id_emb)
+        if cached_emb is not None and (now_emb - cached_emb[0]) < _PROBE_TTL_SEC:
+            checks["embedding"] = cached_emb[1]
+        else:
+            t0 = time.monotonic()
+            try:
+                await container.embeddings.embed_text("health check")
+                emb_check = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 2)}
+            except Exception as exc:
+                logger.warning("%s health check failed: %s", "Embedding", exc)
+                emb_check = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
+            if len(_embedding_probe_cache) > _PROBE_CACHE_MAX:
+                _embedding_probe_cache.clear()
+            _embedding_probe_cache[gw_id_emb] = (now_emb, emb_check)
+            checks["embedding"] = emb_check
     else:
         checks["embedding"] = {"status": "not configured"}
 
@@ -114,6 +127,8 @@ async def ready(request: Request):
             except Exception as exc:
                 logger.warning("%s health check failed: %s", "LLM", exc)
                 llm_check = {"status": "error", "latency_ms": round((time.monotonic() - t0) * 1000, 2), "error": str(exc)}
+            if len(_llm_probe_cache) > _PROBE_CACHE_MAX:
+                _llm_probe_cache.clear()
             _llm_probe_cache[gw_id] = (now, llm_check)
             checks["llm"] = llm_check
     else:

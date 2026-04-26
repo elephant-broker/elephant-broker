@@ -140,19 +140,18 @@ def container(mock_graph, mock_vector, mock_embeddings):
 
 
 @pytest.fixture(autouse=True)
-def _clear_llm_probe_cache():
-    """R2-P4 / #9: clear the module-level LLM probe cache between tests.
+def _clear_health_probe_caches():
+    """Clear module-level health probe caches between tests.
 
-    The /health/ready route caches the LLM probe per-gateway for 60s to
-    avoid token burn on K8s readinessProbe loops. The cache is module-
-    scoped so without explicit clearing, results leak between tests
-    (a "down" mock from one test would mask the "ok" expectation of the
-    next test). Autouse so all API tests see a fresh cache.
+    Both LLM and embedding probes cache per-gateway for 60s. Without
+    explicit clearing, results leak between tests.
     """
     from elephantbroker.api.routes import health as _health_module
     _health_module._llm_probe_cache.clear()
+    _health_module._embedding_probe_cache.clear()
     yield
     _health_module._llm_probe_cache.clear()
+    _health_module._embedding_probe_cache.clear()
 
 
 @pytest.fixture(autouse=True)

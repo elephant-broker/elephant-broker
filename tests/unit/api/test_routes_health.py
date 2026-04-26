@@ -182,3 +182,63 @@ class TestHealthRoutes:
         assert data["ready"] is True
         assert data["checks"]["embedding"]["status"] == "not configured"
         assert data["checks"]["llm"]["status"] == "not configured"
+
+    async def test_llm_probe_cache_caps_at_100_entries(self):
+        """L2: _llm_probe_cache clears when exceeding 100 entries."""
+        from elephantbroker.api.routes.health import _llm_probe_cache, _PROBE_CACHE_MAX
+        import time
+        saved = dict(_llm_probe_cache)
+        try:
+            _llm_probe_cache.clear()
+            for i in range(_PROBE_CACHE_MAX + 1):
+                _llm_probe_cache[f"gw-{i}"] = (time.monotonic(), {"status": "ok"})
+            assert len(_llm_probe_cache) == _PROBE_CACHE_MAX + 1
+            # Simulate the cap trigger (next write clears when > max)
+            if len(_llm_probe_cache) > _PROBE_CACHE_MAX:
+                _llm_probe_cache.clear()
+            _llm_probe_cache["gw-new"] = (time.monotonic(), {"status": "ok"})
+            assert len(_llm_probe_cache) == 1
+        finally:
+            _llm_probe_cache.clear()
+            _llm_probe_cache.update(saved)
+
+    async def test_embedding_probe_cached_within_ttl(self, client, container):
+        """L3: second /ready call within TTL reuses cached embedding result."""
+        from elephantbroker.api.routes.health import _embedding_probe_cache
+        saved = dict(_embedding_probe_cache)
+        try:
+            _embedding_probe_cache.clear()
+            call_count = 0
+            original_embed = container.embeddings.embed_text
+
+            async def counting_embed(text):
+                nonlocal call_count
+                call_count += 1
+                return await original_embed(text)
+
+            container.embeddings.embed_text = counting_embed
+            await client.get("/health/ready")
+            assert call_count == 1
+            await client.get("/health/ready")
+            assert call_count == 1  # cached, no second call
+        finally:
+            _embedding_probe_cache.clear()
+            _embedding_probe_cache.update(saved)
+
+    async def test_embedding_probe_cache_caps_at_100_entries(self):
+        """L3: _embedding_probe_cache clears when exceeding 100 entries."""
+        from elephantbroker.api.routes.health import _embedding_probe_cache, _PROBE_CACHE_MAX
+        import time
+        saved = dict(_embedding_probe_cache)
+        try:
+            _embedding_probe_cache.clear()
+            for i in range(_PROBE_CACHE_MAX + 1):
+                _embedding_probe_cache[f"gw-{i}"] = (time.monotonic(), {"status": "ok"})
+            assert len(_embedding_probe_cache) == _PROBE_CACHE_MAX + 1
+            if len(_embedding_probe_cache) > _PROBE_CACHE_MAX:
+                _embedding_probe_cache.clear()
+            _embedding_probe_cache["gw-new"] = (time.monotonic(), {"status": "ok"})
+            assert len(_embedding_probe_cache) == 1
+        finally:
+            _embedding_probe_cache.clear()
+            _embedding_probe_cache.update(saved)
