@@ -1474,6 +1474,21 @@ class TestMemoryStoreFacadePhase4:
         await facade.store(make_fact_assertion())
         metrics.inc_store.assert_called_once_with("store", "success")
 
+    async def test_store_success_increments_facts_stored(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Gap #11: inc_facts_stored(memory_class, profile_name) fires on store success."""
+        from unittest.mock import MagicMock
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        await facade.store(fact)
+        mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
+        metrics.inc_facts_stored.assert_called_once_with(mc, "unknown")
+
     async def test_store_failure_emits_failure_status_and_reraises(
         self, monkeypatch, mock_add_data_points,
     ):

@@ -183,6 +183,8 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
             if self._metrics:
                 self._metrics.inc_store("store", "success")
+                mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
+                self._metrics.inc_facts_stored(mc, "unknown")
             else:
                 inc_store("store", "success")
             logger.info("Stored fact %s (%s, %d tokens)", fact.id, fact.memory_class, fact.token_size or 0)

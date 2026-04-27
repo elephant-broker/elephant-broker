@@ -306,6 +306,9 @@ class CandidateGenerator:
                     # Fallback: return all items unfiltered
                     pass
 
+            if self._metrics:
+                for _ in items:
+                    self._metrics.inc_procedure_qualified()
             return items
         except Exception:
             return []
