@@ -25,7 +25,8 @@ class ProcedureEngine(IProcedureEngine):
 
     def __init__(self, graph: GraphAdapter, trace_ledger: ITraceLedger,
                  dataset_name: str = "elephantbroker", gateway_id: str = "",
-                 redis=None, redis_keys=None, ttl_seconds: int = 172800) -> None:
+                 redis=None, redis_keys=None, ttl_seconds: int = 172800,
+                 metrics=None) -> None:
         self._graph = graph
         self._trace = trace_ledger
         self._executions: dict[uuid.UUID, ProcedureExecution] = {}
@@ -34,6 +35,7 @@ class ProcedureEngine(IProcedureEngine):
         self._redis = redis
         self._keys = redis_keys
         self._ttl = ttl_seconds
+        self._metrics = metrics
         self._evidence_engine = None  # Set post-init by container
         self._session_goal_store = None  # Set post-init by container
         self._definitions: dict[uuid.UUID, ProcedureDefinition] = {}
@@ -115,6 +117,8 @@ class ProcedureEngine(IProcedureEngine):
                          "decision_domain": (proc.decision_domain if proc else None) or "none"},
             )
         )
+        if self._metrics:
+            self._metrics.inc_procedure_activated()
         return execution
 
     async def check_step(self, activation_id: uuid.UUID, step_id: uuid.UUID) -> StepCheckResult:
@@ -161,6 +165,8 @@ class ProcedureEngine(IProcedureEngine):
         # Mark step complete
         if step_id not in execution.completed_steps:
             execution.completed_steps.append(step_id)
+            if self._metrics:
+                self._metrics.inc_procedure_step_completed()
 
         # Update auto-goal sub-goal
         if self._session_goal_store and execution.session_key and execution.session_id:
@@ -202,6 +208,9 @@ class ProcedureEngine(IProcedureEngine):
             )
             await self._evidence_engine.attach_evidence(claim.id, evidence)
             await self._evidence_engine.verify(claim.id)
+
+            if self._metrics:
+                self._metrics.inc_procedure_proof(evidence.type)
 
             if self._trace:
                 await self._trace.append_event(TraceEvent(

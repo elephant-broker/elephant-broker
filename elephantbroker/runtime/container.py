@@ -430,6 +430,7 @@ class RuntimeContainer:
                 c.graph, c.trace_ledger, dataset_name=dataset_name, gateway_id=gw_id,
                 redis=c.redis, redis_keys=c.redis_keys,
                 ttl_seconds=config.consolidation_min_retention_seconds,
+                metrics=c.metrics_ctx,
             )
 
         if _enabled(tier, "IEvidenceAndVerificationEngine"):

@@ -1,6 +1,6 @@
 """Tests for ProcedureEngine."""
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -266,3 +266,51 @@ class TestProcedureEngine:
         engine._graph.get_entity.assert_called_once()
         call_kwargs = engine._graph.get_entity.call_args
         assert call_kwargs[1].get("gateway_id") == "gw-99"
+
+
+class TestProcedureEngineMetrics:
+    """Gaps #5/#6/#7: procedure metrics must fire on activate, step complete, proof submit."""
+
+    def _make_with_metrics(self):
+        graph = AsyncMock()
+        ledger = TraceLedger()
+        metrics = MagicMock()
+        engine = ProcedureEngine(graph, ledger, dataset_name="test_ds", metrics=metrics)
+        return engine, graph, metrics
+
+    async def test_inc_procedure_activated_on_activate(self):
+        """Gap #5: inc_procedure_activated() fires on successful activate()."""
+        engine, graph, metrics = self._make_with_metrics()
+        proc_id = uuid.uuid4()
+        graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "test"})
+        await engine.activate(proc_id, uuid.uuid4())
+        metrics.inc_procedure_activated.assert_called_once()
+
+    async def test_inc_procedure_step_completed_on_check_step(self):
+        """Gap #6: inc_procedure_step_completed() fires when step is newly completed."""
+        engine, graph, metrics = self._make_with_metrics()
+        proc_id = uuid.uuid4()
+        graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "test"})
+        execution = await engine.activate(proc_id, uuid.uuid4())
+        metrics.reset_mock()  # Clear the activate metric call
+        step_id = uuid.uuid4()
+        await engine.check_step(execution.execution_id, step_id)
+        metrics.inc_procedure_step_completed.assert_called_once()
+
+    async def test_inc_procedure_proof_on_record_step_evidence(self):
+        """Gap #7: inc_procedure_proof(proof_type) fires when proof evidence is recorded."""
+        engine, graph, metrics = self._make_with_metrics()
+        proc_id = uuid.uuid4()
+        graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "test"})
+        execution = await engine.activate(proc_id, uuid.uuid4())
+        # Wire evidence engine mock
+        evidence_engine = AsyncMock()
+        evidence_engine.record_claim = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
+        evidence_engine.attach_evidence = AsyncMock()
+        evidence_engine.verify = AsyncMock()
+        engine._evidence_engine = evidence_engine
+        metrics.reset_mock()
+        await engine.record_step_evidence(
+            execution.execution_id, uuid.uuid4(), proof_value="screenshot.png",
+        )
+        metrics.inc_procedure_proof.assert_called_once_with("tool_output")
