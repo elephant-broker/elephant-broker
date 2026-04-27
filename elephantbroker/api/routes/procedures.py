@@ -12,6 +12,10 @@ from elephantbroker.schemas.procedure import ProcedureDefinition
 router = APIRouter()
 
 
+def _get_metrics(request: Request):
+    return getattr(get_container(request), "metrics_ctx", None)
+
+
 class ActivateRequest(BaseModel):
     actor_id: uuid.UUID | None = None
 
@@ -22,6 +26,9 @@ class StepCompleteRequest(BaseModel):
 
 @router.post("/")
 async def create_procedure(procedure: ProcedureDefinition, request: Request):
+    metrics = _get_metrics(request)
+    if metrics:
+        metrics.inc_procedure_tool("create")
     engine = get_procedure_engine(request)
     # Middleware wins unconditionally over caller-supplied procedure.gateway_id —
     # tenant-isolation boundary. See TD-41 and actors.py create_actor().
@@ -51,6 +58,9 @@ class ActivateRequestV2(BaseModel):
 
 @router.post("/{procedure_id}/activate")
 async def activate_procedure(procedure_id: uuid.UUID, body: ActivateRequestV2, request: Request):
+    metrics = _get_metrics(request)
+    if metrics:
+        metrics.inc_procedure_tool("activate")
     engine = get_procedure_engine(request)
     if engine is None:
         raise HTTPException(status_code=501, detail="Procedure engine not available")
@@ -87,6 +97,9 @@ async def complete_step(
     execution_id: uuid.UUID, step_id: uuid.UUID,
     body: StepCompleteRequest, request: Request,
 ):
+    metrics = _get_metrics(request)
+    if metrics:
+        metrics.inc_procedure_tool("complete_step")
     engine = get_procedure_engine(request)
     if engine is None:
         raise HTTPException(status_code=501, detail="Procedure engine not available")
@@ -143,6 +156,9 @@ async def get_session_procedure_status(
     session_key: str = "", session_id: str = "", request: Request = None,
 ):
     """View all procedures tracked in this session."""
+    metrics = _get_metrics(request)
+    if metrics:
+        metrics.inc_procedure_tool("session_status")
     container = get_container(request)
     audit = getattr(container, "procedure_audit", None)
     if not audit:
