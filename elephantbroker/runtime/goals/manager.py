@@ -13,6 +13,7 @@ from cognee.tasks.storage import add_data_points
 from elephantbroker.runtime.adapters.cognee.datapoints import GoalDataPoint
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
+from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.runtime.interfaces.goal_manager import IGoalManager
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
 from elephantbroker.schemas.goal import GoalHierarchy, GoalState, GoalStatus
@@ -50,11 +51,30 @@ class GoalManager(IGoalManager):
         await cognee.add(goal_text, dataset_name=self._dataset_name)
 
         if goal.parent_goal_id:
+            try:
+                await assert_same_gateway(self._graph, str(goal.parent_goal_id), self._gateway_id)
+            except PermissionError:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={"action": "set_goal", "target": str(goal.parent_goal_id), "gateway_id": self._gateway_id},
+                ))
+                raise
             await self._graph.add_relation(str(goal.id), str(goal.parent_goal_id), "CHILD_OF")
         # Create OWNS_GOAL edges for owner actors (best-effort)
         for owner_id in goal.owner_actor_ids:
             try:
+                # R2-P7 / link-spam guard: validate owner actor belongs
+                # to the same gateway. PermissionError surfaces here
+                # (NOT swallowed by the inner except — re-raised below)
+                # so the cross-gateway link attempt becomes a 403.
+                await assert_same_gateway(self._graph, str(owner_id), self._gateway_id)
                 await self._graph.add_relation(str(owner_id), str(goal.id), "OWNS_GOAL")
+            except PermissionError:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={"action": "set_goal", "target": str(owner_id), "gateway_id": self._gateway_id},
+                ))
+                raise
             except Exception as exc:
                 logger.warning("Failed to create OWNS_GOAL edge: actor=%s goal=%s error=%s", owner_id, goal.id, exc)
         await self._trace.append_event(
@@ -79,6 +99,24 @@ class GoalManager(IGoalManager):
         return goals
 
     async def get_goal_hierarchy(self, root_goal_id: uuid.UUID) -> GoalHierarchy:
+        """Return the goal hierarchy rooted at ``root_goal_id``.
+
+        Returns an empty :class:`GoalHierarchy` if the root is missing —
+        this follows the EB **collection-getter convention**: read-side
+        methods that return a container/list shape (``GoalHierarchy``,
+        ``list[FactAssertion]``, ``dict[str, ...]``) return an empty
+        instance for "not found" rather than raising. Callers iterate
+        the result without branching on a sentinel.
+
+        Counterpart: :meth:`update_goal_status` follows the
+        **mutation-method convention** and raises ``KeyError`` for the
+        same "missing goal" condition (#1188 EB convention alignment,
+        researcher's R2-P10 audit). Both behaviors are correct per
+        their respective method classes — if you need consistent
+        error-shape across the pair, translate at the route boundary
+        (see :func:`api.routes.goals.update_goal` which catches
+        ``KeyError`` and returns 404).
+        """
         root_entity = await self._graph.get_entity(str(root_goal_id))
         if root_entity is None:
             return GoalHierarchy()
@@ -106,6 +144,22 @@ class GoalManager(IGoalManager):
 
     async def update_goal_status(self, goal_id: uuid.UUID, status: GoalStatus,
                                  confidence: float | None = None) -> GoalState:
+        """Mutate a goal's status (and optionally confidence).
+
+        Raises ``KeyError(f"Goal not found: {goal_id}")`` if the goal
+        does not exist — this follows the EB **mutation-method
+        convention**: write-side methods raise on missing target so
+        callers cannot silently fail to mutate. The route layer
+        (``api/routes/goals.update_goal``) translates this to HTTP
+        404 per #1188 R2-P10 fix.
+
+        Counterpart: :meth:`get_goal_hierarchy` follows the
+        **collection-getter convention** and returns an empty
+        :class:`GoalHierarchy` for the same condition. Both behaviors
+        are correct per their respective method classes — researcher's
+        R2-P10 audit confirmed this against the EB-wide convention
+        survey.
+        """
         entity = await self._graph.get_entity(str(goal_id))
         if entity is None:
             raise KeyError(f"Goal not found: {goal_id}")

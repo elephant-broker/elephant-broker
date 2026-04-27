@@ -187,7 +187,7 @@ try:
     eb_session_boundary_total = Counter(
         "eb_session_boundary_total",
         "Session boundary events (start/end)",
-        ["gateway_id", "action"],
+        ["gateway_id", "event"],
     )
 
     eb_session_ttl_touch_total = Counter(
@@ -236,6 +236,11 @@ try:
     )
     eb_bootstrap_mode_active = Gauge(
         "eb_bootstrap_mode_active", "Bootstrap mode", ["gateway_id"],
+    )
+    eb_cross_gateway_header_bypass_total = Counter(
+        "eb_cross_gateway_header_bypass_total",
+        "Cross-gateway header bypass via EB_ALLOW_CROSS_GATEWAY_HEADER",
+        ["gateway_id"],
     )
 
     METRICS_AVAILABLE = True
@@ -341,6 +346,11 @@ def inc_search_stage_failure(stage: str, exception_type: str, gateway_id: str = 
         eb_memory_search_stage_failures_total.labels(
             gateway_id=gateway_id, stage=stage, exception_type=exception_type,
         ).inc()
+
+
+def inc_cross_gateway_header_bypass(gateway_id: str = "") -> None:
+    if METRICS_AVAILABLE:
+        eb_cross_gateway_header_bypass_total.labels(gateway_id=gateway_id).inc()
 
 
 # --- Phase 5 safe helpers ---
@@ -718,9 +728,9 @@ class MetricsContext:
         if METRICS_AVAILABLE:
             eb_goal_create_total.labels(gateway_id=self._gw).inc()
 
-    def inc_session_boundary(self, action: str) -> None:
+    def inc_session_boundary(self, event: str) -> None:
         if METRICS_AVAILABLE:
-            eb_session_boundary_total.labels(gateway_id=self._gw, action=action).inc()
+            eb_session_boundary_total.labels(gateway_id=self._gw, event=event).inc()
 
     def inc_session_ttl_touch(self) -> None:
         try:
@@ -821,6 +831,10 @@ class MetricsContext:
     def inc_authority_check(self, action: str, result: str) -> None:
         if METRICS_AVAILABLE:
             eb_authority_checks_total.labels(gateway_id=self._gw, action=action, result=result).inc()
+
+    def inc_cross_gateway_header_bypass(self) -> None:
+        if METRICS_AVAILABLE:
+            eb_cross_gateway_header_bypass_total.labels(gateway_id=self._gw).inc()
 
     def inc_admin_op(self, operation: str, status: str) -> None:
         if METRICS_AVAILABLE:

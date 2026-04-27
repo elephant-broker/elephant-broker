@@ -84,6 +84,8 @@ def container(mock_graph, mock_vector, mock_embeddings):
     # Gateway identity
     c.redis_keys = RedisKeyBuilder("local")
     c.metrics_ctx = MetricsContext("local")
+    # R2-P4 / #1505: public gateway_id attribute used by health endpoints.
+    c.gateway_id = "local"
 
     # Phase 4: mock LLM client
     c.llm_client = AsyncMock()
@@ -135,6 +137,21 @@ def container(mock_graph, mock_vector, mock_embeddings):
     c._bootstrap_checked = False
 
     return c
+
+
+@pytest.fixture(autouse=True)
+def _clear_health_probe_caches():
+    """Clear module-level health probe caches between tests.
+
+    Both LLM and embedding probes cache per-gateway for 60s. Without
+    explicit clearing, results leak between tests.
+    """
+    from elephantbroker.api.routes import health as _health_module
+    _health_module._llm_probe_cache.clear()
+    _health_module._embedding_probe_cache.clear()
+    yield
+    _health_module._llm_probe_cache.clear()
+    _health_module._embedding_probe_cache.clear()
 
 
 @pytest.fixture(autouse=True)

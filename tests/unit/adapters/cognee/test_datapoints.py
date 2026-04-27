@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from elephantbroker.runtime.adapters.cognee.datapoints import (
     ActorDataPoint,
     ArtifactDataPoint,
@@ -172,13 +174,14 @@ class TestGoalDataPoint:
 
 class TestProcedureDataPoint:
     def test_from_schema(self):
-        proc = ProcedureDefinition(name="Deploy", description="Deploy to prod")
+        # R2-P2.1 #1146: is_manual_only=True required for activation_modes-empty procedures.
+        proc = ProcedureDefinition(name="Deploy", description="Deploy to prod", is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         assert dp.name == "Deploy"
         assert dp.description == "Deploy to prod"
 
     def test_to_schema(self):
-        proc = ProcedureDefinition(name="Review", version=3)
+        proc = ProcedureDefinition(name="Review", version=3, is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
         assert restored.name == "Review"
@@ -191,6 +194,7 @@ class TestProcedureDataPoint:
             description="Detailed",
             version=2,
             source_actor_id=actor,
+            is_manual_only=True,
         )
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
@@ -301,6 +305,21 @@ class TestFactDataPointEdgeCases:
         dp = FactDataPoint(text="Test", category="general", eb_id="")
         restored = dp.to_schema()
         assert restored.id is not None  # generates new UUID
+
+    def test_to_schema_zero_timestamp_falls_back_to_now(self):
+        """G1: eb_created_at/eb_updated_at == 0 (sentinel) falls back to datetime.now(UTC).
+
+        Pins the `if self.eb_X_at else datetime.now(UTC)` guard at datapoints.py:110-111.
+        Ensures DataPoints ingested before timestamp migrations still reconstruct with a
+        sane creation/update time rather than epoch 1970.
+        """
+        from datetime import UTC, datetime
+
+        dp = FactDataPoint(text="x", category="general", eb_created_at=0, eb_updated_at=0)
+        restored = dp.to_schema()
+        now = datetime.now(UTC)
+        assert abs((restored.created_at - now).total_seconds()) < 2.0
+        assert abs((restored.updated_at - now).total_seconds()) < 2.0
 
 
 class TestClaimDataPointEdgeCases:
@@ -437,6 +456,7 @@ class TestProcedureDataPointPhase7:
             name="Deploy",
             steps=[ProcedureStep(order=0, instruction="Run tests",
                                  required_evidence=[ProofRequirement(description="log", proof_type=ProofType.CHUNK_REF)])],
+            is_manual_only=True,
         )
         dp = ProcedureDataPoint.from_schema(proc)
         assert "Run tests" in dp.steps_json
@@ -447,21 +467,21 @@ class TestProcedureDataPointPhase7:
 
     def test_red_line_bindings_round_trip(self):
         from elephantbroker.schemas.procedure import ProcedureDefinition
-        proc = ProcedureDefinition(name="Deploy", red_line_bindings=["no_unreviewed_deploys"])
+        proc = ProcedureDefinition(name="Deploy", red_line_bindings=["no_unreviewed_deploys"], is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
         assert restored.red_line_bindings == ["no_unreviewed_deploys"]
 
     def test_approval_requirements_round_trip(self):
         from elephantbroker.schemas.procedure import ProcedureDefinition
-        proc = ProcedureDefinition(name="Deploy", approval_requirements=["tech_lead"])
+        proc = ProcedureDefinition(name="Deploy", approval_requirements=["tech_lead"], is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         restored = dp.to_schema()
         assert restored.approval_requirements == ["tech_lead"]
 
     def test_decision_domain_round_trip(self):
         from elephantbroker.schemas.procedure import ProcedureDefinition
-        proc = ProcedureDefinition(name="Deploy", decision_domain="code_change")
+        proc = ProcedureDefinition(name="Deploy", decision_domain="code_change", is_manual_only=True)
         dp = ProcedureDataPoint.from_schema(proc)
         assert dp.decision_domain == "code_change"
         restored = dp.to_schema()
@@ -500,6 +520,26 @@ class TestProcedureDataPointPhase7:
         assert proc.red_line_bindings == ["binding1"]
         assert len(proc.steps) == 1
 
+    def test_procedure_to_schema_handles_malformed_json(self):
+        """G4: malformed JSON in steps_json / red_line_bindings_json / approval_requirements_json
+        must NOT raise -- degrade gracefully to empty list.
+
+        Pins the three try/except Exception blocks at datapoints.py:295-309. Operationally
+        critical: a corrupt Neo4j node property must never crash the procedure lookup path,
+        only degrade into an empty collection so the caller can still retrieve the
+        surrounding procedure metadata.
+        """
+        dp = ProcedureDataPoint(
+            name="x",
+            steps_json="not-json[",
+            red_line_bindings_json="{bad",
+            approval_requirements_json="}])",
+        )
+        restored = dp.to_schema()
+        assert restored.steps == []
+        assert restored.red_line_bindings == []
+        assert restored.approval_requirements == []
+
 
 class TestGoalDataPointPhase7:
     def test_goal_metadata_round_trip(self):
@@ -523,3 +563,111 @@ class TestGoalDataPointPhase7:
         assert dp.goal_meta == {}
         restored = dp.to_schema()
         assert restored.metadata == {}
+
+    def test_goal_meta_values_coerced_to_str(self):
+        """G3: goal_meta non-str values are coerced to str on to_schema() so GoalState.metadata
+        (typed `dict[str, str]`) round-trips safely through Neo4j even when Cognee/Neo4j
+        write back native Python types (int, bool, float) for JSON primitives.
+
+        Pins the coercion at datapoints.py:228 (`{str(k): str(v) for k, v in self.goal_meta.items()}`).
+        """
+        dp = GoalDataPoint(
+            title="x",
+            goal_meta={"count": 42, "flag": True, "ratio": 0.5},
+        )
+        restored = dp.to_schema()
+        assert restored.metadata == {"count": "42", "flag": "True", "ratio": "0.5"}
+
+
+# ---------------------------------------------------------------------------
+# Contract / cross-class tests (TF-FN-006)
+# ---------------------------------------------------------------------------
+
+
+class TestActorDataPointBackwardCompat:
+    """G2: ActorDataPoint has no real backward-compat wiring for the legacy team_id field."""
+
+    def test_legacy_team_id_silently_dropped(self):
+        """G2: Pydantic drops the legacy singular `team_id` key; team_ids stays at default [].
+
+        Pins actual behavior (no backward-compat logic exists). The misleading
+        'Backward compat' comment that formerly lived at datapoints.py:158 was deleted
+        in D8 because it described behavior that the code did NOT implement; the
+        auditor confirmed no legacy production data carries the old key.
+        """
+        dp = ActorDataPoint.model_validate({
+            "display_name": "legacy_actor",
+            "actor_type": "worker_agent",
+            "team_id": "legacy-uuid-should-be-ignored",
+        })
+        assert dp.team_ids == []
+
+
+class TestDataPointContractLimits:
+    """Documents the DataPoint contract boundary -- fields that are intentionally NOT
+    carried on the DataPoint (they live elsewhere in the graph)."""
+
+    def test_claim_datapoint_does_not_carry_evidence_refs(self):
+        """G5: ClaimRecord.evidence_refs are stored as SUPPORTS graph edges, not on the
+        DataPoint (#154). Pins the contract that evidence traversal is graph-traversal,
+        not field-access."""
+        assert "evidence_refs" not in ClaimDataPoint.model_fields
+
+    def test_artifact_datapoint_carries_content_hash_for_O1_lookup(self):
+        """M7 FLIPPED (TODO-7-064): ArtifactDataPoint now persists content_hash
+        so get_by_hash() can use a single Cypher equality filter (O(1)) instead
+        of loading all artifacts and re-hashing in Python (O(n))."""
+        assert "content_hash" in ArtifactDataPoint.model_fields
+
+
+class TestAllDataPointsGatewayIdFallback:
+    """G7 + G8: cross-class invariants that must hold for every EB-facing DataPoint class."""
+
+    _DP_CLASSES = [
+        FactDataPoint,
+        ActorDataPoint,
+        GoalDataPoint,
+        ProcedureDataPoint,
+        ClaimDataPoint,
+        EvidenceDataPoint,
+        ArtifactDataPoint,
+    ]
+
+    def test_from_schema_uses_getattr_fallback_for_gateway_id(self):
+        """G7: every DataPoint.from_schema(schema) reads gateway_id via getattr-with-default,
+        NOT direct attribute access. Pins the compatibility contract -- schemas that
+        pre-date gateway identity (or mocks in tests) must still round-trip without
+        AttributeError when gateway_id is absent from the source schema."""
+        import inspect
+        import re
+
+        pattern = re.compile(r"getattr\([^,]+,\s*['\"]gateway_id['\"]")
+        for cls in self._DP_CLASSES:
+            src = inspect.getsource(cls.from_schema)
+            assert pattern.search(src), (
+                f"{cls.__name__}.from_schema must read gateway_id via getattr fallback "
+                f"(pattern: getattr(..., 'gateway_id', ...)). Direct attribute access would "
+                f"break on pre-gateway-identity schemas and in test fixtures."
+            )
+
+    @pytest.mark.parametrize(
+        "dp_cls",
+        [
+            FactDataPoint,
+            ActorDataPoint,
+            GoalDataPoint,
+            ProcedureDataPoint,
+            ClaimDataPoint,
+            EvidenceDataPoint,
+            ArtifactDataPoint,
+        ],
+    )
+    def test_all_datapoint_classes_have_index_fields(self, dp_cls):
+        """G8: every EB-facing DataPoint declares a non-empty index_fields list on its
+        metadata default. This list drives Cognee's vector indexing at add_data_points()
+        time -- an empty or missing list would silently skip embedding that class into
+        Qdrant, breaking semantic search on that entity type."""
+        dp = dp_cls.model_construct()
+        idx = dp.metadata.get("index_fields")
+        assert isinstance(idx, list)
+        assert len(idx) >= 1

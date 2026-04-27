@@ -17,6 +17,7 @@ from elephantbroker.runtime.adapters.cognee.datapoints import (
     OrganizationDataPoint,
     TeamDataPoint,
 )
+from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.schemas.base import Scope
 from elephantbroker.schemas.goal import GoalState, GoalStatus
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
@@ -209,7 +210,9 @@ async def create_team(body: CreateTeamRequest, request: Request):
         org_id=body.org_id, eb_id=team_id,
     )
     await add_data_points([dp])
-    # BELONGS_TO edge: team → org
+    # BELONGS_TO edge: team → org. No assert_same_gateway — Org/TeamDataPoint
+    # have no gateway_id (Phase 8: business entities span gateways). The _auth
+    # call above provides access control.
     await container.graph.add_relation(team_id, body.org_id, "BELONGS_TO")
 
     await container.trace_ledger.append_event(TraceEvent(
@@ -267,6 +270,24 @@ async def update_team(team_id: str, body: CreateTeamRequest, request: Request):
 async def add_team_member(team_id: str, body: AddMemberRequest, request: Request):
     await _auth(request, "add_team_member", target_team_id=team_id)
     container = request.app.state.container
+    # R2-P7 / link-spam guard: validate the supplied actor_id (and team_id)
+    # both belong to the caller's gateway. PermissionError → 403 via R2-P5
+    # middleware. Closes the cross-gateway membership-injection surface
+    # where a privileged caller in tenant A could attach an actor from
+    # tenant B to one of A's teams (or vice versa).
+    # Canonical None-guard pattern (see trace.py:25-39 + walker
+    # rationale in test_gateway_id_usage_walker.py): the middleware
+    # always stamps request.state.gateway_id to a string (possibly
+    # ""), so `is None` only short-circuits when middleware isn't
+    # wired (test paths). A truthy `or` would treat "" as "missing"
+    # and silently fall back to container.gateway_id, which collides
+    # with the middleware contract that empty-string is a valid
+    # stamp.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        gw_id = container.gateway_id
+    await assert_same_gateway(container.graph, body.actor_id, gw_id)
+    await assert_same_gateway(container.graph, team_id, gw_id)
     await container.graph.add_relation(body.actor_id, team_id, "MEMBER_OF")
     await container.trace_ledger.append_event(TraceEvent(
         event_type=TraceEventType.MEMBER_ADDED,
@@ -284,6 +305,24 @@ async def add_team_member(team_id: str, body: AddMemberRequest, request: Request
 async def remove_team_member(team_id: str, actor_id: str, request: Request):
     await _auth(request, "remove_team_member", target_team_id=team_id)
     container = request.app.state.container
+    # R2-P7 / link-spam guard: validate the supplied actor_id and team_id
+    # both belong to the caller's gateway before deleting the edge. A
+    # privileged caller in tenant A must not be able to delete tenant B's
+    # MEMBER_OF edges via a guessed-id DELETE. PermissionError → 403 via
+    # R2-P5 middleware.
+    # Canonical None-guard pattern (see trace.py:25-39 + walker
+    # rationale in test_gateway_id_usage_walker.py): the middleware
+    # always stamps request.state.gateway_id to a string (possibly
+    # ""), so `is None` only short-circuits when middleware isn't
+    # wired (test paths). A truthy `or` would treat "" as "missing"
+    # and silently fall back to container.gateway_id, which collides
+    # with the middleware contract that empty-string is a valid
+    # stamp.
+    gw_id = getattr(request.state, "gateway_id", None)
+    if gw_id is None:
+        gw_id = container.gateway_id
+    await assert_same_gateway(container.graph, actor_id, gw_id)
+    await assert_same_gateway(container.graph, team_id, gw_id)
     if hasattr(container.graph, "delete_relation"):
         await container.graph.delete_relation(actor_id, team_id, "MEMBER_OF")
     else:

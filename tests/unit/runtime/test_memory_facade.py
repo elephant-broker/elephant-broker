@@ -258,19 +258,27 @@ class TestMemoryStoreFacade:
         result = await facade.decay(fact.id, 0)
         assert result.confidence == 0.0
 
-    async def test_decay_clamps_to_one(self, monkeypatch, mock_add_data_points, mock_cognee):
+    async def test_decay_rejects_factor_above_one_post_R2P9_fix(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """Pre-R2-P9 ``decay(factor=2.0)`` returned a clamped 1.0
+        confidence — implicit boost-then-clamp that contradicted the
+        method's monotonic-decrease semantics. Post-R2-P9
+        (#1184 RESOLVED) the same input raises ``ValueError``.
+        """
         facade, graph, _, _, _ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
         fact = make_fact_assertion(confidence=0.8)
+        # get_entity not strictly needed for the validation path (the
+        # ValueError fires before the entity lookup), but keep the mock
+        # consistent with the sibling test.
         graph.get_entity = AsyncMock(return_value={
             "eb_id": str(fact.id), "text": fact.text, "category": "general",
             "scope": "session", "confidence": 0.8, "eb_created_at": 0,
             "eb_updated_at": 0, "use_count": 0, "successful_use_count": 0,
             "provenance_refs": [], "target_actor_ids": [], "goal_ids": [],
         })
-        result = await facade.decay(fact.id, 2.0)
-        assert result.confidence == 1.0
+        with pytest.raises(ValueError, match=r"decay factor must be in \[0\.0, 1\.0\]"):
+            await facade.decay(fact.id, 2.0)
 
     async def test_search_graceful_when_cognee_fails(self, monkeypatch, mock_add_data_points, mock_cognee):
         """search() falls back to structural when cognee.search() raises."""

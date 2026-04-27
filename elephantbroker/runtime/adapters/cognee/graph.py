@@ -1,12 +1,39 @@
 """Neo4j graph adapter — wraps the Neo4j async driver directly."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from pydantic import BaseModel
 
 from elephantbroker.schemas.config import CogneeConfig
+
+# R2-P7 / #1165 RESOLVED — strict relation-type sanitization.
+# Pre-fix: ``relation_type.upper().replace(" ", "_")`` only stripped
+# spaces. Cypher 5 rejects ``-``, ``.``, and other non-identifier
+# characters in relationship-type literals, so a caller passing
+# ``"has-child"`` produced an invalid ``[r:HAS-CHILD]`` clause that
+# raised at runtime. Post-fix: any character outside
+# ``[A-Za-z0-9_]`` is replaced with ``_`` after upper-casing —
+# matches Neo4j's identifier rules and keeps the legacy callers'
+# ``OWNS_GOAL`` / ``CREATED_BY`` / etc. shapes unchanged.
+_SAFE_REL_TYPE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _sanitize_rel_type(relation_type: str) -> str:
+    """Restrict ``relation_type`` to ``[A-Za-z0-9_]`` for safe use as
+    a Cypher relationship-type literal.
+
+    The result is upper-cased first (preserves the existing convention)
+    then any disallowed character is replaced with ``_``. Idempotent:
+    sanitizing an already-clean type (e.g., ``OWNS_GOAL``) is a no-op.
+
+    Permissive: accepts types starting with digits or underscores
+    (e.g., ``'3rd_party'`` -> ``'3RD_PARTY'``). Neo4j allows these
+    for relationship types though it diverges from node label rules.
+    """
+    return _SAFE_REL_TYPE.sub("_", relation_type.upper())
 
 
 class SubgraphResult(BaseModel):
@@ -47,8 +74,9 @@ class GraphAdapter:
         """Create a relationship between two nodes identified by ``eb_id``."""
         driver = await self._get_driver()
         props = properties or {}
-        # Sanitize relation_type for Cypher label
-        safe_type = relation_type.upper().replace(" ", "_")
+        # R2-P7 / #1165 RESOLVED: full charset sanitization (was
+        # ``.upper().replace(" ", "_")`` which let hyphens through).
+        safe_type = _sanitize_rel_type(relation_type)
 
         cypher = (
             f"MATCH (a {{eb_id: $source_id}}), (b {{eb_id: $target_id}}) "
@@ -93,7 +121,8 @@ class GraphAdapter:
         driver = await self._get_driver()
 
         if relation_types:
-            rel_filter = "|".join(rt.upper().replace(" ", "_") for rt in relation_types)
+            # R2-P7 / #1165: strict charset sanitization (see _sanitize_rel_type).
+            rel_filter = "|".join(_sanitize_rel_type(rt) for rt in relation_types)
             rel_pattern = f"[:{rel_filter}*1..{depth}]"
         else:
             rel_pattern = f"[*1..{depth}]"
@@ -124,7 +153,8 @@ class GraphAdapter:
         driver = await self._get_driver()
 
         if relation_types:
-            rel_filter = "|".join(rt.upper().replace(" ", "_") for rt in relation_types)
+            # R2-P7 / #1165: strict charset sanitization (see _sanitize_rel_type).
+            rel_filter = "|".join(_sanitize_rel_type(rt) for rt in relation_types)
             rel_pattern = f"[r:{rel_filter}*1..{max_depth}]"
         else:
             rel_pattern = f"[r*1..{max_depth}]"
@@ -165,7 +195,8 @@ class GraphAdapter:
     ) -> None:
         """Delete a specific relationship between two nodes."""
         driver = await self._get_driver()
-        safe_type = relation_type.upper().replace(" ", "_")
+        # R2-P7 / #1165: strict charset sanitization (see _sanitize_rel_type).
+        safe_type = _sanitize_rel_type(relation_type)
         cypher = f"MATCH (a {{eb_id: $source_id}})-[r:{safe_type}]->(b {{eb_id: $target_id}}) DELETE r"
         async with driver.session() as session:
             await session.run(cypher, source_id=source_id, target_id=target_id)

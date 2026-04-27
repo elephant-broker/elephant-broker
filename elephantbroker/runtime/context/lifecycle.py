@@ -327,7 +327,13 @@ class ContextLifecycle:
         if self._metrics:
             self._metrics.inc_lifecycle_call("bootstrap", profile_name)
             self._metrics.observe_lifecycle_duration("bootstrap", profile_name, time.monotonic() - t0)
-            self._metrics.inc_session_boundary("session_start")
+            # TD-65 follow-up: session_start metric moved to the HTTP route
+            # (sessions.py POST /sessions/start) to match the session_end
+            # pairing. Bootstrap is a context-engine event (potentially fires
+            # multiple times per session on re-bootstrap after dispose — see
+            # TF-FN-011 GF-15 history) so it was a poor proxy for "session
+            # started" — observer Layer B/C reverify confirmed the
+            # session_start time series was missing in practice.
 
         return BootstrapResult(bootstrapped=True)
 
@@ -1193,14 +1199,30 @@ class ContextLifecycle:
                 session_key=sk,
                 session_id=sid,
                 gateway_id=self._gateway_id,
-                payload={"action": "engine_teardown", "session_key": sk, "session_id": sid},
+                payload={"event": "engine_teardown", "session_key": sk, "session_id": sid},
             ))
 
-    async def session_end(self, sk: str, sid: str) -> dict:
+    async def session_end(
+        self,
+        sk: str,
+        sid: str,
+        *,
+        agent_id: str | None = None,
+        agent_key: str | None = None,
+    ) -> dict:
         """Actual session cleanup — called on real session end only (GF-15).
 
         Flushes goals to Cognee, unloads guards, deletes SessionContext from Redis.
         Does NOT delete session artifacts (TTL-based expiry for Phase 9).
+
+        The ``agent_id`` and ``agent_key`` kwargs are plumbed through from the route
+        layer so the lifecycle's SESSION_BOUNDARY emission carries the same top-level
+        identity fields as the route's own emission (TD-65 observer-reverify
+        follow-ups). When omitted, falls back to empty string on the trace event
+        (not ``None``) to keep the field type stable. The container's
+        ``self._agent_key`` is not used here because lifecycle is a
+        gateway-wide singleton and has no per-request identity — the route
+        (which has request.state) is the authoritative source.
         """
         if not sid and sk in self._bootstrap_session_ids:
             sid = self._bootstrap_session_ids.pop(sk)
@@ -1237,12 +1259,11 @@ class ContextLifecycle:
                 session_key=sk,
                 session_id=sid,
                 gateway_id=self._gateway_id,
-                payload={"action": "session_end", "session_key": sk, "session_id": sid,
+                agent_id=agent_id or "",
+                agent_key=agent_key or "",
+                payload={"event": "lifecycle_session_end", "session_key": sk, "session_id": sid,
                          "goals_flushed": goals_flushed},
             ))
-
-        if self._metrics:
-            self._metrics.inc_session_boundary("session_end")
 
         return {"goals_flushed": goals_flushed}
 

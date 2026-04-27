@@ -16,6 +16,7 @@ from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.adapters.cognee.vector import VectorAdapter
 from elephantbroker.runtime.graph_utils import clean_graph_props
+from elephantbroker.runtime.identity_utils import assert_same_gateway, assert_same_gateway_batch
 from elephantbroker.runtime.interfaces.memory_store import IMemoryStoreFacade
 from elephantbroker.runtime.interfaces.scrub_buffer import IScrubBuffer
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
@@ -67,6 +68,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self._metrics = metrics
         self._ingest_buffer = ingest_buffer
         self._log = GatewayLoggerAdapter(logger, {"gateway_id": gateway_id})
+        self._min_score_warned: bool = False
 
     @traced
     async def store(
@@ -148,7 +150,29 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             dp = FactDataPoint.from_schema(fact, cognee_data_id=captured_data_id)
             await add_data_points([dp])
 
-            # Graph edges (best-effort)
+            # Graph edges (best-effort). Batch gateway pre-check (M6) reduces
+            # N+1 Cypher round-trips to 1 for the common case.
+            edge_targets: list[str] = []
+            if fact.source_actor_id:
+                edge_targets.append(str(fact.source_actor_id))
+            edge_targets.extend(str(t) for t in fact.target_actor_ids)
+            edge_targets.extend(str(g) for g in fact.goal_ids)
+            try:
+                await assert_same_gateway_batch(self._graph, edge_targets, self._gateway_id)
+            except PermissionError:
+                await self._trace.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    payload={
+                        "action": "edge_store_batch",
+                        "fact_id": str(fact.id),
+                        "target_count": len(edge_targets),
+                        "gateway_id": self._gateway_id,
+                    },
+                ))
+                if self._metrics:
+                    self._metrics.inc_authority_check(action="edge_store", result="denied")
+                raise
+
             edges_created = 0
             if fact.source_actor_id:
                 edges_created += await self._try_add_edge(str(fact.id), str(fact.source_actor_id), "CREATED_BY")
@@ -188,6 +212,22 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
     async def _try_add_edge(self, source: str, target: str, rel_type: str) -> int:
         try:
+            await assert_same_gateway(self._graph, target, self._gateway_id)
+        except PermissionError:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "edge_store",
+                    "rel_type": rel_type,
+                    "source": source[:8],
+                    "target": target[:8],
+                    "gateway_id": self._gateway_id,
+                },
+            ))
+            if self._metrics:
+                self._metrics.inc_authority_check(action="edge_store", result="denied")
+            raise
+        try:
             await self._graph.add_relation(source, target, rel_type)
             if self._metrics:
                 self._metrics.inc_edge(rel_type, True)
@@ -211,6 +251,23 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         profile_name: str = "default", auto_recall: bool = False,
         caller_gateway_id: str = "",
     ) -> list[FactAssertion]:
+        # R2-P9 / #1166 RESOLVED: ``min_score`` is intentionally inert on
+        # the facade fallback path — it has no profile-driven scoring
+        # framework. Real score-filtering lives behind
+        # ``RetrievalOrchestrator`` (Phase 4) which is invoked when
+        # ``profile_name`` is supplied to the route layer. To avoid
+        # callers silently expecting filtering, emit a one-shot WARNING
+        # the first time a non-zero ``min_score`` is supplied to a
+        # given facade instance. Once-per-instance flag prevents log
+        # flood under high-throughput callers.
+        if min_score > 0.0 and not self._min_score_warned:
+            self._log.warning(
+                "facade.search min_score=%.2f ignored — facade fallback path has no "
+                "profile-driven scoring. Pass profile_name to enable RetrievalOrchestrator "
+                "scoring + min_score filtering. (Logged once per facade instance.)",
+                min_score,
+            )
+            self._min_score_warned = True
         results: dict[str, FactAssertion] = {}
 
         # Stage 1: Semantic — Cognee graph-aware search
@@ -382,10 +439,18 @@ class MemoryStoreFacade(IMemoryStoreFacade):
             conditions.append("f.session_key = $session_key")
             params["session_key"] = session_key
         where = " AND ".join(conditions)
+        # R2-P9 / #1177 RESOLVED: drop the ``OPTIONAL MATCH (f)-[r]->(target)``
+        # + ``collect({type, target})`` clauses. The previous shape collected
+        # relations on every record but the consumer at search() :265-274
+        # reads only ``rec["props"]`` — every relations tuple was discarded
+        # in Python after a full Cypher round-trip. Removing the OPTIONAL
+        # MATCH cuts the Neo4j work to a single label scan + WHERE filter.
+        # If a future feature wires relations into the FactAssertion surface,
+        # restore the collect() clause and update the schema in the same
+        # commit.
         cypher = (
             f"MATCH (f:FactDataPoint) WHERE {where} "
-            "OPTIONAL MATCH (f)-[r]->(target) "
-            "RETURN properties(f) AS props, collect({type: type(r), target: properties(target)}) AS relations "
+            "RETURN properties(f) AS props "
             "LIMIT $limit"
         )
         return cypher, params
@@ -410,10 +475,39 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return facts
 
     @traced
-    async def promote_scope(self, fact_id: uuid.UUID, to_scope: Scope) -> FactAssertion:
+    async def promote_scope(
+        self, fact_id: uuid.UUID, to_scope: Scope, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")
+
+        # Gateway-ownership pre-check (#1168 RESOLVED) — mirrors the update()
+        # pattern at facade.py:480-503. Without this, POST /memory/promote-scope
+        # was a cross-tenant mutation vector: any caller with a valid session
+        # could promote facts owned by another gateway. Empty stored
+        # gateway_id passes through (pre-Gateway-Identity facts must remain
+        # mutable by their owning runtime). 403 here matches the delete()/
+        # update() pattern — the caller already proved id knowledge via POST
+        # intent, so hiding the existence oracle adds no security.
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "promote_scope",
+                    "fact_id": str(fact_id),
+                    "owner_gateway": entity_gw,
+                    "caller_gateway": effective_gw,
+                },
+            ))
+            # TF-FN-018 follow-up: pair metric with trace (observer L2 Recipe A).
+            if self._metrics:
+                self._metrics.inc_authority_check(action="promote_scope", result="denied")
+            raise PermissionError(
+                f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
+            )
 
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
@@ -433,14 +527,41 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return fact
 
     # Keep old name as alias
-    async def promote(self, fact_id: uuid.UUID, to_scope: Scope) -> FactAssertion:
-        return await self.promote_scope(fact_id, to_scope)
+    async def promote(
+        self, fact_id: uuid.UUID, to_scope: Scope, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
+        return await self.promote_scope(fact_id, to_scope, caller_gateway_id=caller_gateway_id)
 
     @traced
-    async def promote_class(self, fact_id: uuid.UUID, to_class: MemoryClass) -> FactAssertion:
+    async def promote_class(
+        self, fact_id: uuid.UUID, to_class: MemoryClass, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")
+
+        # Gateway-ownership pre-check (#1169 RESOLVED) — same pattern as
+        # promote_scope. POST /memory/promote-class was the third cross-tenant
+        # mutation surface; update() was the only one guarded before this
+        # commit.
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                payload={
+                    "action": "promote_class",
+                    "fact_id": str(fact_id),
+                    "owner_gateway": entity_gw,
+                    "caller_gateway": effective_gw,
+                },
+            ))
+            # TF-FN-018 follow-up: pair metric with trace (observer L2 Recipe A).
+            if self._metrics:
+                self._metrics.inc_authority_check(action="promote_class", result="denied")
+            raise PermissionError(
+                f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
+            )
 
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
@@ -457,13 +578,39 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         return fact
 
     @traced
-    async def get_by_id(self, fact_id: uuid.UUID) -> FactAssertion | None:
+    async def get_by_id(
+        self, fact_id: uuid.UUID, *, caller_gateway_id: str = "",
+    ) -> FactAssertion | None:
         try:
             entity = await self._graph.get_entity(str(fact_id))
         except Exception:
             return None
         if entity is None:
             return None
+
+        # Gateway-ownership pre-check (#1167 RESOLVED) — cross-gateway read
+        # returns None (not PermissionError). 404 semantic hides the
+        # existence oracle: a caller attempting GET /memory/{id} for
+        # another tenant's fact cannot distinguish "does not exist" from
+        # "exists but not yours", so there is no enumeration side-channel.
+        # Mutation paths (update/promote_*/delete) use 403 instead, because
+        # the caller has already proved id knowledge via the PATCH/POST/
+        # DELETE intent. Empty stored gateway_id passes through for legacy
+        # facts (pre-Gateway-Identity).
+        effective_gw = caller_gateway_id or self._gateway_id
+        entity_gw = entity.get("gateway_id", "")
+        if entity_gw and entity_gw != effective_gw:
+            # TF-FN-018 follow-up: emit authority-check metric on read-path
+            # cross-gateway rejection. Read path does NOT emit a trace event
+            # (404-semantic — hides the existence oracle), but the metric is
+            # operator-observable aggregate, not per-record, so it's safe to
+            # increment without leaking the existence signal. Observer L2
+            # Recipe A surfaced the counter-at-0 anomaly across all 4 facade
+            # pre-check sites.
+            if self._metrics:
+                self._metrics.inc_authority_check(action="get_by_id", result="denied")
+            return None
+
         props = clean_graph_props(entity)
         dp = FactDataPoint(**props)
         return dp.to_schema()
@@ -498,6 +645,11 @@ class MemoryStoreFacade(IMemoryStoreFacade):
                         "caller_gateway": effective_gw,
                     },
                 ))
+                # TF-FN-018 follow-up: pair the metric with the trace event.
+                # Observer L2 Recipe A surfaced that the trace fired but
+                # eb_authority_checks_total{result="denied"} stayed at 0.
+                if self._metrics:
+                    self._metrics.inc_authority_check(action="update", result="denied")
                 raise PermissionError(
                     f"Fact {fact_id} belongs to gateway {entity_gw}, not {effective_gw}"
                 )
@@ -887,6 +1039,23 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
     @traced
     async def decay(self, fact_id: uuid.UUID, factor: float) -> FactAssertion:
+        # R2-P9 / #1184 RESOLVED: reject factor outside ``[0.0, 1.0]``.
+        # Pre-fix the body computed ``max(0.0, min(1.0, fact.confidence
+        # * factor))`` — a caller passing factor>1.0 got back a fact
+        # whose confidence had been multiplied UP and then clamped at
+        # 1.0, which contradicted the function name ("decay" implies
+        # monotonic decrease). Caller audit (researcher's R2-P9 brief):
+        # the consolidation pipeline only ever passes factor < 1.0,
+        # so explicit validation here is a no-op for the current
+        # callers and a guardrail for future ones. Use
+        # ``promote_scope`` / a new ``boost`` API for confidence
+        # increases — don't overload decay.
+        if not (0.0 <= factor <= 1.0):
+            raise ValueError(
+                f"decay factor must be in [0.0, 1.0], got {factor}. "
+                "Confidence increases require a separate API; decay is "
+                "monotonic-decrease only."
+            )
         entity = await self._graph.get_entity(str(fact_id))
         if entity is None:
             raise KeyError(f"Fact not found: {fact_id}")

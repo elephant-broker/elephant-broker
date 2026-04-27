@@ -1,7 +1,9 @@
 """Tests for error handler and auth middleware."""
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.requests import Request as StarletteRequest
 
@@ -35,11 +37,14 @@ class TestErrorHandlerMiddleware:
         result = await error_handler_middleware(request, call_next)
         assert result.status_code == 422
 
-    async def test_generic_exception_returns_500(self):
+    async def test_generic_exception_returns_500(self, caplog):
+        """G2 extension: unhandled exception returns 500 AND logs at ERROR with exc_info."""
         request = _make_request()
         call_next = AsyncMock(side_effect=RuntimeError("boom"))
-        result = await error_handler_middleware(request, call_next)
+        with caplog.at_level(logging.ERROR, logger="elephantbroker.api.errors"):
+            result = await error_handler_middleware(request, call_next)
         assert result.status_code == 500
+        assert "Unhandled error on GET /test: boom" in caplog.text
 
     async def test_response_content_type_json(self):
         request = _make_request()
@@ -47,9 +52,53 @@ class TestErrorHandlerMiddleware:
         result = await error_handler_middleware(request, call_next)
         assert result.media_type == "application/json"
 
+    async def test_request_validation_error_returns_422_with_warning_log(self, caplog):
+        """G1 (#305): RequestValidationError returns 422 AND emits a WARNING log with full
+        request method + path + error details. Pins the debugging affordance for 422s
+        originating from plugin schema mismatches.
+        """
+        request = _make_request()
+        call_next = AsyncMock(side_effect=RequestValidationError([
+            {"loc": ("body", "x"), "msg": "required", "type": "missing"},
+        ]))
+        with caplog.at_level(logging.WARNING, logger="elephantbroker.api.errors"):
+            result = await error_handler_middleware(request, call_next)
+        assert result.status_code == 422
+        assert "Validation error on GET /test" in caplog.text
+
+    async def test_permission_error_maps_to_403_post_R2P5_fix(self):
+        """G6 FLIPPED (#1170 RESOLVED — R2-P5): the middleware now maps
+        ``PermissionError`` to HTTP 403 in its fallback path, matching
+        the route-level handlers (memory.py promote_scope/promote_class/
+        update/delete) that already explicitly catch PermissionError and
+        return 403.
+
+        Pre-R2-P5 the middleware fell through to the generic Exception
+        handler and returned 500 — pinned in TF-FN-014 G6 as documented
+        gap. The fix adds an explicit ``except PermissionError`` branch
+        between the KeyError (404) branch and the ValueError (422) branch.
+
+        Cross-gateway facade rejections + any future tenant-isolation
+        raises now surface as 403 regardless of whether the route caught
+        them locally or let them propagate to the middleware fallback.
+        """
+        request = _make_request()
+        call_next = AsyncMock(side_effect=PermissionError("denied"))
+        result = await error_handler_middleware(request, call_next)
+        assert result.status_code == 403
+        body = result.body.decode()
+        assert "forbidden" in body
+        assert "denied" in body
+
 
 class TestAuthMiddleware:
     async def test_passes_request_through(self):
+        """G8 (#1494): Pins PROD risk — AuthMiddleware is a stub. No API key / token / HMAC
+        validation. Every request passes through regardless of authorization.
+
+        This is an intentional Phase 3 placeholder; real auth lands in a later phase.
+        If real auth is added (API key / JWT / mTLS), update this test and the flow plan.
+        """
         middleware = AuthMiddleware(app=MagicMock())
         request = _make_request()
         expected = Response(content="ok")

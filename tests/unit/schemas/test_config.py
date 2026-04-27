@@ -775,6 +775,12 @@ NON_CONFIG_ENV_VARS: set[str] = {
     "EB_ALLOW_DEFAULT_GATEWAY_ID",
     "EB_DEV_MODE",
     "EB_ALLOW_DATASET_CHANGE",
+    # R2-P1.1: per-request escape hatch for the GatewayIdentityMiddleware
+    # mismatch reject. Read at middleware __init__ (per-process), not stored
+    # in YAML config. Used only by L2 cross-gateway probes that drive a
+    # single EB process; NEVER set in production. Documented in
+    # docs/DEPLOYMENT.md § Multi-tenant safety + CLAUDE.md § Gateway Identity.
+    "EB_ALLOW_CROSS_GATEWAY_HEADER",
 }
 
 

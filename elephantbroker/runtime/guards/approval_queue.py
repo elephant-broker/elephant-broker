@@ -46,14 +46,9 @@ class ApprovalQueue:
         except Exception as exc:
             self._log.warning("Lazy sweep failed (non-fatal): %s", exc)
 
-        # Compute timeout_at
-        request.timeout_at = request.created_at + timedelta(
-            seconds=self._config.approval_default_timeout_seconds,
-        )
-
-        # Serialize and store
+        # Serialize and store (timeout_at already set by model_post_init from request.timeout_seconds)
         key = self._keys.approval(agent_id, str(request.id))
-        ttl = self._config.approval_default_timeout_seconds + 60
+        ttl = request.timeout_seconds + 60
         await self._redis.setex(key, ttl, request.model_dump_json())
 
         # Add to session index

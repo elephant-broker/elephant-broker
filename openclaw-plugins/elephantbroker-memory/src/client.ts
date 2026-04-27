@@ -345,6 +345,8 @@ export class ElephantBrokerClient {
     scope?: string;
     steps: Array<{ order: number; instruction: string; is_optional?: boolean }>;
     enabled?: boolean;
+    is_manual_only?: boolean;
+    activation_modes?: string[];
   }): Promise<ProcedureDefinition> {
     return tracer.startActiveSpan("procedures.create", { kind: SpanKind.CLIENT }, async (span) => {
       try {
@@ -361,6 +363,8 @@ export class ElephantBrokerClient {
               is_optional: s.is_optional || false,
             })),
             enabled: request.enabled ?? true,
+            is_manual_only: request.is_manual_only ?? true,
+            ...(request.activation_modes ? { activation_modes: request.activation_modes } : {}),
           }),
         });
         if (!res.ok) throw new Error(`Create procedure failed: ${res.status}`);

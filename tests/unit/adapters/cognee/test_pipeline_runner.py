@@ -76,3 +76,23 @@ class TestPipelineRunner:
             await runner.run("ds_pipe", tasks=[], dataset_id=ds_id)
             call_kwargs = mock_rt.call_args[1]
             assert call_kwargs["dataset_id"] == ds_id
+
+    async def test_run_with_trace_handles_none_ledger(self):
+        """G1 (TF-FN-010): run_with_trace(trace_ledger=None) gracefully degrades to a
+        non-traced run without raising.
+
+        Pins the #189 contract -- callers that hold an optional TraceLedger (e.g., modules
+        constructed without a ledger in some tier configurations) can still invoke
+        run_with_trace() safely; the if-guard skips event emission when the ledger is None.
+        """
+        runner = PipelineRunner()
+        with patch(
+            "elephantbroker.runtime.adapters.cognee.pipeline_runner.run_tasks",
+            return_value=_fake_run_tasks_success(),
+        ):
+            result = await runner.run_with_trace(
+                "notrace_pipe", tasks=[], trace_ledger=None,
+            )
+            assert result.success is True
+            assert result.outputs == ["result_1", "result_2"]
+            assert result.pipeline_name == "notrace_pipe"

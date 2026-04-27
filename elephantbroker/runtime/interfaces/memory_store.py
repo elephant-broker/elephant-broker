@@ -9,7 +9,13 @@ from elephantbroker.schemas.fact import FactAssertion, MemoryClass
 
 
 class IMemoryStoreFacade(ABC):
-    """Unified facade for storing, searching, and managing memory facts."""
+    """Unified facade for storing, searching, and managing memory facts.
+
+    Security: methods accepting ``caller_gateway_id`` enforce gateway
+    ownership — the concrete ``MemoryStoreFacade`` raises ``PermissionError``
+    (HTTP 403 via error middleware) on cross-gateway access. Test stubs that
+    omit this check skip the security boundary.
+    """
 
     @abstractmethod
     async def store(
@@ -32,13 +38,21 @@ class IMemoryStoreFacade(ABC):
         ...
 
     @abstractmethod
-    async def promote_scope(self, fact_id: uuid.UUID, to_scope: Scope) -> FactAssertion:
-        """Promote a fact to a wider scope."""
+    async def promote_scope(
+        self, fact_id: uuid.UUID, to_scope: Scope, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
+        """Promote a fact to a wider scope. Raises PermissionError when
+        the stored ``gateway_id`` does not match ``caller_gateway_id`` (or
+        the facade's configured gateway_id as fallback)."""
         ...
 
     @abstractmethod
-    async def promote_class(self, fact_id: uuid.UUID, to_class: MemoryClass) -> FactAssertion:
-        """Promote a fact to a higher memory class."""
+    async def promote_class(
+        self, fact_id: uuid.UUID, to_class: MemoryClass, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
+        """Promote a fact to a higher memory class. Raises PermissionError
+        when the stored ``gateway_id`` does not match ``caller_gateway_id``
+        (or the facade's configured gateway_id as fallback)."""
         ...
 
     @abstractmethod
@@ -47,13 +61,21 @@ class IMemoryStoreFacade(ABC):
         ...
 
     @abstractmethod
-    async def get_by_id(self, fact_id: uuid.UUID) -> FactAssertion | None:
-        """Retrieve a single fact by ID."""
+    async def get_by_id(
+        self, fact_id: uuid.UUID, *, caller_gateway_id: str = "",
+    ) -> FactAssertion | None:
+        """Retrieve a single fact by ID. Returns ``None`` for cross-gateway
+        reads (404-semantic: hides existence oracle) when ``caller_gateway_id``
+        (or facade default) does not match the stored ``gateway_id``."""
         ...
 
     @abstractmethod
-    async def update(self, fact_id: uuid.UUID, updates: dict) -> FactAssertion:
-        """Update fact fields. Re-embeds if text changes."""
+    async def update(
+        self, fact_id: uuid.UUID, updates: dict, *, caller_gateway_id: str = "",
+    ) -> FactAssertion:
+        """Update fact fields. Re-embeds if text changes. Raises
+        PermissionError when the stored ``gateway_id`` does not match
+        ``caller_gateway_id`` (or the facade's configured gateway_id)."""
         ...
 
     @abstractmethod

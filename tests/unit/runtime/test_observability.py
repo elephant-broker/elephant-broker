@@ -1,8 +1,40 @@
 """Tests for OTEL observability."""
-from opentelemetry.sdk.trace import TracerProvider
+import logging
+import sys
+from unittest.mock import patch
 
-from elephantbroker.runtime.observability import get_tracer, setup_tracing, traced
+import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from elephantbroker.runtime.observability import (
+    VERBOSE,
+    GatewayLoggerAdapter,
+    get_tracer,
+    register_verbose_level,
+    setup_tracing,
+    traced,
+)
 from elephantbroker.schemas.config import InfraConfig
+
+
+@pytest.fixture
+def in_memory_spans():
+    """Set up an in-memory span exporter on a fresh TracerProvider.
+
+    Installs a SimpleSpanProcessor wrapping an InMemorySpanExporter so tests
+    can introspect span attributes / status / events directly after invoking
+    `@traced` functions. Replaces the global provider for the test duration.
+    """
+    setup_tracing(InfraConfig())  # fresh provider, no external exporter
+    exporter = InMemorySpanExporter()
+    provider = trace.get_tracer_provider()
+    if hasattr(provider, "add_span_processor"):
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+    yield exporter
+    exporter.clear()
 
 
 class TestOTELInstrumentation:
@@ -28,7 +60,6 @@ class TestOTELInstrumentation:
 
     async def test_error_spans_marked_on_exception(self):
         setup_tracing(InfraConfig())
-        import pytest
 
         @traced
         async def failing_func():
@@ -41,3 +72,204 @@ class TestOTELInstrumentation:
         setup_tracing(InfraConfig())
         tracer = get_tracer("test_module")
         assert tracer is not None
+
+    # ------------------------------------------------------------------
+    # TF-FN-015 additions
+    # ------------------------------------------------------------------
+
+    def test_setup_tracing_with_endpoint_attaches_exporter(self):
+        """G1 (#315): when `otel_endpoint` is set, `setup_tracing` constructs an
+        OTLPSpanExporter with that endpoint and attaches it via SimpleSpanProcessor.
+
+        We patch the exporter class at its source module so we don't need the real
+        package installed; asserting the class was called with the right endpoint
+        proves the code path ran (vs being silently skipped on ImportError).
+        """
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"
+        ) as mock_exporter:
+            provider = setup_tracing(InfraConfig(otel_endpoint="http://localhost:4317"))
+        assert isinstance(provider, TracerProvider)
+        mock_exporter.assert_called_once_with(endpoint="http://localhost:4317")
+
+    def test_setup_tracing_resource_has_gateway_id(self):
+        """G2 (#580): the TracerProvider's Resource carries gateway.id + service.name
+        attributes so downstream OTEL collectors and Jaeger can filter by gateway.
+        """
+        provider = setup_tracing(InfraConfig(), gateway_id="gw-prod")
+        attrs = dict(provider.resource.attributes)
+        assert attrs.get("gateway.id") == "gw-prod"
+        assert attrs.get("service.name") == "elephantbroker"
+
+    def test_setup_tracing_otlp_package_missing_logs_warning(self, caplog):
+        """G3: if `opentelemetry-exporter-otlp-proto-grpc` is not installed, the
+        import in `setup_tracing` raises ImportError which is caught and logged
+        at WARNING. Config with endpoint still succeeds; traces just don't export.
+        """
+        # Force the import to fail by stubbing the module entry as None.
+        with patch.dict(sys.modules, {
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": None,
+        }):
+            with caplog.at_level(logging.WARNING, logger="elephantbroker.observability"):
+                provider = setup_tracing(InfraConfig(otel_endpoint="http://localhost:4317"))
+        assert isinstance(provider, TracerProvider)
+        assert "opentelemetry-exporter-otlp-proto-grpc" in caplog.text
+
+    async def test_traced_span_has_module_and_method_attrs(self, in_memory_spans):
+        """G4 (#314): `@traced` spans carry `module` + `method` attributes so
+        operators can filter OTEL traces by originating function.
+        """
+        @traced
+        async def some_func():
+            return 1
+
+        await some_func()
+        spans = in_memory_spans.get_finished_spans()
+        assert len(spans) == 1
+        # `method` is fn.__name__; `module` is fn.__module__.
+        assert spans[0].attributes["method"] == "some_func"
+        assert spans[0].attributes["module"] == some_func.__wrapped__.__module__
+
+    async def test_traced_extracts_identity_kwargs_to_span(self, in_memory_spans):
+        """G5 (#314 / #580): `@traced` harvests identity kwargs (gateway_id,
+        agent_key, agent_id, session_id, session_key) into span attributes so
+        Jaeger-style search can locate spans by any identity dimension.
+        """
+        @traced
+        async def my_func(**kwargs):
+            return 1
+
+        await my_func(
+            gateway_id="gw-a",
+            agent_key="gw-a:main",
+            session_id="sid-123",
+        )
+        spans = in_memory_spans.get_finished_spans()
+        assert len(spans) == 1
+        attrs = spans[0].attributes
+        assert attrs["gateway_id"] == "gw-a"
+        assert attrs["agent_key"] == "gw-a:main"
+        assert attrs["session_id"] == "sid-123"
+
+    async def test_traced_span_error_status_recorded(self, in_memory_spans):
+        """G6 (#314): on raise, `@traced` sets span status to ERROR and records
+        the exception as a span event so failures are observable without logs.
+        """
+        @traced
+        async def failing():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError):
+            await failing()
+        spans = in_memory_spans.get_finished_spans()
+        assert len(spans) == 1
+        assert spans[0].status.status_code == trace.StatusCode.ERROR
+        exception_events = [e for e in spans[0].events if e.name == "exception"]
+        assert exception_events, "Expected at least one 'exception' span event"
+        assert exception_events[0].attributes["exception.type"] == "ValueError"
+
+    def test_register_verbose_level_creates_level_15(self):
+        """G7 (#324): `register_verbose_level` registers logging level 15 between
+        DEBUG (10) and INFO (20), and attaches `.verbose()` to Logger instances.
+        """
+        register_verbose_level()
+        assert VERBOSE == 15
+        assert logging.DEBUG < VERBOSE < logging.INFO
+        test_logger = logging.getLogger("test-verbose-handler")
+        assert hasattr(test_logger, "verbose")
+
+    def test_gateway_logger_adapter_prefix_both_populated(self):
+        """G8-a (#325a): when both `gateway_id` and `agent_key` extras are set,
+        the log message is prefixed with `[gw][agent_key]`.
+        """
+        adapter = GatewayLoggerAdapter(
+            logging.getLogger("tf-fn-015-g8a"),
+            {"gateway_id": "gw", "agent_key": "gw:main"},
+        )
+        msg, _ = adapter.process("hello", {})
+        assert msg == "[gw][gw:main] hello"
+
+    def test_gateway_logger_adapter_prefix_empty_agent_key(self):
+        """G8-b (#325b): when only `gateway_id` is set (empty `agent_key`),
+        the prefix is `[gw]` only — agent key bracket is omitted.
+        """
+        adapter = GatewayLoggerAdapter(
+            logging.getLogger("tf-fn-015-g8b"),
+            {"gateway_id": "gw", "agent_key": ""},
+        )
+        msg, _ = adapter.process("hello", {})
+        assert msg == "[gw] hello"
+
+    def test_gateway_logger_adapter_no_prefix_when_both_empty(self):
+        """G8-c (#325c): when both extras are empty, the message passes through
+        unmodified — no empty `[][]` cosmetic artifact.
+        """
+        adapter = GatewayLoggerAdapter(
+            logging.getLogger("tf-fn-015-g8c"),
+            {"gateway_id": "", "agent_key": ""},
+        )
+        msg, _ = adapter.process("hello", {})
+        assert msg == "hello"
+
+    async def test_traced_extracts_self_gateway_id_fallback_post_1510_fix(self, in_memory_spans):
+        """G9 FLIPPED (#1510 RESOLVED — R2-P6): `@traced` now falls back to
+        ``self._<attr>`` when the identity is not passed as a kwarg. For
+        bound-method calls (``args[0]`` is ``self``) on classes that stash
+        identity on the instance — MemoryStoreFacade, ContextEngineFacade,
+        worker pipelines, ebrun CLI entrypoints — the span is now tagged
+        with ``gateway_id`` (and the other 4 attrs) automatically.
+
+        Pre-R2-P6 this test pinned the documented PROD risk: spans were
+        emitted WITHOUT identity attributes for instance-method calls
+        outside HTTP request context. Post-fix the same test setup
+        produces a span WITH ``gateway_id="gw-stashed-on-self"``.
+        """
+        class MyModule:
+            def __init__(self) -> None:
+                self._gateway_id = "gw-stashed-on-self"
+                self._agent_key = "gw-stashed-on-self:worker-7"
+                self._session_key = "agent:main:main"
+
+            @traced
+            async def method(self):
+                return 1
+
+        instance = MyModule()
+        await instance.method()  # NO kwargs supplied
+        spans = in_memory_spans.get_finished_spans()
+        assert len(spans) == 1
+        attrs = spans[0].attributes
+        # R2-P6: self._<attr> fallback is exercised — all three stashed
+        # attrs surface on the span.
+        assert attrs["gateway_id"] == "gw-stashed-on-self"
+        assert attrs["agent_key"] == "gw-stashed-on-self:worker-7"
+        assert attrs["session_key"] == "agent:main:main"
+
+    async def test_traced_kwargs_override_self_fallback(self, in_memory_spans):
+        """G9-bis (R2-P6): explicit kwarg takes precedence over the
+        ``self._<attr>`` fallback. Documents the precedence order so a
+        future refactor that swaps the two checks surfaces here.
+        """
+        class MyModule:
+            def __init__(self) -> None:
+                self._gateway_id = "gw-on-self"
+
+            @traced
+            async def method(self, *, gateway_id: str = ""):
+                return gateway_id
+
+        instance = MyModule()
+        await instance.method(gateway_id="gw-from-kwarg")
+        spans = in_memory_spans.get_finished_spans()
+        assert len(spans) == 1
+        # kwarg wins; self._gateway_id is the fallback only when kwarg absent
+        assert spans[0].attributes["gateway_id"] == "gw-from-kwarg"
+
+
+class TestSetupOtelLoggingAnnotation:
+    def test_return_annotation_is_tuple_or_none(self):
+        """M8: setup_otel_logging must declare its return type annotation."""
+        import inspect
+        from elephantbroker.runtime.observability import setup_otel_logging
+        sig = inspect.signature(setup_otel_logging)
+        assert sig.return_annotation != inspect.Parameter.empty

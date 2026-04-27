@@ -12,8 +12,8 @@ class TestIndexProcedures:
             mock_add_data_points,
         )
         procs = [
-            ProcedureDefinition(name="Deploy"),
-            ProcedureDefinition(name="Rollback"),
+            ProcedureDefinition(name="Deploy", is_manual_only=True),
+            ProcedureDefinition(name="Rollback", is_manual_only=True),
         ]
         ids = await index_procedures(procs)
         assert len(ids) == 2
@@ -32,7 +32,7 @@ class TestIndexProcedures:
             "elephantbroker.runtime.adapters.cognee.tasks.index_procedures.add_data_points",
             mock_add_data_points,
         )
-        procs = [ProcedureDefinition(name="Test")]
+        procs = [ProcedureDefinition(name="Test", is_manual_only=True)]
         ids = await index_procedures(procs)
         assert len(ids) == 1
         assert ids[0] == str(procs[0].id)

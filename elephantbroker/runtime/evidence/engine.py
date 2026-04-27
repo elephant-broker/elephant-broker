@@ -99,6 +99,21 @@ class EvidenceAndVerificationEngine(IEvidenceAndVerificationEngine):
         if claim is None:
             raise KeyError(f"Claim not found: {claim_id}")
 
+        # #1186 RESOLVED (TF-FN-019 G13): REJECTED is a terminal state.
+        # Re-verifying a rejected claim would silently overwrite the
+        # audit trail — the forensic record of "this claim was rejected"
+        # gets replaced by "self_supported" or similar, losing the
+        # reason and reviewer context. Protect the audit trail by
+        # refusing the transition; callers who need to re-evaluate a
+        # previously rejected claim must explicitly reset to DRAFT via
+        # a separate (not yet built) admin path.
+        if claim.status == ClaimStatus.REJECTED:
+            raise ValueError(
+                f"Cannot re-verify a rejected claim: {claim_id} — "
+                f"REJECTED is a terminal state; rejecting a previously verified "
+                f"claim requires explicit reset, not re-evaluation."
+            )
+
         # State transition based on evidence types
         evidence_types = {e.type for e in claim.evidence_refs}
         if "supervisor_sign_off" in evidence_types:

@@ -85,7 +85,7 @@ class TestAutoGoalCreation:
         proc_id = uuid.uuid4()
         step = ProcedureStep(order=0, instruction="Run tests",
                              required_evidence=[ProofRequirement(description="Test log", proof_type=ProofType.CHUNK_REF)])
-        proc = ProcedureDefinition(id=proc_id, name="Deploy", steps=[step])
+        proc = ProcedureDefinition(id=proc_id, name="Deploy", steps=[step], is_manual_only=True)
         # Mock graph to return entity that triggers auto-goals
         graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "Deploy"})
         # Mock ProcedureDataPoint.to_schema_from_dict to return our proc

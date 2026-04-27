@@ -7,7 +7,8 @@ class TestProcedureRoutes:
     async def test_create_procedure(self, client, monkeypatch, mock_add_data_points, mock_cognee):
         monkeypatch.setattr("elephantbroker.runtime.procedures.engine.add_data_points", mock_add_data_points)
         monkeypatch.setattr("elephantbroker.runtime.procedures.engine.cognee", mock_cognee)
-        body = {"name": "Test procedure", "description": "A test"}
+        # #1146: must include is_manual_only or activation_modes per R2-P2.1
+        body = {"name": "Test procedure", "description": "A test", "is_manual_only": True}
         r = await client.post("/procedures/", json=body)
         assert r.status_code == 200
         assert r.json()["name"] == "Test procedure"
@@ -31,6 +32,7 @@ class TestProcedureRoutes:
 
     async def test_create_procedure_when_procedures_disabled(self, client, container, monkeypatch, mock_add_data_points, mock_cognee):
         container.procedure_engine = None
-        body = {"name": "Test proc"}
+        # #1146: must include is_manual_only or activation_modes per R2-P2.1
+        body = {"name": "Test proc", "is_manual_only": True}
         r = await client.post("/procedures/", json=body)
         assert r.status_code == 500

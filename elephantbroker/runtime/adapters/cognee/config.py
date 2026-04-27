@@ -40,11 +40,27 @@ def _verify_cognee_pin() -> None:
         )
 
 
-async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = None) -> None:
+async def configure_cognee(
+    config: CogneeConfig,
+    llm_config: LLMConfig | None = None,
+    gateway_id: str = "",
+) -> None:
     """Apply ElephantBroker config to the Cognee SDK.
 
     Graph: Neo4j (not the default Kuzu).
     Vector: Qdrant via cognee-community-vector-adapter-qdrant (not the default LanceDB).
+
+    #1187 / TD-64 RESOLVED (R2-P1, path c): ``gateway_id`` is forwarded to
+    Cognee's vector-db config as ``vector_db_name`` (Qdrant uses this as
+    the tenant / database name on every point payload; the community
+    adapter indexes it as a tenant field with ``is_tenant:true``). Points
+    written to Qdrant via ``add_data_points()`` now carry
+    ``database_name=<gateway_id>`` in their payload, which lets
+    ``VectorAdapter.search_similar`` add a ``FieldCondition`` filter on
+    the same key to guarantee cross-gateway isolation — closing the
+    dedup-leak surface pinned in TF-FN-018 G10. Empty ``gateway_id``
+    preserves legacy single-tenant behavior (pre-R2-P1 data stays
+    readable under the empty default).
     """
     _verify_cognee_pin()
     import cognee
@@ -73,9 +89,18 @@ async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = 
 
     # Vector database: Qdrant (not the default LanceDB)
     cognee.config.set_vector_db_provider("qdrant")
-    cognee.config.set_vector_db_config({
+    vector_db_cfg: dict[str, object] = {
         "vector_db_url": config.qdrant_url,
-    })
+    }
+    # #1187 / TD-64 path (c): populate Qdrant's per-tenant database name
+    # with the gateway_id so every point payload carries the tenant
+    # identifier and search_similar can filter on it via the community
+    # adapter's `is_tenant:true` payload index. Skip when gateway_id is
+    # empty (dev / single-tenant fallback) — Cognee's default behavior
+    # is unchanged.
+    if gateway_id:
+        vector_db_cfg["vector_db_name"] = gateway_id
+    cognee.config.set_vector_db_config(vector_db_cfg)
 
     # Fix: community Qdrant adapter hardcodes port=6333, overriding URL.
     # Monkey-patch to use URL as-is (respecting our configured port).
@@ -111,6 +136,7 @@ async def configure_cognee(config: CogneeConfig, llm_config: LLMConfig | None = 
             "llm_api_key": llm_config.api_key,
         })
     else:
+        _log.warning("LLM config not provided, falling back to embedding config")
         # Fallback: use embedding config (may fail on cognify but allows basic operations)
         cognee.config.set_llm_config({
             "llm_provider": config.embedding_provider,

@@ -383,6 +383,34 @@ class TestApprovalQueue:
         assert "Rejected: too risky" in updates["blockers"]
 
     @pytest.mark.asyncio
+    async def test_create_uses_request_timeout_not_config_default(self):
+        """H2: queue.create() must honor request.timeout_seconds, not
+        self._config.approval_default_timeout_seconds.
+
+        Pre-fix: create() stomped timeout_at with the config default,
+        negating the engine's routing-resolved timeout (#1135 R2-P2).
+        """
+        redis = AsyncMock()
+        redis.setex = AsyncMock()
+        redis.get = AsyncMock(return_value=None)
+        redis.sadd = AsyncMock()
+        redis.expire = AsyncMock()
+        redis.smembers = AsyncMock(return_value=set())
+        keys = RedisKeyBuilder("test")
+        config = HitlConfig(approval_default_timeout_seconds=300)
+        queue = ApprovalQueue(redis, keys, config)
+
+        req = _make_request(timeout_seconds=600)
+        result = await queue.create(req, "agent1")
+
+        # timeout_at must reflect request's 600s, not config's 300s
+        expected_timeout = result.created_at + timedelta(seconds=600)
+        assert result.timeout_at == expected_timeout
+        # Redis TTL must also use request timeout (600 + 60 = 660)
+        call_args = redis.setex.call_args
+        assert call_args[0][1] == 660
+
+    @pytest.mark.asyncio
     async def test_create_without_session_goal_store_skips_auto_goal(self):
         """EC-1: create() with session_goal_store=None creates approval but skips auto-goal."""
         queue, redis = _make_queue()

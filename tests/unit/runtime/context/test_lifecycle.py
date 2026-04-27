@@ -1638,7 +1638,13 @@ class TestDispose:
         artifact_store.delete.assert_not_called()
 
     async def test_dispose_emits_session_boundary_trace(self):
-        """GF-15: dispose emits SESSION_BOUNDARY with action=engine_teardown."""
+        """GF-15: dispose emits SESSION_BOUNDARY with event=engine_teardown.
+
+        TD-65: payload key is `event` (not `action`) -- D1 format for the SESSION_BOUNDARY
+        emission family. `engine_teardown` is the per-turn dispose value; distinct from
+        the route-level `end` and from `lifecycle_session_end` so trace consumers can
+        filter by architectural layer.
+        """
         trace = AsyncMock()
         lc = _make_lifecycle(trace_ledger=trace)
 
@@ -1647,7 +1653,8 @@ class TestDispose:
         trace.append_event.assert_called_once()
         event = trace.append_event.call_args[0][0]
         assert event.event_type == TraceEventType.SESSION_BOUNDARY
-        assert event.payload["action"] == "engine_teardown"
+        assert event.payload["event"] == "engine_teardown"
+        assert "action" not in event.payload
 
     async def test_dispose_does_not_flush_goals(self):
         """GF-15: dispose() is lightweight — no goal flush."""
@@ -1670,6 +1677,51 @@ class TestDispose:
         goal_store.flush_to_cognee.assert_called_once()
         call_args = goal_store.flush_to_cognee.call_args[0]
         assert call_args[0] == SK
+
+    async def test_lifecycle_session_end_emits_event_format(self):
+        """TD-65: ContextLifecycle.session_end emits SESSION_BOUNDARY with
+        payload.event="lifecycle_session_end" (distinct from route-level "end" and from
+        dispose's "engine_teardown" -- Option D distinct-layer resolution).
+
+        Pins the D1 schema (event key, NOT action) and the specific Option D value.
+        If the emission site is removed or the value reverts, trace consumers filtering
+        by layer will break.
+        """
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        await lc.session_end(SK, SID)
+        # Locate the SESSION_BOUNDARY emission from session_end (not dispose)
+        events = [
+            c.args[0] for c in trace.append_event.call_args_list
+            if c.args and c.args[0].event_type == TraceEventType.SESSION_BOUNDARY
+        ]
+        assert events, "session_end must emit at least one SESSION_BOUNDARY event"
+        # The session_end emission carries the goals_flushed field; find it.
+        se_event = next(e for e in events if "goals_flushed" in e.payload)
+        assert se_event.payload["event"] == "lifecycle_session_end"
+        assert "action" not in se_event.payload
+
+    async def test_lifecycle_session_end_propagates_agent_id(self):
+        """TD-65 follow-up (observer-reverify catch): session_end accepts ``agent_id`` AND
+        ``agent_key`` keyword-only kwargs and stamps both on the emitted SESSION_BOUNDARY
+        TraceEvent.
+
+        Previously the lifecycle emission had `agent_id=None, agent_key=None`, leaving
+        the engine-internal signal untraceable by agent. First follow-up plumbed agent_id.
+        Observer's second reverify caught agent_key was still empty (using container
+        `self._agent_key` which is empty in the gateway-wide singleton) — this test now
+        pins both propagations together.
+        """
+        trace = AsyncMock()
+        lc = _make_lifecycle(trace_ledger=trace)
+        await lc.session_end(SK, SID, agent_id="main", agent_key="gw-test:main")
+        events = [
+            c.args[0] for c in trace.append_event.call_args_list
+            if c.args and c.args[0].event_type == TraceEventType.SESSION_BOUNDARY
+        ]
+        se_event = next(e for e in events if "goals_flushed" in e.payload)
+        assert se_event.agent_id == "main"
+        assert se_event.agent_key == "gw-test:main"
 
     async def test_session_end_uses_stored_bootstrap_session_id(self):
         """GF-15: session_end() with empty sid falls back to stored bootstrap session_id."""

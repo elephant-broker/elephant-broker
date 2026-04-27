@@ -381,8 +381,11 @@ class TestMiddlewareDefaultGateway:
         middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="local")
         assert middleware._default == "local"
 
-    async def test_header_overrides_default(self):
-        """Explicit header value takes precedence over default."""
+    async def test_header_used_when_default_is_empty(self):
+        """Non-empty header used when default is empty (legacy/dev fallback).
+
+        For the non-empty-default + mismatch contract, see test_gateway_reject_mismatch.py.
+        """
         from elephantbroker.api.middleware.gateway import GatewayIdentityMiddleware
         from starlette.requests import Request
         from starlette.datastructures import State
@@ -393,7 +396,9 @@ class TestMiddlewareDefaultGateway:
             captured_gw["value"] = request.state.gateway_id
             return MagicMock()
 
-        middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="local")
+        # R2-P1.1: empty default disables the mismatch reject; header value
+        # still takes precedence per legacy contract for empty-default config.
+        middleware = GatewayIdentityMiddleware(app=None, default_gateway_id="")
         scope = {
             "type": "http", "method": "GET", "path": "/health",
             "headers": [(b"x-eb-gateway-id", b"gw-explicit")],

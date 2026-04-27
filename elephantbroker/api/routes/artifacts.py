@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -18,8 +19,21 @@ router = APIRouter()
 
 
 class ArtifactSearchRequest(BaseModel):
+    """R2-P9 / #1179: request body for ``POST /artifacts/search``.
+
+    Gained 5 structural filter fields (``tool_name``, ``actor_id``,
+    ``goal_id``, ``tags``, ``created_after``) so callers can narrow
+    the search at the DB layer instead of pulling everything and
+    filtering in Python.
+    """
+
     query: str
     max_results: int = 10
+    tool_name: str | None = None
+    actor_id: uuid.UUID | None = None
+    goal_id: uuid.UUID | None = None
+    tags: list[str] | None = None
+    created_after: datetime | None = None
 
 
 @router.post("/")
@@ -42,7 +56,17 @@ async def get_artifact(artifact_id: uuid.UUID, request: Request):
 @router.post("/search")
 async def search_artifacts(body: ArtifactSearchRequest, request: Request):
     store = get_artifact_store(request)
-    results = await store.search_artifacts(body.query, body.max_results)
+    # R2-P9 / #1179: thread structural filter kwargs through to the
+    # store so the WHERE clause runs at the Cypher layer.
+    results = await store.search_artifacts(
+        body.query,
+        body.max_results,
+        tool_name=body.tool_name,
+        actor_id=body.actor_id,
+        goal_id=body.goal_id,
+        tags=body.tags,
+        created_after=body.created_after,
+    )
     return [r.model_dump(mode="json") for r in results]
 
 

@@ -367,7 +367,9 @@ class TestFlushToCognee:
         trace.append_event.assert_called_once()
         event = trace.append_event.call_args[0][0]
         assert event.event_type == TraceEventType.SESSION_BOUNDARY
-        assert event.payload["action"] == "goals_flushed"
+        # TD-65: payload key is `event` (not `action`) -- D1 format.
+        assert event.payload["event"] == "goals_flushed"
+        assert "action" not in event.payload
         assert event.payload["goals_flushed"] == 1
         assert event.payload["session_key"] == SESSION_KEY
 

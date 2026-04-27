@@ -141,6 +141,7 @@ class TestProcedureLifecycleIntegration:
                 ProcedureStep(step_id=step1_id, order=0, instruction="Run tests", required_evidence=[ProofRequirement(proof_type=ProofType.CHUNK_REF, required=True, description="test results")]),
                 ProcedureStep(step_id=step2_id, order=1, instruction="Deploy", required_evidence=[ProofRequirement(proof_type=ProofType.CHUNK_REF, required=True, description="deploy output")]),
             ],
+            is_manual_only=True,
         )
         await procedure_engine.store_procedure(proc)
         execution = await procedure_engine.activate(proc.id, uuid.uuid4())

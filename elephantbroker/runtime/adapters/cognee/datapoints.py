@@ -155,7 +155,6 @@ class ActorDataPoint(DataPoint):
         )
 
     def to_schema(self) -> ActorRef:
-        # Backward compat: old Neo4j nodes may have "team_id" (string) instead of "team_ids" (list)
         raw_team_ids = list(self.team_ids) if self.team_ids else []
         return ActorRef(
             id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
@@ -196,6 +195,20 @@ class GoalDataPoint(DataPoint):
     # Phase 7: auto-goal tracking metadata (source_type, source_system, etc.)
     # Named goal_meta to avoid collision with DataPoint.metadata (Cognee index_fields)
     # Type is dict (not str) because Neo4j round-trips JSON strings as native dicts
+    # via clean_graph_props (`{`-prefix deserialization at runtime/graph_utils.py).
+    #
+    # **Storage str-coercion (TF-FN-020 G3 defensive note, R2-P3):**
+    # ``GoalDataPoint.from_schema`` stores ``dict(goal.metadata)`` raw, but the
+    # downstream ``GoalDataPoint.to_schema`` at line 226-227 explicitly coerces
+    # every value to ``str`` (``goal_metadata = {str(k): str(v) for k, v in ...}``)
+    # because the destination schema is ``GoalState.metadata: dict[str, str]``.
+    # Round-trip consequence: ``int`` / ``float`` / ``bool`` / nested-dict values
+    # passed via ``GoalState.metadata`` survive the storage hop, but reconstruct
+    # as their ``str`` representation (e.g., ``42`` → ``"42"``, ``True`` → ``"True"``).
+    # If a future caller needs preserved-type metadata round-trip, change
+    # ``GoalState.metadata`` from ``dict[str, str]`` to ``dict[str, Any]``
+    # AND drop the ``str(v)`` coercion at line 227. Or add a separate
+    # ``goal_metadata_typed`` field that bypasses str-coercion.
     goal_meta: dict[str, Any] = {}
     metadata: dict[str, Any] = {"index_fields": ["title", "description"]}
 
@@ -262,8 +275,10 @@ class ProcedureDataPoint(DataPoint):
     eb_id: str = ""
     gateway_id: str = ""
     decision_domain: str | None = None
+    is_manual_only: bool = False
     # Stored as JSON strings for graph persistence
     steps_json: str = "[]"
+    activation_modes_json: str = "[]"
     red_line_bindings_json: str = "[]"
     approval_requirements_json: str = "[]"
     metadata: dict[str, Any] = {"index_fields": ["name", "description"]}
@@ -283,14 +298,18 @@ class ProcedureDataPoint(DataPoint):
             eb_id=str(proc.id),
             gateway_id=getattr(proc, "gateway_id", ""),
             decision_domain=getattr(proc, "decision_domain", None),
+            # #1146 RESOLVED (R2-P2.1): persist is_manual_only so the flag
+            # survives graph round-trip.
+            is_manual_only=getattr(proc, "is_manual_only", False),
             steps_json=json.dumps([s.model_dump(mode="json") for s in proc.steps]) if proc.steps else "[]",
+            activation_modes_json=json.dumps([m.model_dump(mode="json") for m in proc.activation_modes]) if proc.activation_modes else "[]",
             red_line_bindings_json=json.dumps(proc.red_line_bindings) if proc.red_line_bindings else "[]",
             approval_requirements_json=json.dumps(proc.approval_requirements) if proc.approval_requirements else "[]",
         )
 
     def to_schema(self) -> ProcedureDefinition:
         import json
-        from elephantbroker.schemas.procedure import ProcedureStep
+        from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureStep
         steps = []
         try:
             raw = json.loads(self.steps_json) if self.steps_json else []
@@ -307,6 +326,16 @@ class ProcedureDataPoint(DataPoint):
             approval_requirements = json.loads(self.approval_requirements_json) if self.approval_requirements_json else []
         except Exception:
             pass
+        activation_modes = []
+        try:
+            raw_am = json.loads(self.activation_modes_json) if self.activation_modes_json else []
+            activation_modes = [ProcedureActivation(**m) for m in raw_am]
+        except Exception:
+            pass
+        # Legacy back-compat: if no activation_modes survived the round-trip
+        # (either legacy record or parse failure), infer is_manual_only=True
+        # so the model_validator (#1146) doesn't reject the reconstruction.
+        is_manual_only = self.is_manual_only if activation_modes else True
         return ProcedureDefinition(
             id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
             name=self.name,
@@ -319,15 +348,17 @@ class ProcedureDataPoint(DataPoint):
             gateway_id=self.gateway_id,
             decision_domain=self.decision_domain,
             steps=steps,
+            activation_modes=activation_modes,
             red_line_bindings=red_line_bindings,
             approval_requirements=approval_requirements,
+            is_manual_only=is_manual_only,
         )
 
     @classmethod
     def to_schema_from_dict(cls, d: dict) -> ProcedureDefinition:
         """Reconstruct ProcedureDefinition from a graph entity dict."""
         import json
-        from elephantbroker.schemas.procedure import ProcedureStep
+        from elephantbroker.schemas.procedure import ProcedureActivation, ProcedureStep
         steps = []
         steps_raw = d.get("steps_json") or d.get("steps", "[]")
         if isinstance(steps_raw, str):
@@ -356,6 +387,18 @@ class ProcedureDataPoint(DataPoint):
                 pass
         elif isinstance(ar_raw, list):
             approval_requirements = ar_raw
+        activation_modes = []
+        am_raw = d.get("activation_modes_json") or d.get("activation_modes", "[]")
+        if isinstance(am_raw, str):
+            try:
+                raw_am = json.loads(am_raw)
+                activation_modes = [ProcedureActivation(**m) for m in raw_am]
+            except Exception:
+                pass
+        elif isinstance(am_raw, list):
+            activation_modes = [ProcedureActivation(**m) if isinstance(m, dict) else m for m in am_raw]
+        stored_manual = d.get("is_manual_only", True)
+        is_manual_only = stored_manual if activation_modes else True
         return ProcedureDefinition(
             id=uuid.UUID(d["eb_id"]) if d.get("eb_id") else uuid.uuid4(),
             name=d.get("name", ""),
@@ -363,9 +406,11 @@ class ProcedureDataPoint(DataPoint):
             scope=d.get("scope", "session"),
             decision_domain=d.get("decision_domain"),
             steps=steps,
+            activation_modes=activation_modes,
             red_line_bindings=red_line_bindings,
             approval_requirements=approval_requirements,
             gateway_id=d.get("gateway_id", ""),
+            is_manual_only=is_manual_only,
         )
 
 
@@ -464,6 +509,7 @@ class ArtifactDataPoint(DataPoint):
     tool_name: str
     summary: str = ""
     content: str = ""
+    content_hash: str = ""
     session_id: str | None = None
     actor_id: str | None = None
     goal_id: str | None = None
@@ -481,6 +527,7 @@ class ArtifactDataPoint(DataPoint):
             tool_name=art.tool_name,
             summary=art.summary,
             content=art.content,
+            content_hash=art.content_hash.value if art.content_hash else "",
             session_id=str(art.session_id) if art.session_id else None,
             actor_id=str(art.actor_id) if art.actor_id else None,
             goal_id=str(art.goal_id) if art.goal_id else None,
@@ -492,11 +539,13 @@ class ArtifactDataPoint(DataPoint):
         )
 
     def to_schema(self) -> ToolArtifact:
+        from elephantbroker.schemas.artifact import ArtifactHash
         return ToolArtifact(
             artifact_id=uuid.UUID(self.eb_id) if self.eb_id else uuid.uuid4(),
             tool_name=self.tool_name,
             summary=self.summary,
             content=self.content,
+            content_hash=ArtifactHash(value=self.content_hash) if self.content_hash else None,
             session_id=uuid.UUID(self.session_id) if self.session_id else None,
             actor_id=uuid.UUID(self.actor_id) if self.actor_id else None,
             goal_id=uuid.UUID(self.goal_id) if self.goal_id else None,

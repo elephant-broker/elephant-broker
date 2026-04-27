@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -37,8 +38,23 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     """Create FastAPI app with all routes and middleware.
 
     Accepts a pre-built RuntimeContainer so tests can inject mocked adapters.
+
+    Takes ownership of *container*; ``await container.close()`` is called on
+    app shutdown via the lifespan context manager. Do not pass the same
+    container to multiple ``create_app()`` calls.
     """
-    app = FastAPI(title="ElephantBroker", version="0.4.0", description="Unified Cognitive Runtime")
+    # Lifespan: yield on startup; close container on shutdown.
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await container.close()
+
+    app = FastAPI(
+        title="ElephantBroker",
+        version="0.4.0",
+        description="Unified Cognitive Runtime",
+        lifespan=lifespan,
+    )
     app.state.container = container
 
     # Middleware (applied in reverse order — gateway runs first)
@@ -63,7 +79,16 @@ def create_app(container: RuntimeContainer) -> FastAPI:
     async def validation_error_handler(request: Request, exc: RequestValidationError):
         logger = logging.getLogger("elephantbroker.api")
         logger.warning("Validation error on %s %s: %s", request.method, request.url.path, exc.errors())
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        # Sanitize errors to remove non-serializable objects (e.g., ValueError instances in ctx)
+        errors = []
+        for err in exc.errors():
+            sanitized = {k: v for k, v in err.items() if k != "ctx"}
+            # If ctx exists and has an 'error' field with an exception, extract its string representation
+            if "ctx" in err and isinstance(err["ctx"], dict) and "error" in err["ctx"]:
+                error_obj = err["ctx"]["error"]
+                sanitized["ctx"] = {"error": str(error_obj)} if not isinstance(error_obj, str) else err["ctx"]
+            errors.append(sanitized)
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     # OTEL instrumentation (additive, no-op without endpoint)
     try:

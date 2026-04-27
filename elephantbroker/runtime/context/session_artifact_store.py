@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import logging
 
+from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.runtime.observability import GatewayLoggerAdapter
 from elephantbroker.runtime.redis_keys import RedisKeyBuilder
 from elephantbroker.schemas.artifact import SessionArtifact, ToolArtifact
 from elephantbroker.schemas.config import ElephantBrokerConfig
+from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 
 class SessionArtifactStore:
@@ -155,7 +157,18 @@ class SessionArtifactStore:
             # SERVES_GOAL: artifact → goal (if goal_id set)
             if result.goal_id:
                 try:
+                    # R2-P7 / link-spam guard: validate goal belongs to
+                    # the caller's gateway. PermissionError surfaces as
+                    # 403 via R2-P5 middleware.
+                    await assert_same_gateway(graph, str(result.goal_id), self._gateway_id)
                     await graph.add_relation(artifact_node_id, str(result.goal_id), "SERVES_GOAL")
+                except PermissionError:
+                    if self._trace:
+                        await self._trace.append_event(TraceEvent(
+                            event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                            payload={"action": "promote_artifact", "target": str(result.goal_id), "gateway_id": self._gateway_id},
+                        ))
+                    raise
                 except Exception:
                     pass
             # OWNED_BY: artifact → agent actor (for visibility filtering)

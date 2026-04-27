@@ -287,7 +287,9 @@ var ElephantBrokerClient = class {
               instruction: s.instruction,
               is_optional: s.is_optional || false
             })),
-            enabled: request.enabled ?? true
+            enabled: request.enabled ?? true,
+            is_manual_only: request.is_manual_only ?? true,
+            ...request.activation_modes ? { activation_modes: request.activation_modes } : {}
           })
         });
         if (!res.ok) throw new Error(`Create procedure failed: ${res.status}`);
