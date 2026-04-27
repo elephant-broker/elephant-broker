@@ -155,3 +155,15 @@ class TestArtifactIngestPipelineMetrics:
         inp = _make_input()
         await pipe.run(inp)
         metrics.inc_pipeline.assert_not_called()
+
+    async def test_inc_pipeline_error_on_run_exception(self):
+        """Gap #13: inc_pipeline('artifact_ingest', 'error') fires when run() raises."""
+        store = _make_store()
+        trace = _make_trace()
+        trace.append_event = AsyncMock(side_effect=RuntimeError("trace exploded"))
+        metrics = MagicMock()
+        pipe = ArtifactIngestPipeline(store, MagicMock(), _make_llm(), trace, _make_config(), metrics=metrics)
+        inp = _make_input()
+        with pytest.raises(RuntimeError, match="trace exploded"):
+            await pipe.run(inp)
+        metrics.inc_pipeline.assert_called_once_with("artifact_ingest", "error")

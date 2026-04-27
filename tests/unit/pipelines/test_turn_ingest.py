@@ -1072,3 +1072,26 @@ class TestDecisionDomainExtraction:
         if facade.store.called:
             stored_fact = facade.store.call_args[0][0]
             assert stored_fact.decision_domain == "financial"
+
+
+class TestTurnIngestPipelineErrorMetric:
+    """Gap #13: inc_pipeline('turn_ingest', 'error') must fire when run() raises."""
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.extract_facts")
+    async def test_inc_pipeline_error_on_run_exception(self, mock_extract, mock_cognee):
+        """inc_pipeline('turn_ingest', 'error') fires and exception re-raises."""
+        mock_extract.side_effect = RuntimeError("LLM extraction exploded")
+        metrics = MagicMock()
+        pipe = TurnIngestPipeline(
+            memory_facade=_make_facade(),
+            actor_registry=MagicMock(),
+            embedding_service=_make_embeddings(),
+            llm_client=_make_llm(),
+            trace_ledger=_make_trace(),
+            config=_make_config(),
+            metrics=metrics,
+        )
+        with pytest.raises(RuntimeError, match="LLM extraction exploded"):
+            await pipe.run("sk", [{"role": "user", "content": "hello"}])
+        metrics.inc_pipeline.assert_called_once_with("turn_ingest", "error")

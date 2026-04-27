@@ -109,8 +109,8 @@ class TestProcedureIngestPipelineMetrics:
         metrics.inc_pipeline.assert_called_once_with("procedure_ingest", "success")
 
     @patch("elephantbroker.pipelines.procedure_ingest.pipeline.add_data_points", new_callable=AsyncMock)
-    async def test_inc_pipeline_not_called_on_validation_error(self, mock_add_dp):
-        """ValueError on empty name short-circuits before metric emission."""
+    async def test_inc_pipeline_error_on_validation_error(self, mock_add_dp):
+        """ValueError on empty name triggers error metric (B2.3b outer try/except)."""
         graph = _make_graph()
         trace = _make_trace()
         metrics = MagicMock()
@@ -119,4 +119,17 @@ class TestProcedureIngestPipelineMetrics:
         proc.name = ""
         with pytest.raises(ValueError):
             await pipe.run(proc)
-        metrics.inc_pipeline.assert_not_called()
+        metrics.inc_pipeline.assert_called_once_with("procedure_ingest", "error")
+
+    @patch("elephantbroker.pipelines.procedure_ingest.pipeline.add_data_points", new_callable=AsyncMock)
+    async def test_inc_pipeline_error_on_run_exception(self, mock_add_dp):
+        """Gap #13: inc_pipeline('procedure_ingest', 'error') fires when run() raises."""
+        graph = _make_graph()
+        trace = _make_trace()
+        trace.append_event = AsyncMock(side_effect=RuntimeError("trace exploded"))
+        metrics = MagicMock()
+        pipe = ProcedureIngestPipeline(graph, trace, metrics=metrics)
+        proc = ProcedureDefinition(name="deploy", description="Deploy", is_manual_only=True)
+        with pytest.raises(RuntimeError, match="trace exploded"):
+            await pipe.run(proc)
+        metrics.inc_pipeline.assert_called_once_with("procedure_ingest", "error")
