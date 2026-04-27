@@ -576,7 +576,7 @@ class RuntimeContainer:
             )
 
         # --- Phase 4: LLM client + ingest pipelines ---
-        c.llm_client = LLMClient(config.llm)
+        c.llm_client = LLMClient(config.llm, metrics=c.metrics_ctx)
 
         # Phase 6: Wire LLM into assembler and compaction, create compaction LLM
         if (config.compaction_llm.endpoint == config.llm.endpoint

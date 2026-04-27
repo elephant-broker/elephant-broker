@@ -18,8 +18,9 @@ logger = logging.getLogger("elephantbroker.adapters.llm")
 class LLMClient:
     """HTTP client for LLM chat completions."""
 
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(self, config: LLMConfig, metrics=None) -> None:
         self._config = config
+        self._metrics = metrics
         # LiteLLM expects e.g. "gemini/gemini-2.5-pro", but Cognee requires
         # the "openai/" prefix in the config.  Strip it before sending.
         model = config.model
@@ -94,18 +95,26 @@ class LLMClient:
             len(system_prompt), len(user_prompt),
         )
 
-        response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
+        try:
+            response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
 
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
 
-        usage = data.get("usage", {})
-        logger.info(
-            "LLM completion received: input_tokens=%s, output_tokens=%s",
-            usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"),
-        )
+            usage = data.get("usage", {})
+            logger.info(
+                "LLM completion received: input_tokens=%s, output_tokens=%s",
+                usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"),
+            )
 
-        return content
+            if self._metrics:
+                self._metrics.inc_llm_call("complete", "success", self._model)
+
+            return content
+        except Exception:
+            if self._metrics:
+                self._metrics.inc_llm_call("complete", "error", self._model)
+            raise
 
     @traced
     async def complete_json(
@@ -140,32 +149,42 @@ class LLMClient:
             self._model, effective_max_tokens, json_schema is not None,
         )
 
-        response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
-
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-
-        # Retry once if LLM returns empty/whitespace response
-        if not content or not content.strip():
-            logger.warning("LLM returned empty response, retrying once")
+        try:
             response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
+
             data = response.json()
             content = data["choices"][0]["message"]["content"]
 
-        # Staging LiteLLM proxy wraps Gemini responses in ```json...``` fences
-        # even when response_format is set — observer found 26 "LLM returned
-        # invalid JSON" warnings in a 2-hour window, including 10/10 empty
-        # facts arrays on the hot extract_facts path. Shared helper lives in
-        # adapters/llm/util.py so goal_refinement's cheap-model path and this
-        # high-level LLMClient path use identical fence handling. No-op on
-        # fence-free content (backward compat).
-        stripped = strip_markdown_fences(content)
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            logger.warning(
-                "LLM returned invalid JSON: %s | content[:200]=%r", exc, content[:200]
-            )
+            # Retry once if LLM returns empty/whitespace response
+            if not content or not content.strip():
+                logger.warning("LLM returned empty response, retrying once")
+                response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+
+            # Staging LiteLLM proxy wraps Gemini responses in ```json...``` fences
+            # even when response_format is set — observer found 26 "LLM returned
+            # invalid JSON" warnings in a 2-hour window, including 10/10 empty
+            # facts arrays on the hot extract_facts path. Shared helper lives in
+            # adapters/llm/util.py so goal_refinement's cheap-model path and this
+            # high-level LLMClient path use identical fence handling. No-op on
+            # fence-free content (backward compat).
+            stripped = strip_markdown_fences(content)
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "LLM returned invalid JSON: %s | content[:200]=%r", exc, content[:200]
+                )
+                raise
+
+            if self._metrics:
+                self._metrics.inc_llm_call("complete_json", "success", self._model)
+
+            return parsed
+        except Exception:
+            if self._metrics:
+                self._metrics.inc_llm_call("complete_json", "error", self._model)
             raise
 
     async def close(self) -> None:

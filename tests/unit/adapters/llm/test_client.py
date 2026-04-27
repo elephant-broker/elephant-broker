@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -157,6 +157,50 @@ class TestCompleteJson:
             await client.complete_json("sys", "usr")
             payload = mock_post.call_args.kwargs["json"]
             assert payload["temperature"] == 0.0
+
+
+class TestLLMClientMetrics:
+    """Gap #4: inc_llm_call must fire on complete/complete_json success + error paths."""
+
+    async def test_complete_success_emits_metric(self, config):
+        """inc_llm_call('complete', 'success', model) fires on successful complete()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response("Hello!")
+            await client.complete("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete", "success", client._model)
+
+    async def test_complete_error_emits_metric(self, config):
+        """inc_llm_call('complete', 'error', model) fires on failed complete()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                500, json={"error": "fail"}, request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete", "error", client._model)
+
+    async def test_complete_json_success_emits_metric(self, config):
+        """inc_llm_call('complete_json', 'success', model) fires on successful complete_json()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response('{"count": 42}')
+            await client.complete_json("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete_json", "success", client._model)
+
+    async def test_complete_json_error_emits_metric(self, config):
+        """inc_llm_call('complete_json', 'error', model) fires on failed complete_json()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response("not-json")
+            with pytest.raises(json.JSONDecodeError):
+                await client.complete_json("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete_json", "error", client._model)
 
 
 class TestClose:

@@ -455,6 +455,7 @@ class TestLLMRetryOnEmpty:
         client._model = "test-model"
         client._endpoint = "http://localhost:8080"
         client._config = config
+        client._metrics = None
 
         call_count = 0
 
@@ -483,6 +484,7 @@ class TestLLMRetryOnEmpty:
         client._model = "test-model"
         client._endpoint = "http://localhost:8080"
         client._config = config
+        client._metrics = None
 
         call_count = 0
 
