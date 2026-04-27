@@ -92,3 +92,31 @@ class TestProcedureIngestPipeline:
         result = await pipe.run(proc)
         # Should not crash and edges_created should be 0 for new proc
         assert result.edges_created == 0
+
+
+class TestProcedureIngestPipelineMetrics:
+    """Gap #3: inc_pipeline('procedure_ingest', 'success') must be emitted."""
+
+    @patch("elephantbroker.pipelines.procedure_ingest.pipeline.add_data_points", new_callable=AsyncMock)
+    async def test_inc_pipeline_success_on_happy_path(self, mock_add_dp):
+        """inc_pipeline('procedure_ingest', 'success') called on successful ingest."""
+        graph = _make_graph()
+        trace = _make_trace()
+        metrics = MagicMock()
+        pipe = ProcedureIngestPipeline(graph, trace, metrics=metrics)
+        proc = ProcedureDefinition(name="deploy", description="Deploy", is_manual_only=True)
+        await pipe.run(proc)
+        metrics.inc_pipeline.assert_called_once_with("procedure_ingest", "success")
+
+    @patch("elephantbroker.pipelines.procedure_ingest.pipeline.add_data_points", new_callable=AsyncMock)
+    async def test_inc_pipeline_not_called_on_validation_error(self, mock_add_dp):
+        """ValueError on empty name short-circuits before metric emission."""
+        graph = _make_graph()
+        trace = _make_trace()
+        metrics = MagicMock()
+        pipe = ProcedureIngestPipeline(graph, trace, metrics=metrics)
+        proc = ProcedureDefinition(name="temp", is_manual_only=True)
+        proc.name = ""
+        with pytest.raises(ValueError):
+            await pipe.run(proc)
+        metrics.inc_pipeline.assert_not_called()

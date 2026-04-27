@@ -7,6 +7,7 @@ from cognee.tasks.storage import add_data_points
 
 from elephantbroker.runtime.adapters.cognee.datapoints import ProcedureDataPoint
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+from elephantbroker.runtime.metrics import inc_pipeline
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.pipeline import ProcedureIngestResult
 from elephantbroker.schemas.procedure import ProcedureDefinition
@@ -20,12 +21,13 @@ class ProcedureIngestPipeline:
 
     def __init__(
         self, graph, trace_ledger: ITraceLedger, dataset_name: str = "elephantbroker",
-        gateway_id: str = "",
+        gateway_id: str = "", metrics=None,
     ):
         self._graph = graph
         self._trace = trace_ledger
         self._dataset_name = dataset_name
         self._gateway_id = gateway_id
+        self._metrics = metrics
 
     @traced
     async def run(self, procedure: ProcedureDefinition) -> ProcedureIngestResult:
@@ -92,6 +94,11 @@ class ProcedureIngestPipeline:
             },
         )
         await self._trace.append_event(trace_event)
+
+        if self._metrics:
+            self._metrics.inc_pipeline("procedure_ingest", "success")
+        else:
+            inc_pipeline("procedure_ingest", "success")
 
         return ProcedureIngestResult(
             procedure=procedure,

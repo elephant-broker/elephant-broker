@@ -690,6 +690,7 @@ class RuntimeContainer:
                 trace_ledger=c.trace_ledger,
                 config=config.llm,
                 gateway_id=gw_id,
+                metrics=c.metrics_ctx,
             )
 
         c.procedure_ingest = ProcedureIngestPipeline(
@@ -697,6 +698,7 @@ class RuntimeContainer:
             trace_ledger=c.trace_ledger,
             dataset_name=dataset_name,
             gateway_id=gw_id,
+            metrics=c.metrics_ctx,
         )
 
         # Audit stores

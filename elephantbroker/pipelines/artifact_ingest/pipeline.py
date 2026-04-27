@@ -6,6 +6,7 @@ import logging
 
 from elephantbroker.runtime.adapters.cognee.tasks.summarize_artifact import summarize_artifact
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+from elephantbroker.runtime.metrics import inc_pipeline
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.artifact import ArtifactHash, ToolArtifact
 from elephantbroker.schemas.pipeline import ArtifactIngestResult, ArtifactInput
@@ -19,7 +20,7 @@ class ArtifactIngestPipeline:
 
     def __init__(
         self, artifact_store, memory_facade, llm_client, trace_ledger: ITraceLedger,
-        config=None, gateway_id: str = "",
+        config=None, gateway_id: str = "", metrics=None,
     ):
         self._store = artifact_store
         self._facade = memory_facade
@@ -27,6 +28,7 @@ class ArtifactIngestPipeline:
         self._trace = trace_ledger
         self._config = config
         self._gateway_id = gateway_id
+        self._metrics = metrics
         self._seen_hashes: set[str] = set()
 
     @traced
@@ -77,6 +79,11 @@ class ArtifactIngestPipeline:
             },
         )
         await self._trace.append_event(trace_event)
+
+        if self._metrics:
+            self._metrics.inc_pipeline("artifact_ingest", "success")
+        else:
+            inc_pipeline("artifact_ingest", "success")
 
         return ArtifactIngestResult(
             artifact=artifact,
