@@ -413,6 +413,7 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
     if container.context_lifecycle is not None:
         if container.metrics_ctx:
             container.metrics_ctx.inc_ingest_gate_skip("full_mode")
+            container.metrics_ctx.inc_buffer_flush("gate_skip_full_mode")
         if container.trace_ledger:
             from elephantbroker.schemas.trace import TraceEvent, TraceEventType
             await container.trace_ledger.append_event(TraceEvent(
@@ -480,8 +481,10 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
 
     if batch_ready and pipeline is not None:
         messages = await buffer.flush(body.session_key)
-        # Emit buffer flush trace event
+        # Emit buffer flush trace event + metric
         container = get_container(request)
+        if container.metrics_ctx:
+            container.metrics_ctx.inc_buffer_flush("batch_size")
         if container.trace_ledger:
             from elephantbroker.schemas.trace import TraceEvent, TraceEventType
             await container.trace_ledger.append_event(TraceEvent(

@@ -496,6 +496,7 @@ class ContextLifecycle:
             ))
 
         if self._metrics:
+            self._metrics.inc_buffer_flush("ingest_batch")
             self._metrics.inc_lifecycle_call("ingest_batch", params.profile_name)
             self._metrics.observe_lifecycle_duration("ingest_batch", params.profile_name, time.monotonic() - t0)
 

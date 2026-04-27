@@ -58,6 +58,20 @@ class TestIngestGate:
         assert r.status_code == 202
         container.metrics_ctx.inc_ingest_gate_skip.assert_called_once_with("full_mode")
 
+    async def test_ingest_gate_increments_buffer_flush_metric(self, client, container):
+        """Gap #1: inc_buffer_flush('gate_skip_full_mode') emitted alongside gate skip."""
+        container.metrics_ctx.inc_buffer_flush = MagicMock()
+
+        r = await client.post(
+            "/memory/ingest-messages",
+            json={
+                "session_key": "agent:main:main",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert r.status_code == 202
+        container.metrics_ctx.inc_buffer_flush.assert_called_once_with("gate_skip_full_mode")
+
     async def test_ingest_gate_trace_event_includes_session_id(self, client, container):
         """TODO-11-006: INGEST_BUFFER_FLUSH trace event includes session_id."""
         container.trace_ledger.append_event = AsyncMock(side_effect=lambda e: e)
@@ -315,6 +329,29 @@ class TestIngestMessagesProfileWireThrough:
             f"expected exactly one warning log on the transient-fallback branch, got {len(warning_records)}"
         )
         assert "coding" in warning_records[0].getMessage()
+
+    async def test_batch_flush_increments_buffer_flush_metric(self, client, container):
+        """Gap #1: inc_buffer_flush('batch_size') emitted when buffer flush triggered."""
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.pipeline import TurnIngestResult
+
+        mock_buffer, mock_pipeline = self._arrange_memory_only(container)
+        # Make buffer report batch_ready=True to trigger the flush branch
+        mock_buffer.add_messages = AsyncMock(return_value=True)
+        mock_buffer.flush = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+        mock_pipeline.run = AsyncMock(return_value=TurnIngestResult(facts_stored=1))
+        container.metrics_ctx = MagicMock()
+
+        r = await client.post(
+            "/memory/ingest-messages",
+            json={
+                "session_key": "agent:main:main",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert r.status_code == 200
+        container.metrics_ctx.inc_buffer_flush.assert_called_once_with("batch_size")
 
     async def test_org_override_wires_through_org_id_to_resolve_profile(
         self, client, container,
