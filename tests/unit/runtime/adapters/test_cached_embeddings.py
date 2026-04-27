@@ -205,3 +205,97 @@ class TestCachedEmbeddingService:
 
         assert result == [[1.0, 2.0], []]
         assert "embed_batch returned 1/2 None entries" in caplog.text
+
+
+class TestEmbeddingCacheObservability:
+    """Step 0 audit gaps #9 + #10: observe_embedding_cache_{batch_size, latency_seconds}
+    were defined in MetricsContext but never called in production code."""
+
+    @pytest.fixture
+    def mock_metrics(self):
+        m = MagicMock()
+        m.observe_embedding_cache_batch = MagicMock()
+        m.observe_embedding_cache_latency = MagicMock()
+        m.inc_embedding_cache = MagicMock()
+        return m
+
+    @pytest.fixture
+    def _svc(self, mock_inner, mock_redis, mock_metrics):
+        """CachedEmbeddingService with all mocks including MetricsContext."""
+        return CachedEmbeddingService(mock_inner, mock_redis, metrics=mock_metrics)
+
+    @pytest.mark.asyncio
+    async def test_observe_batch_size_called_with_len_texts(self, _svc, mock_metrics, mock_redis):
+        """Gap #9: observe_embedding_cache_batch records len(texts) on entry."""
+        mock_redis.mget = AsyncMock(return_value=[None, None, None])
+        await _svc.embed_batch(["a", "b", "c"])
+        mock_metrics.observe_embedding_cache_batch.assert_called_once_with(3)
+
+    @pytest.mark.asyncio
+    async def test_observe_latency_mget(self, _svc, mock_metrics, mock_redis):
+        """Gap #10: mget latency observed with operation='mget'."""
+        mock_redis.mget = AsyncMock(return_value=[None, None])
+        await _svc.embed_batch(["a", "b"])
+        latency_calls = mock_metrics.observe_embedding_cache_latency.call_args_list
+        ops = [c.args[0] for c in latency_calls]
+        assert "mget" in ops
+
+    @pytest.mark.asyncio
+    async def test_observe_latency_embed(self, _svc, mock_metrics, mock_redis):
+        """Gap #10: embed latency observed with operation='embed' when cache misses exist."""
+        mock_redis.mget = AsyncMock(return_value=[None])
+        await _svc.embed_batch(["a"])
+        latency_calls = mock_metrics.observe_embedding_cache_latency.call_args_list
+        ops = [c.args[0] for c in latency_calls]
+        assert "embed" in ops
+
+    @pytest.mark.asyncio
+    async def test_observe_latency_pipeline(self, _svc, mock_metrics, mock_redis):
+        """Gap #10: pipeline write latency observed with operation='pipeline'."""
+        mock_redis.mget = AsyncMock(return_value=[None])
+        await _svc.embed_batch(["a"])
+        latency_calls = mock_metrics.observe_embedding_cache_latency.call_args_list
+        ops = [c.args[0] for c in latency_calls]
+        assert "pipeline" in ops
+
+    @pytest.mark.asyncio
+    async def test_all_three_latency_ops_on_miss(self, _svc, mock_metrics, mock_redis):
+        """Gap #10: all 3 operation labels emitted on a cache-miss embed_batch call."""
+        mock_redis.mget = AsyncMock(return_value=[None])
+        await _svc.embed_batch(["a"])
+        latency_calls = mock_metrics.observe_embedding_cache_latency.call_args_list
+        ops = {c.args[0] for c in latency_calls}
+        assert ops == {"mget", "embed", "pipeline"}
+
+    @pytest.mark.asyncio
+    async def test_latency_values_are_positive_floats(self, _svc, mock_metrics, mock_redis):
+        """Gap #10: duration arguments are positive floats (not None, not negative)."""
+        mock_redis.mget = AsyncMock(return_value=[None])
+        await _svc.embed_batch(["a"])
+        for call in mock_metrics.observe_embedding_cache_latency.call_args_list:
+            duration = call.args[1]
+            assert isinstance(duration, float)
+            assert duration >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_no_embed_latency_on_full_cache_hit(self, mock_inner, mock_redis, mock_metrics):
+        """Gap #10: embed + pipeline latency NOT emitted when all texts are cached."""
+        import json as _json
+        mock_redis.mget = AsyncMock(return_value=[_json.dumps([0.1])])
+        svc = CachedEmbeddingService(mock_inner, mock_redis, metrics=mock_metrics)
+        await svc.embed_batch(["a"])
+        latency_calls = mock_metrics.observe_embedding_cache_latency.call_args_list
+        ops = {c.args[0] for c in latency_calls}
+        # mget always runs, but embed and pipeline should NOT
+        assert "mget" in ops
+        assert "embed" not in ops
+        assert "pipeline" not in ops
+
+    @pytest.mark.asyncio
+    async def test_no_metrics_when_metrics_is_none(self, mock_inner, mock_redis):
+        """Guard: when metrics=None, no observe calls are made (no AttributeError)."""
+        mock_redis.mget = AsyncMock(return_value=[None])
+        svc = CachedEmbeddingService(mock_inner, mock_redis, metrics=None)
+        result = await svc.embed_batch(["a"])
+        # Should complete successfully without any metrics calls
+        assert len(result) == 1

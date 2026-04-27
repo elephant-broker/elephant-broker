@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 
 from elephantbroker.runtime.adapters.cognee.embeddings import EmbeddingService
 from elephantbroker.schemas.config import EmbeddingCacheConfig
@@ -64,11 +65,17 @@ class CachedEmbeddingService:
         if not self._enabled:
             return await self._inner.embed_batch(texts)
 
+        if self._metrics:
+            self._metrics.observe_embedding_cache_batch(len(texts))
+
         keys = [self._cache_key(t) for t in texts]
         # Batch read from cache
         cached_values: list = []
         try:
+            t0 = time.perf_counter()
             cached_values = await self._redis.mget(*keys)
+            if self._metrics:
+                self._metrics.observe_embedding_cache_latency("mget", time.perf_counter() - t0)
         except Exception:
             cached_values = [None] * len(texts)
 
@@ -92,15 +99,21 @@ class CachedEmbeddingService:
 
         # Embed misses
         if miss_texts:
+            t0 = time.perf_counter()
             new_embeddings = await self._inner.embed_batch(miss_texts)
+            if self._metrics:
+                self._metrics.observe_embedding_cache_latency("embed", time.perf_counter() - t0)
             # Write misses to cache
             try:
+                t0 = time.perf_counter()
                 pipe = self._redis.pipeline()
                 for j, idx in enumerate(miss_indices):
                     if j < len(new_embeddings):
                         results[idx] = new_embeddings[j]
                         pipe.setex(keys[idx], self._config.ttl_seconds, json.dumps(new_embeddings[j]))
                 await pipe.execute()
+                if self._metrics:
+                    self._metrics.observe_embedding_cache_latency("pipeline", time.perf_counter() - t0)
             except Exception:
                 # Still populate results even if cache write fails
                 for j, idx in enumerate(miss_indices):
