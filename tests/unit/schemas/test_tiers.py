@@ -17,7 +17,8 @@ class TestTierCapabilities:
 
     def test_full_tier_enables_all_modules(self):
         matrix = TierCapabilityMatrix.for_tier(BusinessTier.FULL)
-        assert len(matrix.enabled_modules) == 17
+        # C2.2: IContextLifecycle added to FULL — count 17 → 18
+        assert len(matrix.enabled_modules) == 18
 
     def test_context_only_has_working_set(self):
         matrix = TierCapabilityMatrix.for_tier(BusinessTier.CONTEXT_ONLY)
@@ -51,16 +52,20 @@ class TestTierCapabilities:
             "IProcedureEngine",
         }
 
-    def test_context_only_has_exactly_10_modules(self):
-        """CONTEXT_ONLY tier has exactly 10 modules, enumerated by interface name."""
+    def test_context_only_has_exactly_11_modules(self):
+        """CONTEXT_ONLY tier has exactly 11 modules, enumerated by interface name.
+
+        C2.2: IContextLifecycle was added — count 10 → 11.
+        """
         m = TierCapabilityMatrix.for_tier(BusinessTier.CONTEXT_ONLY)
-        assert len(m.enabled_modules) == 10
+        assert len(m.enabled_modules) == 11
         assert m.enabled_modules == {
             "IActorRegistry",
             "IGoalManager",
             "IWorkingSetManager",
             "IContextAssembler",
             "ICompactionEngine",
+            "IContextLifecycle",
             "IRedLineGuardEngine",
             "IStatsAndTelemetryEngine",
             "ITraceLedger",
@@ -111,7 +116,10 @@ class TestTierCapabilities:
         }
 
     def test_context_only_unique_modules(self):
-        """The 6 modules unique to CONTEXT_ONLY: working-set/assembler/compaction/guard/stats/tuner."""
+        """The 7 modules unique to CONTEXT_ONLY: working-set/assembler/compaction/lifecycle/guard/stats/tuner.
+
+        C2.2: IContextLifecycle was added to CONTEXT_ONLY (and FULL) — set count 6 → 7.
+        """
         unique = (
             TIER_CAPABILITIES[BusinessTier.CONTEXT_ONLY]
             - TIER_CAPABILITIES[BusinessTier.MEMORY_ONLY]
@@ -120,6 +128,7 @@ class TestTierCapabilities:
             "IWorkingSetManager",
             "IContextAssembler",
             "ICompactionEngine",
+            "IContextLifecycle",
             "IRedLineGuardEngine",
             "IStatsAndTelemetryEngine",
             "IScoringTuner",

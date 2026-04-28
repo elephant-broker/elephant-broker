@@ -248,6 +248,10 @@ class RuntimeContainer:
         # Phase 6.2: Async injection analyzer
         self.async_analyzer = None
 
+        # Phase 9: RT-1 successful-use reasoning task. C2.2 — guarded by
+        # IContextLifecycle, so MEMORY_ONLY tier leaves this at None.
+        self.successful_use_task = None
+
         # Phase 7: Guard pipelines + HITL
         self.redline_refresh = None
         self.hitl_client = None
@@ -736,48 +740,55 @@ class RuntimeContainer:
             c.profile_registry._org_store = c.org_override_store
 
         # --- Phase 6: Context lifecycle stores + orchestrator ---
-        c.session_context_store = SessionContextStore(
-            redis=c.redis, config=config, redis_keys=c.redis_keys, gateway_id=gw_id,
-        )
-        c.session_artifact_store = SessionArtifactStore(
-            redis=c.redis, config=config, redis_keys=c.redis_keys,
-            artifact_store=c.artifact_store, trace_ledger=c.trace_ledger, gateway_id=gw_id,
-        )
-        c.context_lifecycle = ContextLifecycle(
-            working_set_manager=c.working_set_manager,
-            context_assembler=c.context_assembler,
-            compaction_engine=c.compaction_engine,
-            guard_engine=c.guard_engine,
-            memory_store=c.memory_store,
-            turn_ingest=c.turn_ingest,
-            artifact_ingest=c.artifact_ingest,
-            session_goal_store=c.session_goal_store,
-            hint_processor=c.hint_processor,
-            actor_registry=c.actor_registry,
-            profile_registry=c.profile_registry,
-            trace_ledger=c.trace_ledger,
-            llm_client=c.llm_client,
-            redis=c.redis,
-            config=config,
-            gateway_id=gw_id,
-            redis_keys=c.redis_keys,
-            metrics=c.metrics_ctx,
-            session_context_store=c.session_context_store,
-            session_artifact_store=c.session_artifact_store,
-            procedure_engine=c.procedure_engine,
-            async_analyzer=c.async_analyzer,
-            successful_use_task=getattr(c, "successful_use_task", None),
-        )
+        # C2.2: tier-gated by IContextLifecycle. MEMORY_ONLY tier leaves
+        # context_lifecycle/session_context_store/session_artifact_store at
+        # their __init__ None defaults so the FULL-mode gate in
+        # `POST /memory/ingest-messages` (memory.py) falls through to the
+        # buffer path. Phase 9 RT-1 task is bundled inside the same guard
+        # because it patches itself onto context_lifecycle.
+        if _enabled(tier, "IContextLifecycle"):
+            c.session_context_store = SessionContextStore(
+                redis=c.redis, config=config, redis_keys=c.redis_keys, gateway_id=gw_id,
+            )
+            c.session_artifact_store = SessionArtifactStore(
+                redis=c.redis, config=config, redis_keys=c.redis_keys,
+                artifact_store=c.artifact_store, trace_ledger=c.trace_ledger, gateway_id=gw_id,
+            )
+            c.context_lifecycle = ContextLifecycle(
+                working_set_manager=c.working_set_manager,
+                context_assembler=c.context_assembler,
+                compaction_engine=c.compaction_engine,
+                guard_engine=c.guard_engine,
+                memory_store=c.memory_store,
+                turn_ingest=c.turn_ingest,
+                artifact_ingest=c.artifact_ingest,
+                session_goal_store=c.session_goal_store,
+                hint_processor=c.hint_processor,
+                actor_registry=c.actor_registry,
+                profile_registry=c.profile_registry,
+                trace_ledger=c.trace_ledger,
+                llm_client=c.llm_client,
+                redis=c.redis,
+                config=config,
+                gateway_id=gw_id,
+                redis_keys=c.redis_keys,
+                metrics=c.metrics_ctx,
+                session_context_store=c.session_context_store,
+                session_artifact_store=c.session_artifact_store,
+                procedure_engine=c.procedure_engine,
+                async_analyzer=c.async_analyzer,
+                successful_use_task=getattr(c, "successful_use_task", None),
+            )
 
-        # Phase 9: RT-1 task instance (conditional on config)
-        c.successful_use_task = None
-        if config.successful_use.enabled and c.memory_store:
-            try:
-                from elephantbroker.runtime.consolidation.successful_use_task import SuccessfulUseReasoningTask
-                c.successful_use_task = SuccessfulUseReasoningTask(config.successful_use, c.memory_store)
-                c.context_lifecycle._successful_use_task = c.successful_use_task
-            except Exception:
-                pass
+            # Phase 9: RT-1 task instance (conditional on config). Patches
+            # itself onto context_lifecycle, so it requires the guard above.
+            if config.successful_use.enabled and c.memory_store:
+                try:
+                    from elephantbroker.runtime.consolidation.successful_use_task import SuccessfulUseReasoningTask
+                    c.successful_use_task = SuccessfulUseReasoningTask(config.successful_use, c.memory_store)
+                    c.context_lifecycle._successful_use_task = c.successful_use_task
+                except Exception:
+                    pass
 
         return c
 

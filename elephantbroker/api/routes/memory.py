@@ -409,11 +409,14 @@ async def promote_class(body: PromoteClassRequest, request: Request):
 async def ingest_messages(body: IngestMessagesRequest, request: Request):
     # FULL mode gate: context engine owns extraction via ingest_batch().
     # Do NOT buffer — empty buffer implicitly gates POST /sessions/end too.
-    # This couples to container internals intentionally: ContextLifecycle is
-    # unconditionally created in RuntimeContainer.from_config() (container.py:551),
-    # so `context_lifecycle is not None` is always True in FULL deployments.
-    # TODO(TD-15): If tier packaging changes to support MEMORY_ONLY, this gate
-    # must be revised — currently it would incorrectly suppress extraction.
+    # C2.2: ContextLifecycle is now tier-gated by `IContextLifecycle`
+    # (CONTEXT_ONLY + FULL only — see schemas/tiers.py + container.py
+    # `if _enabled(tier, "IContextLifecycle"):`). In MEMORY_ONLY tier
+    # `container.context_lifecycle is None`, so this gate falls through and
+    # the buffer path runs as expected. The check below preserves FULL/
+    # CONTEXT_ONLY semantics: when the context engine is wired, the lifecycle
+    # owns extraction and the memory plugin's direct ingest must be skipped
+    # to prevent double-extraction.
     container = get_container(request)
     if container.context_lifecycle is not None:
         if container.metrics_ctx:
