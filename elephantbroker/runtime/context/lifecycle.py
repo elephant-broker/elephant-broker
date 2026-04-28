@@ -1342,9 +1342,14 @@ class ContextLifecycle:
                         metadata={**msg.metadata, "eb_replaced": "true",
                                   "eb_artifact_id": str(artifact.artifact_id)},
                     )
+                    original_tokens = len(content_as_text(msg)) // 4
+                    replacement_tokens = len(content_as_text(replacement)) // 4
+                    tokens_saved = max(0, original_tokens - replacement_tokens)
                     result.append(replacement)
                     if self._metrics:
                         self._metrics.inc_tool_replacement(tool_name)
+                        if tokens_saved:
+                            self._metrics.inc_tool_tokens_saved(tokens_saved)
                     continue
             result.append(msg)
         return result

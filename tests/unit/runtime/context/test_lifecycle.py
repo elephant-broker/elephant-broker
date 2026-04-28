@@ -2662,6 +2662,47 @@ class TestReplaceOldToolOutputs:
         assert result[0].content == "OK"
         artifact_store.get_by_hash.assert_not_called()
 
+    async def test_emits_tool_tokens_saved_metric(self):
+        """GAP-B8-1: when an old tool output is replaced with a placeholder,
+        emit `eb_tool_tokens_saved_total` with the delta between the original
+        and replacement token count (estimated as len // 4)."""
+        artifact_store = AsyncMock()
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 2000, summary="output summary",
+        )
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(session_artifact_store=artifact_store, metrics=metrics)
+        policy = make_profile_policy().assembly_placement
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),  # old — replaced
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),  # recent — kept
+        ]
+        await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # inc_tool_replacement called once for the replaced message
+        metrics.inc_tool_replacement.assert_called_once_with("bash")
+        # inc_tool_tokens_saved called once with positive savings
+        metrics.inc_tool_tokens_saved.assert_called_once()
+        saved = metrics.inc_tool_tokens_saved.call_args[0][0]
+        # Original ~500 tokens (2000//4); replacement is short — savings must be positive
+        assert saved > 0, f"expected positive token savings, got {saved}"
+
+    async def test_no_tokens_saved_metric_when_nothing_replaced(self):
+        """GAP-B8-1 negative case: no replacement → no inc_tool_tokens_saved."""
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=None)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(session_artifact_store=artifact_store, metrics=metrics)
+        policy = make_profile_policy().assembly_placement
+        msgs = [AgentMessage(role="tool", content="x" * 2000, name="bash")]
+        await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        metrics.inc_tool_replacement.assert_not_called()
+        metrics.inc_tool_tokens_saved.assert_not_called()
+
 
 class TestDeduplicateConversation:
     def test_removes_covered_tool_messages(self):

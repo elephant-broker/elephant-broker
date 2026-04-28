@@ -270,8 +270,12 @@ class TurnIngestPipeline:
                             role = messages[turn_idx].get("role", "")
                             if role in ("assistant", "tool"):
                                 fact_source = agent_actor_id
+                                if self._metrics:
+                                    self._metrics.inc_fact_attribution(role)
                             elif role == "user" and messages[turn_idx].get("actor_id"):
                                 fact_source = uuid.UUID(messages[turn_idx]["actor_id"])
+                                if self._metrics:
+                                    self._metrics.inc_fact_attribution(role)
 
                 fact = FactAssertion(
                     text=rf["text"],
