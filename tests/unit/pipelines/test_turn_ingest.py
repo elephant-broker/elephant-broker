@@ -145,6 +145,57 @@ class TestTurnIngestPipeline:
         # should resolve to the AgentMessage's actor_id (TD-28 precondition check).
         assert result.facts_extracted[0].source_actor_id == uuid.UUID(actor_id)
 
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_per_message_attribution_assistant_vs_user(self, mock_cognee):
+        """C4.1 / GAP-6: per-message attribution — facts originating from a
+        user turn carry the user's actor_id; facts from assistant/tool turns
+        carry the deterministic agent UUID derived from agent_key.
+
+        Pins pipeline.py:233-246: when `agent_key` is supplied, each fact's
+        source_actor_id is resolved by looking up `messages[source_turns[0]].role`
+        and routing user→actor_id, assistant/tool→deterministic_uuid_from(agent_key).
+        Without this branching, both facts would inherit `source_actor_id`
+        (the fallback first-user actor_id at pipeline.py:110-114), losing the
+        provenance distinction GAP-6 was created to restore.
+        """
+        from elephantbroker.runtime.identity import deterministic_uuid_from
+
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+
+        user_actor_id = str(uuid.uuid4())
+        agent_key = "test-gw:main"
+        expected_agent_actor_id = deterministic_uuid_from(agent_key)
+
+        # LLM returns two facts attributing one to each turn.
+        llm = _make_llm(facts=[
+            {"text": "User prefers Python", "category": "preference",
+             "source_turns": [0], "supersedes_index": -1},
+            {"text": "Assistant suggested using uv for dependency management",
+             "category": "decision", "source_turns": [1], "supersedes_index": -1},
+        ])
+        pipe = _make_pipeline(llm=llm)
+
+        messages = [
+            {"role": "user", "content": "What package manager should I use?",
+             "actor_id": user_actor_id},
+            {"role": "assistant", "content": "Try uv — it's fast and replaces pip+venv."},
+        ]
+        result = await pipe.run("session:test", messages, agent_key=agent_key)
+
+        assert len(result.facts_extracted) == 2
+        # Order in facts_extracted matches the LLM's order, which matches
+        # source_turns order here. Identify by source_turn provenance string.
+        by_turn = {
+            f.provenance_refs[0].split(":turn:")[-1]: f
+            for f in result.facts_extracted
+        }
+        # Turn 0 (user with actor_id) → user's UUID, NOT the agent's.
+        assert by_turn["0"].source_actor_id == uuid.UUID(user_actor_id)
+        # Turn 1 (assistant) → deterministic agent UUID, NOT the user's.
+        assert by_turn["1"].source_actor_id == expected_agent_actor_id
+        assert by_turn["1"].source_actor_id != uuid.UUID(user_actor_id)
+
     async def test_empty_messages_returns_zero(self):
         pipe = _make_pipeline()
         result = await pipe.run("session:test", [])
