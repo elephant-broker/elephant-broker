@@ -1168,6 +1168,77 @@ class TestDecisionDomainExtraction:
             assert stored_fact.decision_domain == "financial"
 
 
+class TestTurnIngestTraceIdentity:
+    """TODO-8-R1-001 — C1.1 regression coverage.
+
+    C1.1 added ``session_id`` to the ``MEMORY_CLASS_ASSIGNED`` and
+    ``FACT_SUPERSEDED`` trace events but landed without test coverage.
+    Without these tests, a regression could silently drop the field again
+    and the only signal would be missing rows in
+    ``/trace/session/<id>/timeline`` — a hard-to-spot symptom that R1
+    almost shipped. Both tests pin the conversion shape (string in →
+    UUID on the TraceEvent) used at pipeline.py:287 and pipeline.py:334.
+    """
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_memory_class_assigned_carries_session_id(self, mock_cognee):
+        """MEMORY_CLASS_ASSIGNED trace event includes session_id (UUID)."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        trace = _make_trace()
+        pipe = _make_pipeline(trace=trace)
+        sid = uuid.uuid4()
+        messages = [{"role": "user", "content": "I prefer Python for all projects"}]
+        await pipe.run("session:test", messages, session_id=str(sid))
+
+        mc_events = [
+            call.args[0]
+            for call in trace.append_event.call_args_list
+            if call.args and call.args[0].event_type == TraceEventType.MEMORY_CLASS_ASSIGNED
+        ]
+        assert len(mc_events) >= 1, "MEMORY_CLASS_ASSIGNED event must be emitted when classes are assigned"
+        for ev in mc_events:
+            assert ev.session_id == sid, (
+                f"MEMORY_CLASS_ASSIGNED missing session_id (expected {sid}, got {ev.session_id})"
+            )
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_fact_superseded_carries_session_id(self, mock_cognee):
+        """FACT_SUPERSEDED trace event includes session_id (UUID)."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+
+        # Existing recent_fact in buffer that the new fact will supersede.
+        old_fact_id = str(uuid.uuid4())
+        recent_facts = [{"id": old_fact_id, "text": "Old preference", "category": "preference"}]
+        buffer = _make_buffer(recent_facts=recent_facts)
+
+        # LLM returns a fact that supersedes index 0.
+        llm = _make_llm(facts=[{
+            "text": "User prefers TypeScript over Python",
+            "category": "preference",
+            "source_turns": [0],
+            "supersedes_index": 0,
+        }])
+
+        trace = _make_trace()
+        pipe = _make_pipeline(llm=llm, trace=trace, buffer=buffer)
+        sid = uuid.uuid4()
+        messages = [{"role": "user", "content": "Switching from Python to TypeScript"}]
+        await pipe.run("session:test", messages, session_id=str(sid))
+
+        fs_events = [
+            call.args[0]
+            for call in trace.append_event.call_args_list
+            if call.args and call.args[0].event_type == TraceEventType.FACT_SUPERSEDED
+        ]
+        assert len(fs_events) >= 1, "FACT_SUPERSEDED event must be emitted when supersession occurs"
+        for ev in fs_events:
+            assert ev.session_id == sid, (
+                f"FACT_SUPERSEDED missing session_id (expected {sid}, got {ev.session_id})"
+            )
+
+
 class TestTurnIngestPipelineErrorMetric:
     """Gap #13: inc_pipeline('turn_ingest', 'error') must fire when run() raises."""
 

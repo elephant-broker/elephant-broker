@@ -42,7 +42,9 @@ Both plugins use a bundle-dist layout (PR #5, 2026-04-18): source lives in `src/
 
 ### Installation Steps
 
-> **Deployment mode:** Installing **both** plugins (`elephantbroker-memory` + `elephantbroker-context`) configures **FULL mode** — the recommended operating mode for ~90% of deployments. FULL mode enables the complete stack: durable memory (Neo4j + Qdrant-backed), working set scoring (11-dimension), context assembly, compaction, and guards. Installing only `elephantbroker-memory` puts the runtime in MEMORY_ONLY mode (memory storage without context lifecycle). For all standard deployments, install both.
+> **Deployment mode:** Installing **both** plugins (`elephantbroker-memory` + `elephantbroker-context`) and setting `EB_TIER=full` (or leaving the default) configures **FULL mode** — the recommended operating mode for ~90% of deployments. FULL mode enables the complete stack: durable memory (Neo4j + Qdrant-backed), working set scoring (11-dimension), context assembly, compaction, and guards.
+>
+> **`EB_TIER`** (Phase 1 / C2.1) selects the runtime's tier capability set: `full` (default), `memory_only`, or `context_only`. Installing only `elephantbroker-memory` is **not sufficient** to disable the context lifecycle — the runtime tier is selected via `EB_TIER`, not by which plugins are present. To run in MEMORY_ONLY mode (memory storage without context lifecycle), set `EB_TIER=memory_only`; to run in CONTEXT_ONLY mode (context lifecycle without memory store), set `EB_TIER=context_only`. The `EB_TIER` value is validated at config load — an unknown tier name fails fast with a `ValidationError` at startup rather than silently falling back to FULL.
 
 **Prerequisite:** Node.js **24+** (pinned via `engines.node` in each plugin's
 `package.json`). Earlier versions (20, 22) may run but are not supported by
@@ -391,6 +393,7 @@ table lives at
 | `EB_RERANKER_ENDPOINT` | No | `http://localhost:1235` | Qwen3-Reranker-4B endpoint |
 | `EB_RERANKER_API_KEY` | No | `""` | Reranker API key |
 | `EB_GUARDS_ENABLED` | No | `true` | Master switch for the 6-layer guard pipeline (overrides `guards.enabled` in YAML). Post R1 Bucket A TODO-3-001 fix |
+| `EB_TIER` | No | `full` | Runtime tier capability set: `full` / `memory_only` / `context_only`. Selects which runtime modules are wired in `RuntimeContainer.from_config`. Installing only `elephantbroker-memory` does NOT switch tier — `EB_TIER=memory_only` must be set explicitly. Validated at config load (unknown values raise `ValidationError`). Post Phase 1 / C2.1 |
 
 ### HITL Middleware
 

@@ -242,6 +242,38 @@ async def session_end(body: SessionEndRequest, request: Request):
     messages = []
     if buffer and getattr(container, "context_lifecycle", None) is None:
         messages = await buffer.force_flush(body.session_key)
+        # TODO-8-R1-013: B2.2 wired inc_buffer_flush at the three batch-size
+        # flush sites (memory.py, lifecycle.afterTurn, buffer timer) but
+        # missed this fourth site — the MEMORY_ONLY-tier session-end force
+        # flush. Without this, dashboards undercount real flushes (the
+        # session-end path is the only flush site for the no-context-engine
+        # tier) and the per-session timeline misses the INGEST_BUFFER_FLUSH
+        # event at session boundary. Only fire when force_flush actually
+        # returned messages — an empty buffer call is not a meaningful
+        # flush event.
+        if messages:
+            metrics_ctx = getattr(container, "metrics_ctx", None)
+            if metrics_ctx:
+                metrics_ctx.inc_buffer_flush("session_end")
+            trace_ledger = getattr(container, "trace_ledger", None)
+            if trace_ledger:
+                try:
+                    parsed_sid_for_flush = (
+                        uuid.UUID(body.session_id) if body.session_id else None
+                    )
+                except (ValueError, TypeError):
+                    parsed_sid_for_flush = None
+                await trace_ledger.append_event(TraceEvent(
+                    event_type=TraceEventType.INGEST_BUFFER_FLUSH,
+                    gateway_id=gw_id,
+                    session_key=body.session_key,
+                    session_id=parsed_sid_for_flush,
+                    payload={
+                        "session_key": body.session_key,
+                        "message_count": len(messages),
+                        "trigger": "session_end",
+                    },
+                ))
 
     # Run pipeline on flushed messages if available.
     # In FULL mode, messages is always [] due to the guard above, so pipeline.run()

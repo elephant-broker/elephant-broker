@@ -51,13 +51,30 @@ class TestGoalManager:
         assert result.status == GoalStatus.COMPLETED
 
     async def test_set_goal_emits_trace(self, monkeypatch, mock_add_data_points, mock_cognee):
+        """TODO-8-R1-016 — assert event type, not just count.
+
+        Phase 3b precedent (see ``IMPLEMENTED-FIX-Phase-3b.md``) requires
+        every trace-emission test to pin the ``event_type`` so a regression
+        that emits a stand-in event (e.g. ``DEGRADED_OPERATION`` after a
+        silent failure) cannot pass the test by happening to produce ANY
+        single event. We pin both the event type (``INPUT_RECEIVED``,
+        currently used by GoalManager.set_goal) and the
+        ``payload["action"] == "set_goal"`` discriminator that distinguishes
+        it from sibling INPUT_RECEIVED events emitted elsewhere.
+        """
         mgr, graph, ledger = self._make()
         monkeypatch.setattr("elephantbroker.runtime.goals.manager.add_data_points", mock_add_data_points)
         monkeypatch.setattr("elephantbroker.runtime.goals.manager.cognee", mock_cognee)
-        await mgr.set_goal(make_goal_state())
-        from elephantbroker.schemas.trace import TraceQuery
+        goal = make_goal_state()
+        await mgr.set_goal(goal)
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
         events = await ledger.query_trace(TraceQuery())
         assert len(events) == 1
+        ev = events[0]
+        assert ev.event_type == TraceEventType.INPUT_RECEIVED
+        assert ev.payload.get("action") == "set_goal"
+        assert ev.payload.get("title") == goal.title
+        assert goal.id in ev.goal_ids
 
     async def test_set_goal_with_parent(self, monkeypatch, mock_add_data_points, mock_cognee):
         mgr, graph, _ = self._make()

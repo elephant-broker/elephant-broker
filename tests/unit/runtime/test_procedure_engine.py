@@ -315,6 +315,168 @@ class TestProcedureEngineMetrics:
         )
         metrics.inc_procedure_proof.assert_called_once_with("tool_output")
 
+    async def test_activate_trace_carries_gateway_session_identity(self):
+        """TODO-8-R1-004 / TODO-8-R1-008 — activate() trace stamps gateway+session.
+
+        PROCEDURE_STEP_PASSED is reused for the activation event (no
+        PROCEDURE_ACTIVATED enum value exists; B2.5 wired
+        inc_procedure_activated() beside it for distinct counting). The
+        identity fields (gateway_id, session_key, session_id) must reach
+        the trace so /trace/session timeline filters do not silently drop
+        activation events. Pre-fix, activate() emitted the trace without
+        any of these — breaking per-tenant isolation on activation queries.
+        """
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        engine = ProcedureEngine(AsyncMock(), TraceLedger(), gateway_id="gw-99")
+        engine._graph.get_entity = AsyncMock(return_value={"eb_id": "test", "name": "test"})
+        proc_id = uuid.uuid4()
+        sid = uuid.uuid4()
+        await engine.activate(
+            proc_id, uuid.uuid4(),
+            session_key="agent:main:main", session_id=sid,
+        )
+        events = await engine._trace.query_trace(TraceQuery())
+        activate_events = [
+            e for e in events
+            if e.event_type == TraceEventType.PROCEDURE_STEP_PASSED
+            and e.payload.get("action") == "activate"
+        ]
+        assert len(activate_events) == 1
+        ev = activate_events[0]
+        assert ev.gateway_id == "gw-99"
+        assert ev.session_key == "agent:main:main"
+        assert ev.session_id == sid
+
+    async def test_validate_completion_evidence_path_trace_carries_identity(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-8-R1-014 — PROCEDURE_COMPLETION_CHECKED carries gateway_id.
+
+        Sibling event in record_step_evidence (engine.py:217) stamps
+        gateway_id; the validate_completion success branch was missing
+        the same field. Without this, /trace queries scoped by gateway
+        would not surface successful completions on the evidence-engine
+        path. session_key/session_id are also pinned because they come
+        from the in-memory execution record and are equally critical
+        for per-session timeline filtering.
+        """
+        from elephantbroker.schemas.guards import CompletionCheckResult
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.procedures.engine.add_data_points", mock_add_data_points,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.procedures.engine.cognee", mock_cognee,
+        )
+        engine = ProcedureEngine(AsyncMock(), TraceLedger(), gateway_id="gw-77")
+        engine._graph.get_entity = AsyncMock(return_value={"eb_id": "x", "name": "x"})
+        proc_id = uuid.uuid4()
+        sid = uuid.uuid4()
+        execution = await engine.activate(
+            proc_id, uuid.uuid4(),
+            session_key="agent:main:main", session_id=sid,
+        )
+        evidence_engine = AsyncMock()
+        evidence_engine.check_completion_requirements = AsyncMock(
+            return_value=CompletionCheckResult(complete=True, procedure_id=proc_id),
+        )
+        engine._evidence_engine = evidence_engine
+        await engine.validate_completion(execution.execution_id)
+
+        events = await engine._trace.query_trace(TraceQuery())
+        completion_events = [
+            e for e in events
+            if e.event_type == TraceEventType.PROCEDURE_COMPLETION_CHECKED
+        ]
+        assert len(completion_events) == 1
+        ev = completion_events[0]
+        assert ev.gateway_id == "gw-77"
+        assert ev.session_key == "agent:main:main"
+        assert ev.session_id == sid
+
+    async def test_validate_completion_fallback_path_fires_metric_and_trace(self):
+        """TODO-8-R1-007 — fallback path (no evidence engine) is not silent.
+
+        Without an evidence engine, a procedure with completed_steps > 0
+        was returning ``CompletionCheckResult(complete=True)`` while
+        ``inc_procedure_completed()`` and the
+        ``PROCEDURE_COMPLETION_CHECKED`` trace event silently never fired.
+        Deployments without an evidence engine (MEMORY_ONLY tier, or
+        operators who disable it) saw ``eb_procedure_completed_total``
+        permanently stuck at 0.
+
+        This test pins the new behaviour: when fallback returns
+        complete=True, BOTH the metric and the trace event fire; when
+        fallback returns complete=False (no completed steps), neither
+        fires (a non-completion is not a completion event).
+        """
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        from unittest.mock import MagicMock
+
+        graph = AsyncMock()
+        ledger = TraceLedger()
+        metrics = MagicMock()
+        engine = ProcedureEngine(graph, ledger, gateway_id="gw-fb", metrics=metrics)
+        proc_id = uuid.uuid4()
+        graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "x"})
+        sid = uuid.uuid4()
+        execution = await engine.activate(
+            proc_id, uuid.uuid4(),
+            session_key="agent:main:main", session_id=sid,
+        )
+        # Mark a step complete so the fallback returns complete=True.
+        await engine.check_step(execution.execution_id, uuid.uuid4())
+        metrics.reset_mock()  # Clear activate / step-complete calls.
+
+        # No evidence_engine → fallback path runs.
+        result = await engine.validate_completion(execution.execution_id)
+        assert result.complete is True
+        metrics.inc_procedure_completed.assert_called_once_with()
+        events = await ledger.query_trace(TraceQuery())
+        completion_events = [
+            e for e in events
+            if e.event_type == TraceEventType.PROCEDURE_COMPLETION_CHECKED
+        ]
+        assert len(completion_events) == 1
+        ev = completion_events[0]
+        assert ev.payload.get("path") == "fallback_no_evidence_engine"
+        assert ev.gateway_id == "gw-fb"
+        assert ev.session_key == "agent:main:main"
+        assert ev.session_id == sid
+
+    async def test_validate_completion_fallback_path_no_completed_steps_silent(self):
+        """TODO-8-R1-007 — fallback returning complete=False does NOT fire metric/trace.
+
+        Companion to ``test_validate_completion_fallback_path_fires_metric_and_trace``:
+        a non-completion (no completed_steps) must NOT increment
+        ``inc_procedure_completed`` or emit ``PROCEDURE_COMPLETION_CHECKED``.
+        Pin so a future regression that fires unconditionally would be
+        caught.
+        """
+        from elephantbroker.schemas.trace import TraceEventType, TraceQuery
+        from unittest.mock import MagicMock
+
+        graph = AsyncMock()
+        ledger = TraceLedger()
+        metrics = MagicMock()
+        engine = ProcedureEngine(graph, ledger, gateway_id="gw-fb", metrics=metrics)
+        proc_id = uuid.uuid4()
+        graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "x"})
+        execution = await engine.activate(proc_id, uuid.uuid4())
+        metrics.reset_mock()
+
+        # No completed_steps → fallback returns complete=False.
+        result = await engine.validate_completion(execution.execution_id)
+        assert result.complete is False
+        metrics.inc_procedure_completed.assert_not_called()
+        events = await ledger.query_trace(TraceQuery())
+        completion_events = [
+            e for e in events
+            if e.event_type == TraceEventType.PROCEDURE_COMPLETION_CHECKED
+        ]
+        assert completion_events == []
+
     async def test_inc_procedure_completed_on_validate_completion(self):
         """TF-05-009 Flag #2: ``inc_procedure_completed()`` fires when
         ``validate_completion`` reaches the success branch.

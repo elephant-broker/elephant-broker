@@ -306,9 +306,14 @@ class CandidateGenerator:
                     # Fallback: return all items unfiltered
                     pass
 
-            if self._metrics:
-                for _ in items:
-                    self._metrics.inc_procedure_qualified()
+            # TODO-8-R1-018 / TODO-8-R1-021: batched increment instead of
+            # a per-item loop. ``inc_procedure_qualified(count=N)`` lets
+            # Prometheus' ``Counter.inc(amount)`` do the math in one
+            # round-trip; the previous loop emitted N method calls per
+            # candidate set (small N in practice — bounded by
+            # ``pcc.top_k`` — but cleaner this way).
+            if self._metrics and items:
+                self._metrics.inc_procedure_qualified(count=len(items))
             return items
         except Exception:
             return []

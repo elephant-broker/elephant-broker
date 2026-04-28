@@ -419,9 +419,14 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
     # to prevent double-extraction.
     container = get_container(request)
     if container.context_lifecycle is not None:
+        # TODO-8-R1-012 — 4-reviewer consensus (LT + interop + BS + BL):
+        # ``inc_buffer_flush("gate_skip_full_mode")`` was semantic noise on
+        # a NON-flush path. ``eb_ingest_gate_skips_total`` already captures
+        # this exact event with its own ``reason`` label; firing
+        # ``eb_ingest_buffer_flushes_total`` here distorted flush-rate
+        # dashboards by counting gate skips as flushes. Removed.
         if container.metrics_ctx:
             container.metrics_ctx.inc_ingest_gate_skip("full_mode")
-            container.metrics_ctx.inc_buffer_flush("gate_skip_full_mode")
         if container.trace_ledger:
             from elephantbroker.schemas.trace import TraceEvent, TraceEventType
             await container.trace_ledger.append_event(TraceEvent(

@@ -276,7 +276,25 @@ class RuntimeContainer:
         config: ElephantBrokerConfig,
         tier: BusinessTier = BusinessTier.FULL,
     ) -> RuntimeContainer:
-        """Build container from config. Adapters are initialized, modules wired."""
+        """Build container from config. Adapters are initialized, modules wired.
+
+        TODO-8-R1-022 — ``tier`` default rationale. The default is
+        intentionally ``BusinessTier.FULL`` — the broadest tier — so a
+        non-server caller (CLI tooling, an integration test that does not
+        thread the env var) gets the full module surface. Production
+        callers (``server.py``) explicitly pass ``config.tier`` (which
+        receives the ``EB_TIER`` env override via ``ENV_OVERRIDE_BINDINGS``
+        — see ``schemas/config.py``); they do NOT rely on the default.
+
+        The alternative — defaulting to ``config.tier`` when ``tier`` is
+        unset — would be cleaner but is a behaviour change for the
+        existing test surface. Many tests call ``from_config(config)``
+        without passing tier and rely on FULL semantics; flipping the
+        default to a lower tier would silently disable modules in those
+        tests and produce confusing failures elsewhere. Tracked as
+        follow-up architectural cleanup (would also require auditing
+        every ``from_config`` test caller).
+        """
         # --- Startup safety guards (A3/A4/A5) ---
         # Refuse to boot with sentinel gateway_id, empty neo4j_password, or
         # an attempted dataset rename on a host with persistent state. Each
@@ -588,12 +606,24 @@ class RuntimeContainer:
                 and config.compaction_llm.api_key == config.llm.api_key):
             c.compaction_llm_client = c.llm_client
         else:
+            # TODO-8-R1-009: pass metrics_ctx so dedicated compaction
+            # endpoints emit `eb_llm_calls_total` (operation="complete"/
+            # "complete_json", status="success"/"error"/"json_parse_error",
+            # model=<compaction-model>). Pre-fix the dedicated-endpoint
+            # branch silently dropped the metrics_ctx kwarg, leaving
+            # operators unable to monitor LLM call rate / failure rate
+            # for the compaction-only endpoint — a real gap when ops
+            # split compaction onto a cheaper / different-region proxy
+            # (a documented configuration in `docs/CONFIGURATION.md`).
             from elephantbroker.schemas.config import LLMConfig as _LLMConfig
-            c.compaction_llm_client = LLMClient(_LLMConfig(
-                model=config.compaction_llm.model,
-                endpoint=config.compaction_llm.endpoint,
-                api_key=config.compaction_llm.api_key,
-            ))
+            c.compaction_llm_client = LLMClient(
+                _LLMConfig(
+                    model=config.compaction_llm.model,
+                    endpoint=config.compaction_llm.endpoint,
+                    api_key=config.compaction_llm.api_key,
+                ),
+                metrics=c.metrics_ctx,
+            )
 
         if c.context_assembler:
             c.context_assembler._llm_client = c.llm_client
@@ -746,6 +776,25 @@ class RuntimeContainer:
         # `POST /memory/ingest-messages` (memory.py) falls through to the
         # buffer path. Phase 9 RT-1 task is bundled inside the same guard
         # because it patches itself onto context_lifecycle.
+        #
+        # TODO-8-R1-011 — CONTEXT_ONLY-tier dependency-fan-out
+        # acknowledgment. ``IContextLifecycle`` is enabled in BOTH FULL and
+        # CONTEXT_ONLY tiers (see ``schemas/tiers.py: TIER_CAPABILITIES``).
+        # In CONTEXT_ONLY, ``IMemoryStoreFacade`` is NOT enabled, which
+        # means ``c.memory_store``, ``c.turn_ingest``, and
+        # ``c.artifact_ingest`` are all ``None`` at this point. The
+        # ContextLifecycle constructor below accepts those as ``None`` and
+        # the per-method handlers degrade silently when the dependency
+        # is missing (e.g. ``ingest_batch`` short-circuits without
+        # ``turn_ingest``). This is intentional — a CONTEXT_ONLY
+        # deployment has no memory store to ingest into, so the lifecycle
+        # methods are no-ops on those code paths. The ``DEGRADED_OPERATION``
+        # trace fires from the handlers themselves when a specific
+        # dependency is missing at call time, which is the right surface
+        # to detect mis-configurations against (a CONTEXT_ONLY deployment
+        # that somehow tries to call ``ingest_batch`` would emit a clear
+        # trace event rather than crashing). The ``None``-fan-out at
+        # construction is therefore a deliberate degradation, not a bug.
         if _enabled(tier, "IContextLifecycle"):
             c.session_context_store = SessionContextStore(
                 redis=c.redis, config=config, redis_keys=c.redis_keys, gateway_id=gw_id,

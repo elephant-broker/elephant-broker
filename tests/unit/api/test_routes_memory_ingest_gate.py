@@ -58,8 +58,17 @@ class TestIngestGate:
         assert r.status_code == 202
         container.metrics_ctx.inc_ingest_gate_skip.assert_called_once_with("full_mode")
 
-    async def test_ingest_gate_increments_buffer_flush_metric(self, client, container):
-        """Gap #1: inc_buffer_flush('gate_skip_full_mode') emitted alongside gate skip."""
+    async def test_ingest_gate_does_not_increment_buffer_flush_metric(self, client, container):
+        """TODO-8-R1-012 — gate-skip path is NOT a buffer flush.
+
+        4-reviewer R1 consensus (LT + interop + BS + BL): the gate-skip
+        path used to fire ``inc_buffer_flush("gate_skip_full_mode")``,
+        polluting the buffer-flush metric with non-flush events. The
+        gate-skip is captured by ``inc_ingest_gate_skip("full_mode")``
+        on its own metric (``eb_ingest_gate_skips_total``) — that's the
+        correct surface. This test pins the post-fix contract: the
+        gate-skip path must NOT touch ``inc_buffer_flush``.
+        """
         container.metrics_ctx.inc_buffer_flush = MagicMock()
 
         r = await client.post(
@@ -70,7 +79,11 @@ class TestIngestGate:
             },
         )
         assert r.status_code == 202
-        container.metrics_ctx.inc_buffer_flush.assert_called_once_with("gate_skip_full_mode")
+        # Pre-fix this asserted ``inc_buffer_flush.assert_called_once_with(
+        # "gate_skip_full_mode")``. Post-fix the gate-skip path emits
+        # ONLY ``inc_ingest_gate_skip``; ``inc_buffer_flush`` must not
+        # fire (the buffer is not flushed in this branch).
+        container.metrics_ctx.inc_buffer_flush.assert_not_called()
 
     async def test_ingest_gate_trace_event_includes_session_id(self, client, container):
         """TODO-11-006: INGEST_BUFFER_FLUSH trace event includes session_id."""

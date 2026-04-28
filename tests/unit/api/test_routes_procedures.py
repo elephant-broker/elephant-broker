@@ -17,8 +17,26 @@ class TestProcedureRoutes:
         assert r.json()["name"] == "Test procedure"
 
     async def test_get_procedure(self, client):
-        r = await client.get(f"/procedures/{uuid.uuid4()}")
+        """TODO-8-R1-005 — pin the *current stub contract*, not just 200.
+
+        ``GET /procedures/{procedure_id}`` is a Phase 4 stub
+        (``api/routes/procedures.py:42-44``) that returns
+        ``{"procedure_id": "<uuid>", "status": "stub"}`` without consulting
+        the engine. The previous test only asserted ``r.status_code == 200``,
+        which would silently keep passing even if the stub were replaced
+        with an unrelated 200-response handler (e.g. one that returns a
+        completed procedure with broken or empty fields). Asserting the
+        full stub shape is the closest we can get to "test the actual
+        behaviour" until the route is replaced with the real engine call.
+        When the stub is implemented, this test should be replaced with
+        engine-mock-driven coverage; the assertion failures here will
+        signal the migration is needed.
+        """
+        proc_id = uuid.uuid4()
+        r = await client.get(f"/procedures/{proc_id}")
         assert r.status_code == 200
+        body = r.json()
+        assert body == {"procedure_id": str(proc_id), "status": "stub"}
 
     async def test_activate_procedure(self, client, mock_graph, monkeypatch, mock_add_data_points, mock_cognee):
         monkeypatch.setattr("elephantbroker.runtime.procedures.engine.add_data_points", mock_add_data_points)

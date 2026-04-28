@@ -149,6 +149,20 @@ class LLMClient:
             self._model, effective_max_tokens, json_schema is not None,
         )
 
+        # TODO-8-R1-003: split the HTTP-layer failure path from the JSON
+        # parse failure path so dashboards can distinguish "the LLM proxy
+        # is down / returning 5xx / network error" from "the LLM returned
+        # 200 OK but the body was not parseable JSON". Pre-fix, both
+        # surfaced as `inc_llm_call("complete_json", "error", model)`,
+        # leaving operators unable to route alerts (a network outage and
+        # a Gemini-fences regression have very different remediation
+        # paths). The architecture-reviewer flagged the conflation; the
+        # feature-reviewer flagged the risk of double-firing if a naive
+        # split fired both an inner "json_parse_error" AND an outer
+        # "error" metric on parse failure. The two-block structure below
+        # honors both concerns: each call emits exactly ONE metric, and
+        # the `status` label cleanly separates HTTP ("error") from
+        # response-format ("json_parse_error") failures.
         try:
             response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
 
@@ -161,31 +175,39 @@ class LLMClient:
                 response = await self._post_with_retry(f"{self._endpoint}/chat/completions", payload)
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-
-            # Staging LiteLLM proxy wraps Gemini responses in ```json...``` fences
-            # even when response_format is set — observer found 26 "LLM returned
-            # invalid JSON" warnings in a 2-hour window, including 10/10 empty
-            # facts arrays on the hot extract_facts path. Shared helper lives in
-            # adapters/llm/util.py so goal_refinement's cheap-model path and this
-            # high-level LLMClient path use identical fence handling. No-op on
-            # fence-free content (backward compat).
-            stripped = strip_markdown_fences(content)
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                logger.warning(
-                    "LLM returned invalid JSON: %s | content[:200]=%r", exc, content[:200]
-                )
-                raise
-
-            if self._metrics:
-                self._metrics.inc_llm_call("complete_json", "success", self._model)
-
-            return parsed
         except Exception:
+            # HTTP / network / proxy / 5xx — the call never produced a
+            # response payload to parse. Distinct from JSON parse failure.
             if self._metrics:
                 self._metrics.inc_llm_call("complete_json", "error", self._model)
             raise
+
+        # Staging LiteLLM proxy wraps Gemini responses in ```json...``` fences
+        # even when response_format is set — observer found 26 "LLM returned
+        # invalid JSON" warnings in a 2-hour window, including 10/10 empty
+        # facts arrays on the hot extract_facts path. Shared helper lives in
+        # adapters/llm/util.py so goal_refinement's cheap-model path and this
+        # high-level LLMClient path use identical fence handling. No-op on
+        # fence-free content (backward compat).
+        stripped = strip_markdown_fences(content)
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "LLM returned invalid JSON: %s | content[:200]=%r", exc, content[:200]
+            )
+            if self._metrics:
+                # Distinct status label so dashboards can split HTTP-layer
+                # failures from response-format failures. Single fire per
+                # call (no fall-through to the outer block — that block
+                # was for the HTTP path above).
+                self._metrics.inc_llm_call("complete_json", "json_parse_error", self._model)
+            raise
+
+        if self._metrics:
+            self._metrics.inc_llm_call("complete_json", "success", self._model)
+
+        return parsed
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

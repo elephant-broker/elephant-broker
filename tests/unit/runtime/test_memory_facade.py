@@ -1532,7 +1532,13 @@ class TestMemoryStoreFacadePhase4:
     async def test_store_success_increments_facts_stored(
         self, monkeypatch, mock_add_data_points, mock_cognee,
     ):
-        """Gap #11: inc_facts_stored(memory_class, profile_name) fires on store success."""
+        """Gap #11: inc_facts_stored(memory_class, profile_name) fires on store success.
+
+        This test pins the ``profile_name=None → "unknown"`` fallback path —
+        the affirmative path with an explicit profile_name is pinned by
+        ``test_store_success_facts_stored_uses_explicit_profile_name``
+        (TODO-8-R1-002).
+        """
         from unittest.mock import MagicMock
         facade, *_ = self._make()
         monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
@@ -1543,6 +1549,35 @@ class TestMemoryStoreFacadePhase4:
         await facade.store(fact)
         mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
         metrics.inc_facts_stored.assert_called_once_with(mc, "unknown")
+
+    async def test_store_success_facts_stored_uses_explicit_profile_name(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-8-R1-002 — affirmative-path coverage for `inc_facts_stored`.
+
+        C1.2 / C1.2b wired ``profile_name`` end-to-end: route → facade →
+        ``inc_facts_stored(memory_class, profile_name)``. The existing
+        ``test_store_success_increments_facts_stored`` only exercises the
+        ``profile_name=None`` fallback (label = ``"unknown"``). Without an
+        affirmative test, a regression that drops or shadows the kwarg
+        somewhere in the C1.2/C1.2b plumbing would land Prometheus with
+        ``eb_facts_stored_total{profile_name="unknown"}`` for every store —
+        and the existing fallback test would still pass.
+
+        This test pins the explicit-profile path: passing
+        ``profile_name="coding"`` to ``facade.store()`` must produce a
+        ``inc_facts_stored(mc, "coding")`` call (NOT ``"unknown"``).
+        """
+        from unittest.mock import MagicMock
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        await facade.store(fact, profile_name="coding")
+        mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
+        metrics.inc_facts_stored.assert_called_once_with(mc, "coding")
 
     async def test_store_failure_emits_failure_status_and_reraises(
         self, monkeypatch, mock_add_data_points,

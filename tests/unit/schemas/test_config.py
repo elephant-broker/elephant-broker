@@ -401,28 +401,38 @@ enable_trace_ledger: true
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
         assert cfg.compaction_llm.model == "gemini/gemini-2.5-flash-lite"
 
-    def test_tier_override_via_env_var(self, yaml_path):
+    def test_tier_override_via_env_var(self, yaml_path, monkeypatch):
         """C2.1: EB_TIER overrides cfg.tier and the string is coerced to BusinessTier.
 
         Excluded from `test_every_binding_applies` (Enum-typed field cannot
         accept the bulk probe value `probe-eb_tier`); pinned here per the
         maintainer warning's option-(b) pattern.
+
+        TODO-8-R1-006: ``monkeypatch.setenv`` instead of mutating
+        ``os.environ`` directly. The class-level ``clean_env`` autouse
+        fixture does provide cleanup, but pytest's monkeypatch is the
+        idiomatic per-test scope and gives narrower failure blast radius
+        if the autouse fixture is ever removed or breaks.
         """
         from elephantbroker.schemas.config import ElephantBrokerConfig
         from elephantbroker.schemas.tiers import BusinessTier
-        os.environ["EB_TIER"] = "memory_only"
+        monkeypatch.setenv("EB_TIER", "memory_only")
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
         assert cfg.tier == BusinessTier.MEMORY_ONLY
 
-    def test_tier_invalid_value_rejected(self, yaml_path):
+    def test_tier_invalid_value_rejected(self, yaml_path, monkeypatch):
         """C2.1: EB_TIER with an unknown enum value fails ValidationError at
         load() — surfaces as a clear pre-startup error instead of silently
-        falling through to the FULL default."""
+        falling through to the FULL default.
+
+        TODO-8-R1-006: ``monkeypatch.setenv`` for per-test scope cleanup
+        (companion to ``test_tier_override_via_env_var``).
+        """
         import pytest
         from pydantic import ValidationError
 
         from elephantbroker.schemas.config import ElephantBrokerConfig
-        os.environ["EB_TIER"] = "not_a_real_tier"
+        monkeypatch.setenv("EB_TIER", "not_a_real_tier")
         with pytest.raises(ValidationError):
             ElephantBrokerConfig.from_yaml(yaml_path)
 

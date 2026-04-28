@@ -240,15 +240,53 @@ class TestLLMClientMetrics:
             await client.complete_json("sys", "usr")
         metrics.inc_llm_call.assert_called_once_with("complete_json", "success", client._model)
 
-    async def test_complete_json_error_emits_metric(self, config):
-        """inc_llm_call('complete_json', 'error', model) fires on failed complete_json()."""
+    async def test_complete_json_parse_failure_emits_distinct_metric(self, config):
+        """TODO-8-R1-003 — JSON parse failure emits ``status="json_parse_error"``.
+
+        The HTTP call succeeded (proxy returned 200 OK) but the body was
+        not parseable JSON — operationally distinct from a 5xx / network
+        / auth failure. Pre-fix this surfaced as ``"error"`` (same label
+        as HTTP failure), making it impossible to alert on "Gemini fences
+        regression" vs "LLM proxy is down" without log inspection. The
+        architecture-reviewer flagged the conflation; the feature-reviewer
+        flagged the double-fire risk on a naive split. The new shape is
+        single-fire per call with the status label cleanly separating
+        the failure modes.
+        """
         metrics = MagicMock()
         client = LLMClient(config, metrics=metrics)
         with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = _make_response("not-json")
             with pytest.raises(json.JSONDecodeError):
                 await client.complete_json("sys", "usr")
-        metrics.inc_llm_call.assert_called_once_with("complete_json", "error", client._model)
+        metrics.inc_llm_call.assert_called_once_with(
+            "complete_json", "json_parse_error", client._model,
+        )
+
+    async def test_complete_json_http_failure_emits_error_metric(self, config):
+        """TODO-8-R1-003 — HTTP-layer failure emits ``status="error"``.
+
+        Companion to ``test_complete_json_parse_failure_emits_distinct_metric``:
+        when the LLM proxy returns 5xx / 4xx / network error (the HTTP
+        call itself fails), the metric label is ``"error"`` — the same
+        label ``complete()`` uses for HTTP failures. JSON parsing never
+        runs because there was no parseable response. Single fire per
+        call (no fall-through that would also emit ``json_parse_error``).
+        """
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                500, json={"error": "fail"},
+                request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete_json("sys", "usr")
+        # Single inc_llm_call invocation; status="error" distinguishes
+        # from the json_parse_error path.
+        metrics.inc_llm_call.assert_called_once_with(
+            "complete_json", "error", client._model,
+        )
 
 
 class TestClose:

@@ -21,6 +21,34 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 logger = logging.getLogger("elephantbroker.pipelines.turn_ingest")
 
 
+# TODO-8-R1-010 — dual-metric pattern acknowledgment.
+#
+# The metric call sites in this file follow a dual pattern:
+#
+#     if self._metrics:
+#         self._metrics.inc_pipeline("turn_ingest", "success")  # MetricsContext (gateway-aware)
+#     else:
+#         inc_pipeline("turn_ingest", "success")                # free function (gateway_id="")
+#
+# In production, ``self._metrics`` is ALWAYS set (the container wires
+# ``c.metrics_ctx`` into every pipeline at construction time — see
+# ``container.py: from_config``). The free-function fallback is reachable
+# only by unit tests that intentionally pass ``metrics=None`` to exercise
+# error paths without the MetricsContext wrapper. If the fallback ever
+# fired in production it would emit ``gateway_id=""`` on the Prometheus
+# label, which would be a tenant-isolation regression — but it cannot
+# fire in production because there is no construction path that yields
+# ``self._metrics is None``.
+#
+# A future cleanup may replace the fallback with a ``NullMetrics()``
+# object so the production path is unconditional and the test path can
+# inject a no-op. That refactor is intentionally NOT taken in this PR
+# because it would invalidate every pipeline test that constructs the
+# pipeline with ``metrics=None`` (~10 sites in test_artifact_ingest.py,
+# test_procedure_ingest.py, test_turn_ingest.py). Tracked as
+# follow-up architectural debt.
+
+
 def _to_dict(msg: AgentMessage | dict) -> dict:
     """Normalize pipeline input. ``AgentMessage.model_dump(mode='json')`` preserves
     extra fields (e.g. ``actor_id``) and stringifies any typed UUID fields, keeping
@@ -78,7 +106,7 @@ class TurnIngestPipeline:
         try:
             messages = [_to_dict(m) for m in messages]
             gw = gateway_id or self._gateway_id
-    
+
             if not messages:
                 if self._trace:
                     await self._trace.append_event(TraceEvent(
@@ -90,11 +118,11 @@ class TurnIngestPipeline:
                                  "session_key": session_key, "reason": "empty_messages"},
                     ))
                 return TurnIngestResult()
-    
+
             # Resolve profile for autorecall settings
             profile = await self._resolve_profile(profile_name)
             autorecall = profile.autorecall if profile else None
-    
+
             # 1. Resolve actors (query registry for known actors)
             known_actors: list = []
             if self._actors:
@@ -106,24 +134,24 @@ class TurnIngestPipeline:
                 resolved = await resolve_actors(messages, known_actors)
             except Exception:
                 resolved = []
-    
+
             # Determine source_actor_id from user-role messages
             source_actor_id = None
             for msg in messages:
                 if msg.get("role") == "user" and msg.get("actor_id"):
                     source_actor_id = uuid.UUID(msg["actor_id"])
                     break
-    
+
             # 2. Load recent facts from buffer
             recent_facts: list[dict] = []
             if self._buffer:
                 recent_facts = await self._buffer.load_recent_facts(session_key)
-    
+
             # 2b. Load session goals from Redis (if available)
             session_goals_list = []  # list[GoalState]
             active_session_goal_dicts: list[dict] | None = None
             persistent_goal_dicts: list[dict] | None = None
-    
+
             if self._session_goal_store and session_id:
                 try:
                     session_goals_list = await self._session_goal_store.get_goals(
@@ -135,7 +163,7 @@ class TurnIngestPipeline:
                         ]
                 except Exception as exc:
                     logger.debug("Failed to load session goals: %s", exc)
-    
+
             # Load persistent (global/org-scope) goals from GoalManager (read-only context)
             if self._goal_manager and session_id:
                 try:
@@ -153,7 +181,7 @@ class TurnIngestPipeline:
                         ]
                 except Exception as exc:
                     logger.debug("Failed to load persistent goals: %s", exc)
-    
+
             # 3. Extract facts via LLM
             extraction_focus = autorecall.extraction_focus if autorecall else []
             custom_categories = autorecall.custom_categories if autorecall else []
@@ -166,11 +194,11 @@ class TurnIngestPipeline:
                 persistent_goals=persistent_goal_dicts,
                 goal_injection_config=self._goal_injection_config,
             )
-    
+
             # extract_facts now returns a dict with "facts" and "goal_status_hints"
             raw_facts = extraction_result.get("facts", [])
             goal_status_hints = extraction_result.get("goal_status_hints", [])
-    
+
             if not raw_facts:
                 # Still dispatch any goal_status_hints even if no facts extracted
                 if goal_status_hints and self._hint_processor and session_goals_list and session_id:
@@ -193,7 +221,7 @@ class TurnIngestPipeline:
                                  "session_key": session_key, "reason": "llm_no_facts"},
                     ))
                 return TurnIngestResult(actors_resolved=resolved)
-    
+
             # 4. Build supersession + contradiction maps (decay deferred to after store)
             superseded_factor = autorecall.superseded_confidence_factor if autorecall else 0.3
             facts_superseded = 0
@@ -211,7 +239,7 @@ class TurnIngestPipeline:
                     old_fact_id = recent_facts[con_idx].get("id")
                     if old_fact_id:
                         contradiction_map.append((rf, old_fact_id))
-    
+
             # 5. Build FactAssertions
             now = datetime.now(UTC)
             assertions: list[FactAssertion] = []
@@ -229,7 +257,7 @@ class TurnIngestPipeline:
                     ):
                         goal_id_str = str(session_goals_list[gi].id)
                         relevance_tags[goal_id_str] = strength
-    
+
                 # Per-message attribution (GAP-6): determine source_actor for this fact
                 fact_source = source_actor_id
                 if agent_key:
@@ -244,7 +272,7 @@ class TurnIngestPipeline:
                                 fact_source = agent_actor_id
                             elif role == "user" and messages[turn_idx].get("actor_id"):
                                 fact_source = uuid.UUID(messages[turn_idx]["actor_id"])
-    
+
                 fact = FactAssertion(
                     text=rf["text"],
                     category=rf.get("category", "general"),
@@ -260,7 +288,7 @@ class TurnIngestPipeline:
                     decision_domain=rf.get("decision_domain"),
                 )
                 assertions.append(fact)
-    
+
             # 5b. Dispatch goal_status_hints to hint_processor (if available)
             if goal_status_hints and self._hint_processor and session_goals_list and session_id:
                 try:
@@ -272,14 +300,14 @@ class TurnIngestPipeline:
                     )
                 except Exception as exc:
                     logger.debug("Hint processing failed: %s", exc)
-    
+
             # 6. Classify memory class
             classified = await classify_memory(assertions, self._llm)
             class_counts: dict[str, int] = {}
             for fact, mc in classified:
                 fact.memory_class = mc
                 class_counts[mc.value] = class_counts.get(mc.value, 0) + 1
-    
+
             if class_counts:
                 await self._trace.append_event(TraceEvent(
                     event_type=TraceEventType.MEMORY_CLASS_ASSIGNED,
@@ -288,7 +316,7 @@ class TurnIngestPipeline:
                     gateway_id=gw,
                     payload={"classes": class_counts, "profile_name": profile_name},
                 ))
-    
+
             # 7. Batch embed
             texts = [f.text for f in assertions]
             embeddings: list = []
@@ -297,7 +325,7 @@ class TurnIngestPipeline:
                     embeddings = await self._embeddings.embed_batch(texts)
                 except Exception:
                     embeddings = [None] * len(texts)
-    
+
             # 8. Store facts via facade
             dedup_threshold = autorecall.dedup_similarity if autorecall else 0.95
             facts_stored = 0
@@ -316,11 +344,11 @@ class TurnIngestPipeline:
                     pass  # Expected: near-duplicate skipped
                 except Exception as exc:
                     logger.warning("Failed to store fact: %s", exc)
-    
+
             # 8b. Create SUPERSEDES/CONTRADICTS edges + deferred decay (stored facts only)
             stored_ids = {f.id for f in stored_assertions}
             raw_to_fact = {id(rf): assertions[i] for i, rf in enumerate(raw_facts) if i < len(assertions) and assertions[i].id in stored_ids}
-    
+
             # Decay superseded old facts only when new fact was actually stored
             for rf, old_id in supersession_map:
                 new_fact = raw_to_fact.get(id(rf))
@@ -337,7 +365,7 @@ class TurnIngestPipeline:
                         ))
                     except Exception:
                         pass
-    
+
             if self._graph:
                 for rf, old_id in supersession_map:
                     new_fact = raw_to_fact.get(id(rf))
@@ -353,7 +381,7 @@ class TurnIngestPipeline:
                             await self._graph.add_relation(str(new_fact.id), old_id, "CONTRADICTS")
                         except Exception:
                             pass
-    
+
             # 9. Update recent facts in buffer (only stored facts — skip dedup-skipped)
             if self._buffer:
                 new_recent = [
@@ -364,8 +392,23 @@ class TurnIngestPipeline:
                     session_key, recent_facts + new_recent,
                     max_count=self._config.extraction_context_facts,
                 )
-    
+
             # 9b. Phase 7: Write fact decision_domains to Redis for guard Tier 2 classification
+            #
+            # TODO-8-R1-019 — private-member access acknowledgment.
+            # This block reaches into ``self._buffer._keys`` and
+            # ``self._buffer._redis`` because IngestBuffer was originally
+            # a thin Redis-key wrapper and the pipeline grew to need
+            # adjacent Redis primitives (LPUSH/LTRIM/EXPIRE) on the same
+            # key family. A clean fix would add a typed
+            # ``IngestBuffer.write_fact_domains(session_key, sid, domains)``
+            # method on the IIngestBuffer ABC + IngestBuffer implementation,
+            # but that would change a Phase 4 public interface and require
+            # ABC-parity-test updates for two-name kwargs. Tracked as
+            # follow-up architectural debt; the coupling is documented
+            # here so a future refactor knows the two attributes form a
+            # logical pair (the Redis client AND the key builder, not just
+            # one of them).
             if self._buffer and self._buffer._keys and session_id:
                 try:
                     domains = [f.decision_domain for f in assertions if f.decision_domain]
@@ -377,7 +420,7 @@ class TurnIngestPipeline:
                         await self._buffer._redis.expire(key, 86400)
                 except Exception as exc:
                     logger.debug("Failed to write fact domains to Redis: %s", exc)
-    
+
             # 10. Cognee ingest
             try:
                 for fact in assertions:
@@ -399,12 +442,12 @@ class TurnIngestPipeline:
                 else:
                     inc_cognify("error")
                 logger.warning("Cognee cognify failed: %s", exc)
-    
+
             if self._metrics:
                 self._metrics.inc_pipeline("turn_ingest", "success")
             else:
                 inc_pipeline("turn_ingest", "success")
-    
+
             trace_event = TraceEvent(
                 event_type=TraceEventType.FACT_EXTRACTED,
                 session_id=session_id,
@@ -417,7 +460,7 @@ class TurnIngestPipeline:
                 },
             )
             await self._trace.append_event(trace_event)
-    
+
             return TurnIngestResult(
                 facts_extracted=assertions,
                 facts_stored=facts_stored,

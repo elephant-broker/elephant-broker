@@ -15,6 +15,13 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 logger = logging.getLogger("elephantbroker.pipelines.artifact_ingest")
 
 
+# TODO-8-R1-010 — dual-metric pattern acknowledgment. See the matching
+# block at the top of ``elephantbroker/pipelines/turn_ingest/pipeline.py``
+# for the full rationale. Production always sets ``self._metrics`` via
+# the container; the free-function fallback path exists for unit-test
+# isolation and is unreachable in production.
+
+
 class ArtifactIngestPipeline:
     """Stores tool artifacts with deduplication, summarization, and tracing."""
 

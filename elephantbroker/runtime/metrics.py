@@ -380,9 +380,14 @@ def inc_goal_hint(hint_type: str, gateway_id: str = "") -> None:
         eb_goal_hints_total.labels(gateway_id=gateway_id, hint_type=hint_type).inc()
 
 
-def inc_procedure_qualified(gateway_id: str = "") -> None:
+def inc_procedure_qualified(gateway_id: str = "", count: int = 1) -> None:
+    # TODO-8-R1-018 / TODO-8-R1-021: ``count`` lets callers batch the
+    # increment when they have N qualified items in scope (e.g.
+    # ``CandidateGenerator`` pre-fix called this in a loop, one inc per
+    # item). Prometheus ``Counter.inc(amount)`` is the documented
+    # batch API; default 1 preserves the existing single-fire callers.
     if METRICS_AVAILABLE:
-        eb_procedure_qualified_total.labels(gateway_id=gateway_id).inc()
+        eb_procedure_qualified_total.labels(gateway_id=gateway_id).inc(count)
 
 
 def inc_procedure_activated(gateway_id: str = "") -> None:
@@ -471,8 +476,11 @@ class MetricsContext:
     def inc_goal_hint(self, hint_type: str) -> None:
         inc_goal_hint(hint_type, gateway_id=self._gw)
 
-    def inc_procedure_qualified(self) -> None:
-        inc_procedure_qualified(gateway_id=self._gw)
+    def inc_procedure_qualified(self, count: int = 1) -> None:
+        # TODO-8-R1-018 / TODO-8-R1-021: ``count`` mirrors the free
+        # function so callers can batch a per-item loop into one call
+        # (CandidateGenerator path).
+        inc_procedure_qualified(gateway_id=self._gw, count=count)
 
     def inc_procedure_activated(self) -> None:
         inc_procedure_activated(gateway_id=self._gw)

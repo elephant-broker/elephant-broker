@@ -334,3 +334,124 @@ class TestSessionRoutes:
             f"MEMORY_ONLY: session_end metric must fire from route; "
             f"observed calls: {calls!r}"
         )
+
+    async def test_session_end_force_flush_emits_buffer_flush_metric_and_trace(
+        self, client, container,
+    ):
+        """TODO-8-R1-013 — sessions/end force_flush observability completeness.
+
+        B2.2 wired ``inc_buffer_flush`` + ``INGEST_BUFFER_FLUSH`` trace at the
+        three batch-size flush sites (memory.py route, lifecycle.afterTurn,
+        buffer timer) but missed this fourth site — the MEMORY_ONLY-tier
+        session-end force flush. In MEMORY_ONLY mode this is the *only*
+        flush call site, so a missing metric here meant deployments without
+        a context engine were silently undercounting flushes and the
+        per-session timeline missed the INGEST_BUFFER_FLUSH event at session
+        boundary.
+
+        Test setup: MEMORY_ONLY-style (context_lifecycle=None) so the
+        force_flush branch is reachable. Stub the ingest_buffer to return
+        a non-empty list of messages so the new conditional fires (an
+        empty force_flush is intentionally NOT counted as a flush — see
+        the route comment).
+        """
+        from unittest.mock import MagicMock
+        # Force the MEMORY_ONLY branch.
+        container.context_lifecycle = None
+
+        # Stub a buffer that returns 2 messages on force_flush.
+        buffer_stub = AsyncMock()
+        buffer_stub.force_flush = AsyncMock(return_value=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ])
+        container.ingest_buffer = buffer_stub
+
+        # Spy on inc_buffer_flush with an explicit MagicMock (don't wrap
+        # the real one — its `gateway_id=""` argument shape is awkward to
+        # reason about and not relevant to this test).
+        original_inc = container.metrics_ctx.inc_buffer_flush
+        spy_inc = MagicMock(wraps=original_inc)
+        container.metrics_ctx.inc_buffer_flush = spy_inc
+
+        # Spy on trace ledger to capture INGEST_BUFFER_FLUSH events.
+        ledger_events = []
+        original_append = container.trace_ledger.append_event
+
+        async def capture_append(ev):
+            ledger_events.append(ev)
+            return await original_append(ev)
+
+        container.trace_ledger.append_event = capture_append
+
+        sid = uuid.uuid4()
+        r = await client.post("/sessions/end", json={
+            "session_key": "agent:main:main",
+            "session_id": str(sid),
+        })
+        assert r.status_code == 200
+
+        # Metric: inc_buffer_flush("session_end") fired exactly once.
+        flush_calls = [c.args[0] for c in spy_inc.call_args_list if c.args]
+        assert "session_end" in flush_calls, (
+            f"force_flush must call inc_buffer_flush('session_end'); "
+            f"observed calls: {flush_calls!r}"
+        )
+        # Trace: INGEST_BUFFER_FLUSH with trigger=session_end + identity.
+        flush_events = [
+            ev for ev in ledger_events
+            if ev.event_type == TraceEventType.INGEST_BUFFER_FLUSH
+            and ev.payload.get("trigger") == "session_end"
+        ]
+        assert len(flush_events) == 1
+        ev = flush_events[0]
+        assert ev.session_key == "agent:main:main"
+        assert ev.session_id == sid
+        assert ev.payload.get("message_count") == 2
+
+    async def test_session_end_force_flush_empty_does_not_emit_flush_metric(
+        self, client, container,
+    ):
+        """TODO-8-R1-013 — empty buffer force_flush is NOT a flush event.
+
+        Companion to ``test_session_end_force_flush_emits_buffer_flush_metric_and_trace``:
+        when ``buffer.force_flush()`` returns an empty list (the common case
+        in FULL mode and in MEMORY_ONLY mode when no messages were buffered),
+        we must NOT emit ``inc_buffer_flush`` or ``INGEST_BUFFER_FLUSH``. An
+        empty flush is not a meaningful event and would distort flush-rate
+        dashboards.
+        """
+        from unittest.mock import MagicMock
+        container.context_lifecycle = None
+        buffer_stub = AsyncMock()
+        buffer_stub.force_flush = AsyncMock(return_value=[])
+        container.ingest_buffer = buffer_stub
+
+        original_inc = container.metrics_ctx.inc_buffer_flush
+        spy_inc = MagicMock(wraps=original_inc)
+        container.metrics_ctx.inc_buffer_flush = spy_inc
+
+        ledger_events = []
+        original_append = container.trace_ledger.append_event
+
+        async def capture_append(ev):
+            ledger_events.append(ev)
+            return await original_append(ev)
+
+        container.trace_ledger.append_event = capture_append
+
+        await client.post("/sessions/end", json={
+            "session_key": "agent:main:main",
+            "session_id": str(uuid.uuid4()),
+        })
+
+        flush_calls = [c.args[0] for c in spy_inc.call_args_list if c.args]
+        assert "session_end" not in flush_calls, (
+            f"empty force_flush must NOT fire inc_buffer_flush; observed: {flush_calls!r}"
+        )
+        flush_events = [
+            ev for ev in ledger_events
+            if ev.event_type == TraceEventType.INGEST_BUFFER_FLUSH
+            and ev.payload.get("trigger") == "session_end"
+        ]
+        assert flush_events == []
