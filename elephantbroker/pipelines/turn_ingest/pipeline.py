@@ -307,6 +307,7 @@ class TurnIngestPipeline:
                 try:
                     stored_fact = await self._facade.store(
                         fact, dedup_threshold=dedup_threshold, precomputed_embedding=emb,
+                        profile_name=profile_name,
                     )
                     if stored_fact is not None:
                         facts_stored += 1
