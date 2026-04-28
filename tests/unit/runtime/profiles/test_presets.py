@@ -85,6 +85,52 @@ class TestProfilePresets:
         for name, p in PROFILE_PRESETS.items():
             assert p.session_data_ttl_seconds > 0, f"{name} missing session_data_ttl_seconds"
 
+    def test_per_profile_guard_autonomy_matrix(self):
+        """TF-07-008: pin the per-profile guard autonomy matrix — preflight
+        strictness, default autonomy level, and the three operationally
+        critical domain overrides (financial / data_access / code_change).
+        Catches accidental relaxation of profile presets that would weaken
+        the agent's safety floor.
+
+        Source of truth: ``elephantbroker/runtime/profiles/presets.py`` and
+        the architectural decision in ``IMPLEMENTED-Phase-7.md``.
+        """
+        from elephantbroker.schemas.guards import AutonomyLevel
+
+        expected = {
+            # name:           (strictness, default,                 financial,                  data_access,               code_change)
+            "coding":             ("medium", AutonomyLevel.INFORM,         AutonomyLevel.HARD_STOP,    AutonomyLevel.APPROVE_FIRST, AutonomyLevel.AUTONOMOUS),
+            "research":           ("loose",  AutonomyLevel.INFORM,         AutonomyLevel.APPROVE_FIRST, AutonomyLevel.APPROVE_FIRST, AutonomyLevel.INFORM),
+            "managerial":         ("strict", AutonomyLevel.APPROVE_FIRST,  AutonomyLevel.APPROVE_FIRST, AutonomyLevel.APPROVE_FIRST, AutonomyLevel.HARD_STOP),
+            "worker":             ("medium", AutonomyLevel.INFORM,         AutonomyLevel.HARD_STOP,    AutonomyLevel.APPROVE_FIRST, AutonomyLevel.AUTONOMOUS),
+            "personal_assistant": ("strict", AutonomyLevel.INFORM,         AutonomyLevel.HARD_STOP,    AutonomyLevel.HARD_STOP,    AutonomyLevel.APPROVE_FIRST),
+        }
+        for name, (strictness, default, fin, data, code) in expected.items():
+            assert name in PROFILE_PRESETS, f"missing preset {name}"
+            guards = PROFILE_PRESETS[name].guards
+            assert guards is not None, f"{name}: guards missing"
+            assert guards.preflight_check_strictness == strictness, (
+                f"{name}.preflight_check_strictness drifted: "
+                f"expected {strictness!r}, got {guards.preflight_check_strictness!r}"
+            )
+            autonomy = guards.autonomy
+            assert autonomy.default_level == default, (
+                f"{name}.autonomy.default_level drifted: "
+                f"expected {default}, got {autonomy.default_level}"
+            )
+            assert autonomy.domain_levels.get("financial") == fin, (
+                f"{name}.autonomy.financial drifted: "
+                f"expected {fin}, got {autonomy.domain_levels.get('financial')}"
+            )
+            assert autonomy.domain_levels.get("data_access") == data, (
+                f"{name}.autonomy.data_access drifted: "
+                f"expected {data}, got {autonomy.domain_levels.get('data_access')}"
+            )
+            assert autonomy.domain_levels.get("code_change") == code, (
+                f"{name}.autonomy.code_change drifted: "
+                f"expected {code}, got {autonomy.domain_levels.get('code_change')}"
+            )
+
     def test_per_profile_goal_reminder_interval_values(self):
         """TF-06-011 V-profiles: pin the per-profile goal_reminder_interval
         values for the four ``smart``-cadence presets that drive goal injection
