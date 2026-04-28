@@ -279,6 +279,29 @@ class TestIngestBatch:
         artifact_store.get_by_hash.assert_called_once_with(SK, SID, content_hash)
         artifact_store.store.assert_not_called()
 
+    async def test_distinct_contents_stored_as_separate_artifacts(self):
+        """TF-06-006 V2b: two tool messages with DIFFERENT content in the same
+        ingest_batch produce 2 stored artifacts (no dedup collapse). Negative
+        counterpart to test_dedup_artifacts_by_hash. Pins lifecycle.py:434-446
+        SHA-256 content_hash branching: distinct hashes → 2 store() calls."""
+        artifact_store = AsyncMock()
+        # Both lookups return None — first store proceeds for each distinct content
+        artifact_store.get_by_hash = AsyncMock(return_value=None)
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+
+        msgs = [
+            AgentMessage(role="tool", content="alpha" * 80, name="grep"),
+            AgentMessage(role="tool", content="bravo" * 80, name="grep"),
+        ]
+        params = IngestBatchParams(session_id=SID, session_key=SK, messages=msgs)
+        await lc.ingest_batch(params)
+
+        assert artifact_store.store.call_count == 2
+        stored_contents = {c.args[2].content for c in artifact_store.store.call_args_list}
+        assert stored_contents == {"alpha" * 80, "bravo" * 80}
+        # Each content_hash is computed independently
+        assert artifact_store.get_by_hash.call_count == 2
+
     async def test_annotation_eb_turn(self):
         """#9: ingest_batch annotates messages with eb_turn metadata."""
         ctx = make_session_context(turn_count=5)
@@ -1987,6 +2010,25 @@ class TestShouldCaptureArtifact:
         lc = _make_lifecycle(config=config)
         msg = AgentMessage(role="tool", content="x" * 1000, name="grep")
         assert lc._should_capture_artifact(msg) is False
+
+    def test_skips_content_over_max_chars(self):
+        """TF-06-006 V1d: tool output exceeding ArtifactCaptureConfig.max_content_chars
+        (default 50000) is NOT captured. Lifecycle.py:1309-1310 guard."""
+        lc = _make_lifecycle()  # default config, max_content_chars=50000
+        msg = AgentMessage(role="tool", content="x" * 60000, name="grep")
+        assert lc._should_capture_artifact(msg) is False
+
+    def test_skips_tool_in_skip_tools(self):
+        """TF-06-006 V1e: tool whose name appears in ArtifactCaptureConfig.skip_tools
+        is NOT captured even when content exceeds min_content_chars. Lifecycle.py:1311-1312."""
+        config = ElephantBrokerConfig()
+        config.artifact_capture.skip_tools = ["secrets_get", "ls"]
+        lc = _make_lifecycle(config=config)
+        msg = AgentMessage(role="tool", content="x" * 1000, name="secrets_get")
+        assert lc._should_capture_artifact(msg) is False
+        # Sanity: a non-skipped tool with the same content is captured
+        ok = AgentMessage(role="tool", content="x" * 1000, name="grep")
+        assert lc._should_capture_artifact(ok) is True
 
 
 class TestDetectDirectQuote:
