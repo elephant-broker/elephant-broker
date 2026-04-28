@@ -284,6 +284,7 @@ class TurnIngestPipeline:
                 await self._trace.append_event(TraceEvent(
                     event_type=TraceEventType.MEMORY_CLASS_ASSIGNED,
                     session_key=session_key,
+                    session_id=uuid.UUID(session_id) if session_id else None,
                     gateway_id=gw,
                     payload={"classes": class_counts, "profile_name": profile_name},
                 ))
@@ -329,6 +330,7 @@ class TurnIngestPipeline:
                         await self._trace.append_event(TraceEvent(
                             event_type=TraceEventType.FACT_SUPERSEDED,
                             session_key=session_key,
+                            session_id=uuid.UUID(session_id) if session_id else None,
                             gateway_id=gw,
                             payload={"old_fact_id": old_id, "new_fact_text": rf["text"][:50], "decay_factor": superseded_factor},
                         ))
