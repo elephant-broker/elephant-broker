@@ -298,6 +298,61 @@ class TestMemoryStoreFacade:
         results = await facade.search("test", scope=Scope.SESSION)
         assert len(results) == 1
 
+    async def test_search_use_count_mutation_in_place(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TF-04-015 #1455: ``facade.search()`` mutates ``use_count`` in
+        place on the FactAssertion objects it returns, via a background
+        ``asyncio.create_task(self._update_use_counts(...))`` (facade.py:345).
+
+        The fire-and-forget task increments ``fact.use_count += 1`` on the
+        same Python objects the route layer hands to JSON serialization,
+        so any caller who holds a reference and re-reads ``use_count``
+        sees the value mutate underneath them. This documents the risk
+        — it is intentional today (no copy at the boundary) but a future
+        regression that breaks shared identity (e.g. round-tripping
+        through ``model_validate`` mid-search) would silently zero out
+        the counter.
+
+        We capture ``asyncio.create_task`` and await the coroutine
+        explicitly so the assertion is deterministic — without that the
+        task races the test teardown.
+        """
+        facade, graph, vector, emb, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        graph.query_cypher = AsyncMock(return_value=[{
+            "props": {
+                "eb_id": str(fact.id), "text": fact.text, "category": "general",
+                "scope": "session", "confidence": 1.0, "eb_created_at": 0,
+                "eb_updated_at": 0, "use_count": 5, "successful_use_count": 0,
+                "provenance_refs": [], "target_actor_ids": [], "goal_ids": [],
+            }
+        }])
+        captured = []
+
+        def _capture(coro):
+            captured.append(coro)
+
+            class _Dummy:
+                def cancel(self_inner):
+                    pass
+
+            return _Dummy()
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.asyncio.create_task", _capture,
+        )
+        results = await facade.search("test query", scope=Scope.SESSION)
+        assert len(results) == 1
+        assert results[0].use_count == 5
+        # Drain the fire-and-forget task to trigger the mutation.
+        assert len(captured) == 1
+        await captured[0]
+        # The same object the caller holds now reads as 6 — in-place mutation.
+        assert results[0].use_count == 6
+
 
 class TestMemoryStoreFacadePhase4:
     """Phase 4 additions: dedup, edges, delete, get_by_id, update, promote_class."""

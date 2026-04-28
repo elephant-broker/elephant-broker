@@ -82,6 +82,54 @@ class TestComplete:
                 await client.complete("sys", "usr")
 
 
+class TestLLMClientRetryBehavior:
+    """TF-04-015 #1457: pin the actual retry policy in
+    ``LLMClient._post_with_retry`` (client.py:38-67).
+
+    The flow doc historically claimed a generic "retries on transient
+    failures" policy. The implementation only retries on HTTP 429
+    (Too Many Requests) with backoffs ``[1.0, 2.0, 4.0]s``; every other
+    non-2xx status raises immediately via ``response.raise_for_status()``
+    at line 44. These two tests pin both branches so a future widening
+    or narrowing of the retry policy is caught.
+    """
+
+    async def test_llm_retry_behavior_429_then_200_succeeds(self, client, monkeypatch):
+        """429 retries: a 429 followed by a 200 succeeds, with two POSTs."""
+        # Patch out the backoff sleep so the test does not actually wait
+        # 1.0s between attempts. The real sleep call is inside
+        # ``_post_with_retry`` via ``asyncio.sleep``.
+        async def _no_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.adapters.llm.client.asyncio.sleep", _no_sleep,
+        )
+        responses = [
+            httpx.Response(
+                429, json={"error": "rate limited"},
+                request=httpx.Request("POST", "http://test"),
+            ),
+            _make_response("Hello after retry!"),
+        ]
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = responses
+            result = await client.complete("sys", "usr")
+        assert result == "Hello after retry!"
+        assert mock_post.call_count == 2
+
+    async def test_llm_retry_behavior_502_raises_immediately(self, client):
+        """502 does NOT retry: a single POST raises HTTPStatusError."""
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                502, json={"error": "bad gateway"},
+                request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete("sys", "usr")
+        assert mock_post.call_count == 1
+
+
 class TestCompleteJson:
     async def test_with_schema(self, client):
         schema = {"type": "object", "properties": {"facts": {"type": "array"}}}
