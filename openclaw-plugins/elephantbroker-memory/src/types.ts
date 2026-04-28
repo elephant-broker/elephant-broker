@@ -60,6 +60,7 @@ export interface StoreRequest {
   session_key?: string;
   session_id?: string;
   dedup_threshold?: number;
+  profile_name?: string;
 }
 
 /** Session lifecycle requests. */

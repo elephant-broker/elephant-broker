@@ -49,6 +49,7 @@ class StoreRequest(BaseModel):
     session_key: str | None = None
     session_id: uuid.UUID | None = None
     dedup_threshold: float | None = None
+    profile_name: str | None = None
 
 
 class PromoteRequest(BaseModel):
@@ -118,7 +119,11 @@ async def store_fact(body: StoreRequest, request: Request):
     if _state_gw is not None:
         fact.gateway_id = _state_gw
     try:
-        result = await ms.store(fact, dedup_threshold=body.dedup_threshold)
+        result = await ms.store(
+            fact,
+            dedup_threshold=body.dedup_threshold,
+            profile_name=body.profile_name,
+        )
     except DedupSkipped as e:
         return JSONResponse(
             status_code=409,
