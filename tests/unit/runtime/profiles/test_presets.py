@@ -84,3 +84,39 @@ class TestProfilePresets:
     def test_all_presets_have_session_data_ttl(self):
         for name, p in PROFILE_PRESETS.items():
             assert p.session_data_ttl_seconds > 0, f"{name} missing session_data_ttl_seconds"
+
+    def test_per_profile_goal_reminder_interval_values(self):
+        """TF-06-011 V-profiles: pin the per-profile goal_reminder_interval
+        values for the four ``smart``-cadence presets that drive goal injection
+        (lifecycle.py:_filter_goals_for_injection compares
+        ``turn_count - last_turn >= placement.goal_reminder_interval``).
+
+        Catches accidental drift in operator-tuned cadences. Numbers chosen
+        to reflect each profile's working rhythm:
+          - coding (5): code-review iteration
+          - research (10): longer think windows between reminders
+          - worker (3): tight goal-driven feedback for autonomous work
+          - personal_assistant (8): assistive cadence
+
+        Managerial intentionally uses ``goal_injection_cadence="always"`` and
+        therefore bypasses the interval entirely; its interval value is not
+        pinned here because it is dead code for that profile.
+        """
+        expected = {
+            "coding": 5,
+            "research": 10,
+            "worker": 3,
+            "personal_assistant": 8,
+        }
+        for name, want in expected.items():
+            assert name in PROFILE_PRESETS, f"missing preset {name}"
+            placement = PROFILE_PRESETS[name].assembly_placement
+            assert placement.goal_injection_cadence == "smart", (
+                f"{name}: cadence drifted from 'smart' "
+                f"(got {placement.goal_injection_cadence}); interval "
+                f"assertion below is meaningful only under smart cadence."
+            )
+            assert placement.goal_reminder_interval == want, (
+                f"{name}: goal_reminder_interval drifted "
+                f"(expected {want}, got {placement.goal_reminder_interval})"
+            )
