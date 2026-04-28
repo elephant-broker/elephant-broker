@@ -359,8 +359,9 @@ class TestContextRoutes:
         from the parent's session_children SET — the child is left orphaned in
         the SET until the per-key TTL elapses. Pins context.py:152-162 documented
         intentional scope (rollback is best-effort cleanup of the forward edge)."""
-        # TODO: rollback should clean children SET entry — tracked as known gap
-        # (TTL-based expiry is current workaround)
+        # TODO(TD-68): rollback should clean children SET entry — TTL-based
+        # expiry is current workaround (see TECHNICAL-DEBT.md TD-68 for the
+        # full asymmetry rationale and three fix directions).
         from unittest.mock import AsyncMock
 
         redis = AsyncMock()
