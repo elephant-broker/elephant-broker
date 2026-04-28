@@ -401,6 +401,31 @@ enable_trace_ledger: true
         cfg = ElephantBrokerConfig.from_yaml(yaml_path)
         assert cfg.compaction_llm.model == "gemini/gemini-2.5-flash-lite"
 
+    def test_tier_override_via_env_var(self, yaml_path):
+        """C2.1: EB_TIER overrides cfg.tier and the string is coerced to BusinessTier.
+
+        Excluded from `test_every_binding_applies` (Enum-typed field cannot
+        accept the bulk probe value `probe-eb_tier`); pinned here per the
+        maintainer warning's option-(b) pattern.
+        """
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+        from elephantbroker.schemas.tiers import BusinessTier
+        os.environ["EB_TIER"] = "memory_only"
+        cfg = ElephantBrokerConfig.from_yaml(yaml_path)
+        assert cfg.tier == BusinessTier.MEMORY_ONLY
+
+    def test_tier_invalid_value_rejected(self, yaml_path):
+        """C2.1: EB_TIER with an unknown enum value fails ValidationError at
+        load() — surfaces as a clear pre-startup error instead of silently
+        falling through to the FULL default."""
+        import pytest
+        from pydantic import ValidationError
+
+        from elephantbroker.schemas.config import ElephantBrokerConfig
+        os.environ["EB_TIER"] = "not_a_real_tier"
+        with pytest.raises(ValidationError):
+            ElephantBrokerConfig.from_yaml(yaml_path)
+
     # ----- Type coercers -----
 
     def test_int_coercer(self, yaml_path):
@@ -701,8 +726,16 @@ compaction_llm:
         # with a `ValidationError` from the F9 cross-validator and you
         # will need to special-case the dim probe to match the chosen
         # model's expected dimension.
+        # C2.1: bindings whose target field has a constrained-string type
+        # (e.g. an Enum) cannot accept the bulk probe value `probe-{env}`.
+        # Per the maintainer warning above, such bindings move to a per-binding
+        # test (`test_tier_override` below) and are excluded from this loop.
+        BULK_PROBE_EXCLUSIONS = {"EB_TIER"}
+
         expected: list[tuple[str, object]] = []
         for env_var, dotted_path, coercer in ENV_OVERRIDE_BINDINGS:
+            if env_var in BULK_PROBE_EXCLUSIONS:
+                continue
             if coercer == "int":
                 raw, exp = "4096", 4096
             elif coercer == "float":

@@ -114,6 +114,7 @@ See [Section 8: Tier Capability Gating](#8-tier-capability-gating) for the full 
 | `EB_AGENT_AUTHORITY_LEVEL` | No | `0` | int | Python runtime | `0`, `1`, `5` | No | Yes |
 | `EB_PROFILE` | No | `"coding"` | string | TS plugins only | `coding`, `research`, `managerial`, `worker`, `personal_assistant` | No | No |
 | `EB_DEFAULT_PROFILE` | No | `"coding"` | string | Python runtime | `coding`, `research`, `managerial`, `worker`, `personal_assistant` | No | Yes |
+| `EB_TIER` | No | `"full"` | string | Python runtime | `memory_only`, `context_only`, `full` | No | Yes |
 
 ### 2. Database
 
@@ -447,6 +448,7 @@ max_concurrent_sessions: 100
 | Name | Type | Default | Env Var | Constraints | Controls | Impact of Wrong Values | Example (dev / staging / prod) |
 |------|------|---------|---------|-------------|----------|----------------------|-------------------------------|
 | `default_profile` | `str` | `"coding"` | `EB_DEFAULT_PROFILE` | -- | Which profile (coding/research/managerial/worker/personal_assistant) governs scoring weights, retrieval policy, compaction policy, guard strictness, and autorecall when no profile is specified | Wrong profile name causes fallback or error at bootstrap; wrong profile type yields suboptimal scoring weights and retrieval behavior | `coding` / `coding` / `coding` (or per-deployment) |
+| `tier` | `BusinessTier` | `BusinessTier.FULL` | `EB_TIER` | enum (`memory_only`/`context_only`/`full`) | Business tier selecting which runtime modules are wired. `memory_only` = MemoryStoreFacade + ingest pipelines only (no working set, no context engine). `context_only` = ContextEngine + working set only (no memory store). `full` = both | Wrong value rejected at `from_yaml()` with `ValidationError` (caught by `elephantbroker config validate`); silent tier mismatch is impossible | `full` / `full` / per-deployment (`memory_only` for memory-only product) |
 | `enable_trace_ledger` | `bool` | `True` | `EB_ENABLE_TRACE_LEDGER` | -- | Enables/disables TraceLedger in-memory event recording and OTEL trace export | Disabling loses all trace/audit visibility; only disable for benchmarks | `true` / `true` / `true` |
 | `max_concurrent_sessions` | `int` | `100` | `EB_MAX_CONCURRENT_SESSIONS` | `ge=1` | Limits concurrent sessions the runtime will accept | Too low causes session rejections under load; too high risks OOM from Redis/Neo4j connection pressure | `10` / `50` / `100`-`500` |
 | `consolidation_min_retention_seconds` | `int` | `172800` (48h) | `EB_CONSOLIDATION_MIN_RETENTION_SECONDS` | `ge=3600` | Minimum age (seconds) a fact must have before consolidation pipeline can decay/archive it | Too low causes premature fact decay (data loss); too high means stale facts linger forever | `3600` / `86400` / `172800` |
@@ -997,6 +999,7 @@ All 70+ `EB_*` environment variables in one alphabetical table:
 | `EB_SUCCESSFUL_USE_ENDPOINT` | `successful_use.endpoint` | `str` | `http://localhost:8811/v1` |
 | `EB_SUCCESSFUL_USE_MODEL` | `successful_use.model` | `str` | `gemini/gemini-2.5-flash-lite` |
 | `EB_TEAM_ID` | `gateway.team_id` | `str` | `None` |
+| `EB_TIER` | `tier` | `str` (BusinessTier) | `full` |
 | `EB_TRACE_MEMORY_MAX_EVENTS` | `infra.trace.memory_max_events` | `int` | `10000` |
 | `EB_TRACE_OTEL_LOGS_ENABLED` | `infra.trace.otel_logs_enabled` | `bool` | `false` |
 
@@ -4266,6 +4269,7 @@ All env vars use the `EB_` prefix. Below is the complete set recognized by `ENV_
 | `EB_CLICKHOUSE_PORT` | `infra.clickhouse.port` | `8123` |
 | `EB_CLICKHOUSE_DATABASE` | `infra.clickhouse.database` | `"otel"` |
 | `EB_DEFAULT_PROFILE` | `default_profile` | `"coding"` |
+| `EB_TIER` | `tier` | `"full"` |
 | `EB_ENABLE_TRACE_LEDGER` | `enable_trace_ledger` | `"true"` |
 | `EB_GUARDS_ENABLED` | `guards.enabled` | `"true"` |
 | `EB_MAX_CONCURRENT_SESSIONS` | `max_concurrent_sessions` | `100` |

@@ -432,6 +432,8 @@ consolidation:
 
 default_profile: "coding"               # env: EB_DEFAULT_PROFILE — which profile governs scoring/retrieval/compaction when no per-session profile is set
                                         # options: coding, research, managerial, worker, personal_assistant
+tier: "full"                            # env: EB_TIER — business tier selecting which interfaces are wired
+                                        # options: memory_only, context_only, full (default)
 enable_trace_ledger: true               # env: EB_ENABLE_TRACE_LEDGER — disable only for benchmarks; losing trace events removes all forensic visibility
 # (the master guard switch lives at `guards.enabled` above — env: EB_GUARDS_ENABLED)
 max_concurrent_sessions: 100            # env: EB_MAX_CONCURRENT_SESSIONS — rejection threshold; raise carefully (Redis/Neo4j connection pressure scales with this)
