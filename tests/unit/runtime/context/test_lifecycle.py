@@ -2849,6 +2849,82 @@ class TestReplaceOldToolOutputs:
         metrics.inc_tool_replacement.assert_not_called()
         metrics.inc_tool_tokens_saved.assert_not_called()
 
+    async def test_disabled_returns_messages_unchanged(self):
+        """TF-06-010 V1: `replace_tool_outputs=False` is a hard kill switch.
+        The function returns the input list unchanged without touching the
+        artifact store. Pins lifecycle.py:1320-1321 early-return."""
+        from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact_store = AsyncMock()
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+        policy = AssemblyPlacementPolicy(replace_tool_outputs=False)
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),
+        ]
+        result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # Returned list is the input list (or equivalent): no replacements,
+        # no artifact-store interaction at all.
+        assert result is msgs or result == msgs
+        artifact_store.get_by_hash.assert_not_called()
+
+    async def test_keep_last_n_zero_preserves_all_tool_outputs(self):
+        """TF-06-010 V2a: `keep_last_n_tool_outputs=0` is the "keep ALL"
+        sentinel — see lifecycle.py:1323. With 0, every tool index lands in
+        keep_indices (regardless of how old) and nothing is replaced."""
+        from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 2000, summary="output summary",
+        )
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+        # research-style policy: keep ALL tool outputs intact
+        policy = AssemblyPlacementPolicy(keep_last_n_tool_outputs=0)
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),
+            AgentMessage(role="tool", content="z" * 2000, name="bash"),
+        ]
+        result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # All three tool outputs preserved verbatim
+        assert [m.content for m in result] == [
+            "x" * 2000, "y" * 2000, "z" * 2000,
+        ]
+        # No replacement attempts happened
+        artifact_store.get_by_hash.assert_not_called()
+
+    async def test_keep_last_n_two_keeps_last_two_tool_outputs(self):
+        """TF-06-010 V2b: with keep_last_n=2 (coding profile semantics),
+        the latest two tool messages stay verbatim and earlier tool messages
+        are eligible for placeholder replacement. Pins the slice math at
+        lifecycle.py:1322-1324 against multi-keep configurations."""
+        from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 2000, summary="output summary",
+        )
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+        policy = AssemblyPlacementPolicy(keep_last_n_tool_outputs=2)
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),  # OLD → replaced
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),  # KEPT (index -2)
+            AgentMessage(role="tool", content="z" * 2000, name="bash"),  # KEPT (index -1)
+        ]
+        result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # First tool replaced, last two intact
+        assert "artifact_search" in result[0].content
+        assert result[2].content == "y" * 2000
+        assert result[3].content == "z" * 2000
+
 
 class TestDeduplicateConversation:
     def test_removes_covered_tool_messages(self):
@@ -2893,6 +2969,34 @@ class TestDeduplicateConversation:
         result, removed = lc._deduplicate_conversation(msgs, items, policy)
         assert removed == 0  # Should NOT remove already-replaced messages
         assert len(result) == 1
+
+    def test_uses_coverage_ratio_not_jaccard_index(self):
+        """TF-06-010 V4: dedup uses coverage ratio (|∩|/|msg_tokens|), NOT
+        true Jaccard (|∩|/|∪|). Pins lifecycle.py:1377 against silent metric
+        regression. Constructed scenario:
+          - msg_tokens = {alpha, beta, gamma}                  → 3 tokens
+          - block3_tokens = {alpha..kappa}                     → 10 tokens
+          - intersection = {alpha, beta, gamma}                → 3
+          - coverage = 3/3 = 1.0  (>0.7 → REMOVE)
+          - true Jaccard = 3/10 = 0.3 (<0.7 → would NOT remove)
+        Implementation removes the message → confirms coverage semantics."""
+        lc = _make_lifecycle()
+        policy = make_profile_policy().assembly_placement  # threshold=0.7
+        # Block 3 has 10 distinct content words, all >2 chars and not in STOP_WORDS.
+        items = [make_working_set_item(
+            text="alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        )]
+        # Tool message contains only the first 3 — fully covered but tiny vs. union.
+        msgs = [AgentMessage(role="tool", content="alpha beta gamma")]
+        result, removed = lc._deduplicate_conversation(msgs, items, policy)
+
+        # Removed under coverage semantics; would survive under true Jaccard.
+        assert removed == 1, (
+            f"expected 1 removal under coverage ratio (3/3=1.0 > 0.7); "
+            f"got {removed}. If 0, the implementation regressed to true "
+            f"Jaccard (3/10=0.3) or another metric."
+        )
+        assert all(m.role != "tool" for m in result)
 
 
 class TestInjectionTurnFiltering:
