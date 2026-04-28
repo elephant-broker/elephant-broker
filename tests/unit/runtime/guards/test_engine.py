@@ -318,6 +318,24 @@ class TestDisabledEngine:
         with pytest.raises(GuardRulesNotLoadedError):
             await engine.preflight_check(unknown, [_msg("anything")])
 
+    @pytest.mark.asyncio
+    async def test_disabled_emits_no_trace_or_metrics(self):
+        """TF-07-001 V-disabled: when ``GuardConfig.enabled=False`` the engine
+        short-circuits before any pipeline work — no trace events fire and
+        no Prometheus counters move. Pins the early-return contract that
+        operators rely on for graceful guard rollback."""
+        engine, _, _, _, trace = _make_engine()
+        engine._config.enabled = False
+        engine._metrics = MagicMock()  # spy
+
+        result = await engine.preflight_check(SID, [_msg("anything")])
+        await asyncio.sleep(0.05)  # allow any background create_task to settle
+
+        assert result.outcome == GuardOutcome.PASS
+        trace.append_event.assert_not_called()
+        engine._metrics.inc_guard_check.assert_not_called()
+        engine._metrics.observe_guard_latency.assert_not_called()
+
 
 class TestExtractCheckInput:
     def test_tool_call_extraction(self):
@@ -531,6 +549,52 @@ class TestFinalization:
         engine._metrics = MagicMock()
         await engine.preflight_check(SID, [_msg("test")])
         engine._metrics.inc_guard_check.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_trace_event_guard_near_miss(self):
+        """TF-07-001 V-finalize: a definitive WARN outcome routes through
+        ``_finalize`` to GUARD_NEAR_MISS (engine.py:953-958). Counterpart to
+        ``test_trace_event_guard_passed`` (PASS) and ``test_trace_event_guard_triggered``
+        (BLOCK) — together the three pin all three terminal trace types.
+
+        Why Layer 5 (LLM): under the default ``medium`` strictness preset,
+        a WARN-outcome static rule at Layer 1 is intentionally **non-definitive**
+        (engine.py:610-624 — only BLOCK/REQUIRE_APPROVAL flip definitive).
+        Non-definitive WARN does NOT propagate to ``safety_result``
+        (engine.py:199 falls back to PASS when no layer is definitive), so the
+        WARN→_finalize path requires a definitive WARN. Layer 5 LLM escalation
+        is the cleanest production path that produces one.
+
+        Setup notes:
+        - redis.lrange returns [] by default (see _make_engine), so the
+          GUARD-GAP-7 near-miss escalation block (line 200-253) sees
+          ``recent_warns=0 < threshold=3`` and stays dormant. This keeps the
+          GUARD_NEAR_MISS emission isolated to ``_finalize``.
+        - llm_escalation_enabled=True is required to unlock Layer 5
+          (engine.py:797). The medium preset has llm_escalation_on="ambiguous"
+          (not "disabled"), so the second L5 gate also lets the call through.
+        """
+        engine, _, _, _, trace = _make_engine()
+        engine._sessions[SID].guard_policy.llm_escalation_enabled = True
+        # LLM returns a definitive WARN verdict; L5 wraps that as
+        # GuardLayerResult(layer=5, definitive=True, outcome=WARN).
+        engine._llm.complete_json = AsyncMock(
+            return_value={"outcome": "warn", "explanation": "uncertain"},
+        )
+
+        await engine.preflight_check(SID, [_msg("harmless test message")])
+        await asyncio.sleep(0.05)
+
+        emitted = [
+            c.args[0].event_type for c in trace.append_event.call_args_list
+            if c.args
+        ]
+        assert TraceEventType.GUARD_NEAR_MISS in emitted, (
+            f"WARN outcome must emit GUARD_NEAR_MISS via _finalize; got {emitted}"
+        )
+        # Mutually exclusive with the other two terminal trace types from _finalize
+        assert TraceEventType.GUARD_TRIGGERED not in emitted
+        assert TraceEventType.GUARD_PASSED not in emitted
 
 
 class TestLoadSessionRulesExtended:
