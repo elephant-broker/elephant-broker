@@ -314,3 +314,36 @@ class TestProcedureEngineMetrics:
             execution.execution_id, uuid.uuid4(), proof_value="screenshot.png",
         )
         metrics.inc_procedure_proof.assert_called_once_with("tool_output")
+
+    async def test_inc_procedure_completed_on_validate_completion(self):
+        """TF-05-009 Flag #2: ``inc_procedure_completed()`` fires when
+        ``validate_completion`` reaches the success branch.
+
+        Pins the wiring at ``engine.py:252-254`` (added in C8.1). The
+        counter ``eb_procedure_completed_total`` was declared in
+        ``MetricsContext`` (``metrics.py:594-596``) but no call site was
+        actually incrementing it before this fix — staging Prometheus
+        showed `eb_procedure_completed_total=0` despite successful
+        completion round-trips. Mirrors the
+        ``test_inc_procedure_proof_on_record_step_evidence`` harness:
+        activate a procedure, wire an evidence-engine mock that returns
+        ``CompletionCheckResult(complete=True)``, reset the metrics mock
+        to clear the activate-time call, then call
+        ``validate_completion`` and assert the counter was incremented
+        exactly once.
+        """
+        from elephantbroker.schemas.guards import CompletionCheckResult
+
+        engine, graph, metrics = self._make_with_metrics()
+        proc_id = uuid.uuid4()
+        graph.get_entity = AsyncMock(return_value={"eb_id": str(proc_id), "name": "test"})
+        execution = await engine.activate(proc_id, uuid.uuid4())
+        evidence_engine = AsyncMock()
+        evidence_engine.check_completion_requirements = AsyncMock(
+            return_value=CompletionCheckResult(complete=True, procedure_id=proc_id),
+        )
+        engine._evidence_engine = evidence_engine
+        metrics.reset_mock()  # Clear the activate-time metric call.
+        result = await engine.validate_completion(execution.execution_id)
+        assert result.complete is True
+        metrics.inc_procedure_completed.assert_called_once_with()

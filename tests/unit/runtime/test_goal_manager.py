@@ -188,3 +188,112 @@ class TestGoalManager:
         goal = make_goal_state(owner_actor_ids=[uuid.uuid4()])
         result = await mgr.set_goal(goal)
         assert result.title == goal.title  # Goal still created despite edge failure
+
+    async def test_set_goal_auto_populates_org_team(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TF-05-009 #550: ``set_goal(goal, org_id, team_id)`` auto-
+        populates the goal's ``org_id`` / ``team_id`` from the kwargs
+        when those fields are unset on the incoming schema.
+
+        Pins ``goals/manager.py:36-42``: the enrichment is conditional on
+        ``not goal.org_id`` / ``not goal.team_id`` so caller-supplied
+        values are preserved (no override). Without the enrichment,
+        scoped goals from API routes that pass identity from
+        ``request.state`` would land with ``None`` org/team — the
+        identity envelope would be silently dropped.
+        """
+        mgr, graph, _ = self._make()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.goals.manager.add_data_points", mock_add_data_points,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.goals.manager.cognee", mock_cognee,
+        )
+        org_uuid = uuid.uuid4()
+        team_uuid = uuid.uuid4()
+        # Goal has neither org_id nor team_id set — must be enriched.
+        goal = make_goal_state()
+        assert goal.org_id is None
+        assert goal.team_id is None
+        result = await mgr.set_goal(
+            goal, org_id=str(org_uuid), team_id=str(team_uuid),
+        )
+        assert result.org_id == org_uuid
+        assert result.team_id == team_uuid
+
+    async def test_set_goal_text_indexing_concatenation(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TF-05-009 #551: the text passed to ``cognee.add()`` for
+        Qdrant indexing follows the exact concatenation format
+        ``"Goal: <title> — <description> criteria: c1, c2, ..."``.
+
+        Pins ``goals/manager.py:46-51``. The sibling test
+        ``test_set_goal_calls_cognee_add_with_goal_text`` only asserts
+        the title substring is present; this one pins the *full* shape:
+        the ``Goal:`` prefix, the EM-DASH separator (U+2014, NOT a plain
+        hyphen), the ``criteria:`` keyword, and the ``", "`` join. A
+        regression that swaps the separator (hyphen vs en-dash vs
+        em-dash) or reorders the parts would leave the substring test
+        passing while silently breaking semantic search ranking.
+        """
+        mgr, graph, _ = self._make()
+        monkeypatch.setattr(
+            "elephantbroker.runtime.goals.manager.add_data_points", mock_add_data_points,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.goals.manager.cognee", mock_cognee,
+        )
+        goal = make_goal_state(
+            title="Ship feature X",
+            description="Land the new endpoint",
+            success_criteria=["tests green", "metric wired"],
+        )
+        await mgr.set_goal(goal)
+        mock_cognee.add.assert_called_once()
+        text = mock_cognee.add.call_args[0][0]
+        # Em-dash separator (U+2014) — pin literally to catch a swap.
+        expected = (
+            "Goal: Ship feature X — Land the new endpoint "
+            "criteria: tests green, metric wired"
+        )
+        assert text == expected
+
+    async def test_get_goal_hierarchy_gateway_filtered(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TF-05-009 #553: ``get_goal_hierarchy()`` Cypher restricts
+        children to the same gateway as the manager.
+
+        Pins ``goals/manager.py:131`` — the
+        ``WHERE child.gateway_id = $gateway_id`` clause and the
+        corresponding ``$gateway_id`` parameter on line 134. A
+        regression that drops either piece would let a query rooted at
+        a gateway-A goal pull in gateway-B children, violating the
+        single-tenant-per-process boundary that
+        ``GatewayIdentityMiddleware`` enforces at request entry.
+        """
+        graph = AsyncMock()
+        ledger = TraceLedger()
+        gw = "test-gateway-xyz"
+        mgr = GoalManager(graph, ledger, dataset_name="test_ds", gateway_id=gw)
+        monkeypatch.setattr(
+            "elephantbroker.runtime.goals.manager.add_data_points", mock_add_data_points,
+        )
+        monkeypatch.setattr(
+            "elephantbroker.runtime.goals.manager.cognee", mock_cognee,
+        )
+        root = make_goal_state(title="Root")
+        graph.get_entity = AsyncMock(return_value={
+            "eb_id": str(root.id), "title": root.title, "description": "",
+            "status": "active", "scope": "session", "eb_created_at": 0,
+            "eb_updated_at": 0, "owner_actor_ids": [], "success_criteria": [],
+            "blockers": [], "confidence": 1.0,
+        })
+        graph.query_cypher = AsyncMock(return_value=[])
+        await mgr.get_goal_hierarchy(root.id)
+        graph.query_cypher.assert_called_once()
+        cypher, params = graph.query_cypher.call_args[0]
+        assert "child.gateway_id = $gateway_id" in cypher
+        assert params["gateway_id"] == gw
