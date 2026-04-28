@@ -294,3 +294,54 @@ class TestRerankFailureFallback:
         assert len(snap.items) == 2
         item_texts = {item.text for item in snap.items}
         assert item_texts == {"first fact", "second fact"}
+
+
+# ---------------------------------------------------------------------------
+# TF-05-011 #1218: ScoringTuner is wired but unused by build_working_set
+# ---------------------------------------------------------------------------
+
+
+class TestScoringTunerWiringGap:
+    """TF-05-011 #1218: ``WorkingSetManager`` accepts a ``scoring_tuner``
+    kwarg in ``__init__`` (manager.py:41) and stores it as
+    ``self._scoring_tuner`` (manager.py:58), but ``build_working_set``
+    never consults it — it reads weights from ``profile.scoring_weights``
+    directly at ``manager.py:108``:
+
+        weights = profile.scoring_weights if profile else None
+
+    This documents the gap as it stands today: tuning deltas accumulated
+    via ``ScoringTuner`` (org-level overrides, learned adjustments
+    persisted in ``TuningDeltaStore``) do NOT influence retrieval ranking
+    on the WSM hot path. Closing this gap would require WSM to call
+    ``self._scoring_tuner.get_weights(profile_name, org_id, gateway_id)``
+    in the weight-resolution branch — a behavior change that's out of
+    scope for this PR. The pin makes the dead-wire visible to anyone
+    wiring a tuner expecting it to take effect.
+    """
+
+    async def test_scoring_tuner_never_called_by_wsm(self):
+        scoring_tuner = MagicMock()
+        # AsyncMock so awaiting would resolve cleanly if it were called —
+        # we want a precise "never awaited" assertion, not an attribute
+        # error masking the gap.
+        scoring_tuner.get_weights = AsyncMock(
+            side_effect=AssertionError(
+                "build_working_set must not call ScoringTuner.get_weights — "
+                "if this fires, the gap is closed and this pin should be "
+                "deleted along with the documenting comment."
+            ),
+        )
+        mgr = _make_manager()
+        # Inject after construction since the helper doesn't accept the kwarg
+        # (intentionally — the gap is "tuner is wired but unused"; the
+        # helper need not surface a parameter that no production caller
+        # is wiring through to a pinning expectation).
+        mgr._scoring_tuner = scoring_tuner
+
+        # Drive the full pipeline. If WSM ever starts calling the tuner,
+        # the side_effect raises AssertionError and the test fails noisily.
+        await mgr.build_working_set(**_build_args())
+
+        scoring_tuner.get_weights.assert_not_called()
+        scoring_tuner.get_weights.assert_not_awaited()

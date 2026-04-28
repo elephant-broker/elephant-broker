@@ -206,6 +206,43 @@ class TestCachedEmbeddingService:
         assert result == [[1.0, 2.0], []]
         assert "embed_batch returned 1/2 None entries" in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_corrupted_json_treated_as_miss(self):
+        """TF-05-010: a corrupted Redis cache entry is treated as a miss,
+        not a fatal error.
+
+        Pins ``cached_embeddings.py:85-98``: the per-entry
+        ``try: json.loads(val) ... except Exception: pass`` falls through
+        to the miss path (appends ``None`` to results, records the index
+        in ``miss_indices``, increments ``inc_embedding_cache("miss")``).
+        Without this guard, a single corrupted entry from a Redis key
+        collision or a partially-written value would propagate
+        ``json.JSONDecodeError`` out of the service and break every
+        caller of ``embed_batch`` until the bad key expired.
+
+        Mocks ``mget`` to return ``[b"not valid json"]`` for a single-text
+        batch; asserts inner ``embed_batch`` was called with the original
+        text (i.e. it was treated as a miss), the result equals the
+        embedding the inner service returned, and no exception
+        propagates.
+        """
+        mock_inner = AsyncMock()
+        mock_inner.embed_batch = AsyncMock(return_value=[[7.7, 8.8]])
+        mock_redis = AsyncMock()
+        mock_redis.mget = AsyncMock(return_value=[b"not valid json"])
+        pipe = AsyncMock()
+        pipe.setex = MagicMock()
+        pipe.execute = AsyncMock()
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        svc = CachedEmbeddingService(mock_inner, redis=mock_redis)
+        # No raise: corrupted bytes are silently treated as a miss.
+        result = await svc.embed_batch(["hello"])
+        assert result == [[7.7, 8.8]]
+        # Inner was called with the original text — proving the corrupted
+        # entry was funneled into the miss path.
+        mock_inner.embed_batch.assert_called_once_with(["hello"])
+
 
 class TestEmbeddingCacheObservability:
     """Step 0 audit gaps #9 + #10: observe_embedding_cache_{batch_size, latency_seconds}
