@@ -298,6 +298,61 @@ class TestMemoryStoreFacade:
         results = await facade.search("test", scope=Scope.SESSION)
         assert len(results) == 1
 
+    async def test_search_use_count_mutation_in_place(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TF-04-015 #1455: ``facade.search()`` mutates ``use_count`` in
+        place on the FactAssertion objects it returns, via a background
+        ``asyncio.create_task(self._update_use_counts(...))`` (facade.py:345).
+
+        The fire-and-forget task increments ``fact.use_count += 1`` on the
+        same Python objects the route layer hands to JSON serialization,
+        so any caller who holds a reference and re-reads ``use_count``
+        sees the value mutate underneath them. This documents the risk
+        — it is intentional today (no copy at the boundary) but a future
+        regression that breaks shared identity (e.g. round-tripping
+        through ``model_validate`` mid-search) would silently zero out
+        the counter.
+
+        We capture ``asyncio.create_task`` and await the coroutine
+        explicitly so the assertion is deterministic — without that the
+        task races the test teardown.
+        """
+        facade, graph, vector, emb, _ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        fact = make_fact_assertion()
+        graph.query_cypher = AsyncMock(return_value=[{
+            "props": {
+                "eb_id": str(fact.id), "text": fact.text, "category": "general",
+                "scope": "session", "confidence": 1.0, "eb_created_at": 0,
+                "eb_updated_at": 0, "use_count": 5, "successful_use_count": 0,
+                "provenance_refs": [], "target_actor_ids": [], "goal_ids": [],
+            }
+        }])
+        captured = []
+
+        def _capture(coro):
+            captured.append(coro)
+
+            class _Dummy:
+                def cancel(self_inner):
+                    pass
+
+            return _Dummy()
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.memory.facade.asyncio.create_task", _capture,
+        )
+        results = await facade.search("test query", scope=Scope.SESSION)
+        assert len(results) == 1
+        assert results[0].use_count == 5
+        # Drain the fire-and-forget task to trigger the mutation.
+        assert len(captured) == 1
+        await captured[0]
+        # The same object the caller holds now reads as 6 — in-place mutation.
+        assert results[0].use_count == 6
+
 
 class TestMemoryStoreFacadePhase4:
     """Phase 4 additions: dedup, edges, delete, get_by_id, update, promote_class."""
@@ -1473,6 +1528,56 @@ class TestMemoryStoreFacadePhase4:
         facade._metrics = metrics
         await facade.store(make_fact_assertion())
         metrics.inc_store.assert_called_once_with("store", "success")
+
+    async def test_store_success_increments_facts_stored(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """Gap #11: inc_facts_stored(memory_class, profile_name) fires on store success.
+
+        This test pins the ``profile_name=None → "unknown"`` fallback path —
+        the affirmative path with an explicit profile_name is pinned by
+        ``test_store_success_facts_stored_uses_explicit_profile_name``
+        (TODO-8-R1-002).
+        """
+        from unittest.mock import MagicMock
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        await facade.store(fact)
+        mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
+        metrics.inc_facts_stored.assert_called_once_with(mc, "unknown")
+
+    async def test_store_success_facts_stored_uses_explicit_profile_name(
+        self, monkeypatch, mock_add_data_points, mock_cognee,
+    ):
+        """TODO-8-R1-002 — affirmative-path coverage for `inc_facts_stored`.
+
+        C1.2 / C1.2b wired ``profile_name`` end-to-end: route → facade →
+        ``inc_facts_stored(memory_class, profile_name)``. The existing
+        ``test_store_success_increments_facts_stored`` only exercises the
+        ``profile_name=None`` fallback (label = ``"unknown"``). Without an
+        affirmative test, a regression that drops or shadows the kwarg
+        somewhere in the C1.2/C1.2b plumbing would land Prometheus with
+        ``eb_facts_stored_total{profile_name="unknown"}`` for every store —
+        and the existing fallback test would still pass.
+
+        This test pins the explicit-profile path: passing
+        ``profile_name="coding"`` to ``facade.store()`` must produce a
+        ``inc_facts_stored(mc, "coding")`` call (NOT ``"unknown"``).
+        """
+        from unittest.mock import MagicMock
+        facade, *_ = self._make()
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.add_data_points", mock_add_data_points)
+        monkeypatch.setattr("elephantbroker.runtime.memory.facade.cognee", mock_cognee)
+        metrics = MagicMock()
+        facade._metrics = metrics
+        fact = make_fact_assertion()
+        await facade.store(fact, profile_name="coding")
+        mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
+        metrics.inc_facts_stored.assert_called_once_with(mc, "coding")
 
     async def test_store_failure_emits_failure_status_and_reraises(
         self, monkeypatch, mock_add_data_points,

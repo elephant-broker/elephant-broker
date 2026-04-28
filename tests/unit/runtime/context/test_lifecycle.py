@@ -298,6 +298,20 @@ class TestIngestBatch:
         assert ctx.turn_count == 5
 
 
+class TestIngestBatchBufferFlushMetric:
+    """Gap #1: inc_buffer_flush('ingest_batch') must be emitted at ingest_batch completion."""
+
+    async def test_ingest_batch_emits_buffer_flush_metric(self):
+        """inc_buffer_flush('ingest_batch') called when metrics is available."""
+        lc = _make_lifecycle()
+
+        msgs = [AgentMessage(role="user", content="hello")]
+        params = IngestBatchParams(session_id=SID, session_key=SK, messages=msgs)
+        await lc.ingest_batch(params)
+
+        lc._metrics.inc_buffer_flush.assert_called_once_with("ingest_batch")
+
+
 class TestIngestBatchTouchKeys:
     """Amendment 6.1: TTL refresh on every ingest_batch."""
 

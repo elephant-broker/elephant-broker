@@ -25,7 +25,8 @@ class ProcedureEngine(IProcedureEngine):
 
     def __init__(self, graph: GraphAdapter, trace_ledger: ITraceLedger,
                  dataset_name: str = "elephantbroker", gateway_id: str = "",
-                 redis=None, redis_keys=None, ttl_seconds: int = 172800) -> None:
+                 redis=None, redis_keys=None, ttl_seconds: int = 172800,
+                 metrics=None) -> None:
         self._graph = graph
         self._trace = trace_ledger
         self._executions: dict[uuid.UUID, ProcedureExecution] = {}
@@ -34,6 +35,7 @@ class ProcedureEngine(IProcedureEngine):
         self._redis = redis
         self._keys = redis_keys
         self._ttl = ttl_seconds
+        self._metrics = metrics
         self._evidence_engine = None  # Set post-init by container
         self._session_goal_store = None  # Set post-init by container
         self._definitions: dict[uuid.UUID, ProcedureDefinition] = {}
@@ -106,15 +108,30 @@ class ProcedureEngine(IProcedureEngine):
                 logger.warning("Failed to clean up orphan auto-goals for procedure %s: %s", procedure_id, exc)
             await self._create_auto_goals(execution, proc, session_key, session_id)
 
+        # TODO-8-R1-004 / TODO-8-R1-008: emit identity fields (gateway_id,
+        # session_key, session_id) so per-tenant trace isolation works on
+        # activation events. PROCEDURE_STEP_PASSED is reused here for the
+        # activation event because TraceEventType has no PROCEDURE_ACTIVATED
+        # value; B2.5 wired `inc_procedure_activated()` beside this trace as
+        # the distinct counter, and adding a new enum value would be a
+        # breaking schema change. The `payload.action == "activate"` keeps
+        # the activation distinguishable from genuine step-pass events at
+        # query time. Splitting into a dedicated event type is a future
+        # refactor (tracked as observability follow-up).
         await self._trace.append_event(
             TraceEvent(
                 event_type=TraceEventType.PROCEDURE_STEP_PASSED,
+                gateway_id=self._gateway_id,
+                session_key=session_key,
+                session_id=session_id,
                 procedure_ids=[procedure_id],
                 actor_ids=[actor_id] if actor_id else [],
                 payload={"action": "activate", "execution_id": str(execution.execution_id),
                          "decision_domain": (proc.decision_domain if proc else None) or "none"},
             )
         )
+        if self._metrics:
+            self._metrics.inc_procedure_activated()
         return execution
 
     async def check_step(self, activation_id: uuid.UUID, step_id: uuid.UUID) -> StepCheckResult:
@@ -161,6 +178,8 @@ class ProcedureEngine(IProcedureEngine):
         # Mark step complete
         if step_id not in execution.completed_steps:
             execution.completed_steps.append(step_id)
+            if self._metrics:
+                self._metrics.inc_procedure_step_completed()
 
         # Update auto-goal sub-goal
         if self._session_goal_store and execution.session_key and execution.session_id:
@@ -203,6 +222,9 @@ class ProcedureEngine(IProcedureEngine):
             await self._evidence_engine.attach_evidence(claim.id, evidence)
             await self._evidence_engine.verify(claim.id)
 
+            if self._metrics:
+                self._metrics.inc_procedure_proof(evidence.type)
+
             if self._trace:
                 await self._trace.append_event(TraceEvent(
                     event_type=TraceEventType.PROCEDURE_COMPLETION_CHECKED,
@@ -236,15 +258,46 @@ class ProcedureEngine(IProcedureEngine):
                 await self._persist_execution(execution.session_key, str(execution.session_id or ""), execution)
                 if self._session_goal_store and execution.session_key and execution.session_id:
                     await self._resolve_parent_auto_goal(execution)
+                # TODO-8-R1-014: stamp gateway_id on the completion trace so
+                # per-tenant queries reach this site (sibling at line 217 in
+                # record_step_evidence already sets it). session_key/session_id
+                # come from the in-memory execution record.
                 await self._trace.append_event(TraceEvent(
                     event_type=TraceEventType.PROCEDURE_COMPLETION_CHECKED,
+                    gateway_id=self._gateway_id,
+                    session_key=execution.session_key or None,
+                    session_id=execution.session_id,
                     procedure_ids=[execution.procedure_id],
                     payload={"action": "completed", "execution_id": str(execution.execution_id)},
                 ))
+                if self._metrics:
+                    self._metrics.inc_procedure_completed()
             return result
 
-        # Fallback: no evidence engine
+        # Fallback: no evidence engine. TODO-8-R1-007 — when the fallback
+        # path returns complete=True, fire the same metric + trace as the
+        # evidence-engine branch so dashboards and timeline queries do not
+        # see procedures silently complete in the no-evidence configuration.
+        # Without this, deployments that intentionally run without an
+        # evidence engine (e.g. MEMORY_ONLY tier) would have
+        # `eb_procedure_completed_total` stuck at 0 even with successful
+        # completions.
         all_done = len(execution.completed_steps) > 0
+        if all_done:
+            await self._trace.append_event(TraceEvent(
+                event_type=TraceEventType.PROCEDURE_COMPLETION_CHECKED,
+                gateway_id=self._gateway_id,
+                session_key=execution.session_key or None,
+                session_id=execution.session_id,
+                procedure_ids=[execution.procedure_id],
+                payload={
+                    "action": "completed",
+                    "execution_id": str(execution.execution_id),
+                    "path": "fallback_no_evidence_engine",
+                },
+            ))
+            if self._metrics:
+                self._metrics.inc_procedure_completed()
         return CompletionCheckResult(complete=all_done, procedure_id=execution.procedure_id)
 
     async def get_active_execution_ids(self, session_key: str, session_id: uuid.UUID) -> list[uuid.UUID]:

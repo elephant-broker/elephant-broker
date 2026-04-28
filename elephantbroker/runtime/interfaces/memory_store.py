@@ -22,6 +22,7 @@ class IMemoryStoreFacade(ABC):
         self, fact: FactAssertion, *,
         dedup_threshold: float | None = None,
         precomputed_embedding: list[float] | None = None,
+        profile_name: str | None = None,
     ) -> FactAssertion:
         """Store a new fact in memory. Raises DedupSkipped if near-duplicate detected."""
         ...

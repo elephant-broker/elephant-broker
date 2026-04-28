@@ -75,6 +75,7 @@ class MemoryStoreFacade(IMemoryStoreFacade):
         self, fact: FactAssertion, *,
         dedup_threshold: float | None = None,
         precomputed_embedding: list[float] | None = None,
+        profile_name: str | None = None,
     ) -> FactAssertion:
         try:
             # Token size + gateway stamp
@@ -183,7 +184,29 @@ class MemoryStoreFacade(IMemoryStoreFacade):
 
             if self._metrics:
                 self._metrics.inc_store("store", "success")
+                mc = fact.memory_class.value if hasattr(fact.memory_class, "value") else str(fact.memory_class)
+                self._metrics.inc_facts_stored(mc, profile_name or "unknown")
             else:
+                # TODO-8-R1-023 — pattern-divergence acknowledgment.
+                # ``inc_store`` has both a MetricsContext method AND a
+                # module-level free function (used here) for backward
+                # compatibility with pre-Gateway-Identity callers. The
+                # newer ``inc_facts_stored`` (B2.7) does NOT have a
+                # free-function fallback because every production path
+                # constructs the facade with ``metrics=c.metrics_ctx``
+                # (see container.py: ``MemoryStoreFacade(...metrics=
+                # c.metrics_ctx...)``). The ``self._metrics is None`` branch
+                # here is therefore unreachable in production; it exists
+                # only for test isolation. We deliberately do NOT add a
+                # free ``inc_facts_stored`` because that would emit
+                # ``gateway_id=""`` (silently breaking tenant isolation)
+                # — the right answer for the test path is to upgrade the
+                # test to pass a mock MetricsContext, which the new
+                # affirmative-path test in
+                # ``test_store_success_facts_stored_uses_explicit_profile_name``
+                # already does. Tracked as follow-up architectural cleanup
+                # (parallel with the pipeline dual-metric pattern at
+                # TODO-8-R1-010).
                 inc_store("store", "success")
             logger.info("Stored fact %s (%s, %d tokens)", fact.id, fact.memory_class, fact.token_size or 0)
 

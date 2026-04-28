@@ -80,6 +80,14 @@ class TestClassifyMemory:
         result = await classify_memory(facts, llm_client=llm)
         assert result[0][1] == MemoryClass.SEMANTIC
 
+    async def test_llm_fallback_default_episodic(self):
+        """When the LLM raises, classify_memory falls back to EPISODIC on the general-category path."""
+        llm = MagicMock()
+        llm.complete_json = AsyncMock(side_effect=RuntimeError("LLM provider unavailable"))
+        facts = [FactAssertion(text="Some general information", category="general")]
+        result = await classify_memory(facts, llm_client=llm)
+        assert result[0][1] == MemoryClass.EPISODIC
+
     async def test_unknown_category_defaults_episodic_without_llm(self):
         facts = [FactAssertion(text="Custom stuff", category="my_custom_cat")]
         result = await classify_memory(facts, llm_client=None)

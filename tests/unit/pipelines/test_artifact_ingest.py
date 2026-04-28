@@ -131,3 +131,39 @@ class TestArtifactIngestPipeline:
         assert result1.is_duplicate is False
         result2 = await pipe.run(inp)
         assert result2.is_duplicate is True
+
+
+class TestArtifactIngestPipelineMetrics:
+    """Gap #2: inc_pipeline('artifact_ingest', 'success') must be emitted."""
+
+    async def test_inc_pipeline_success_on_happy_path(self):
+        """inc_pipeline('artifact_ingest', 'success') called on successful ingest."""
+        store = _make_store()
+        trace = _make_trace()
+        metrics = MagicMock()
+        pipe = ArtifactIngestPipeline(store, MagicMock(), _make_llm(), trace, _make_config(), metrics=metrics)
+        inp = _make_input()
+        await pipe.run(inp)
+        metrics.inc_pipeline.assert_called_once_with("artifact_ingest", "success")
+
+    async def test_inc_pipeline_not_called_on_dedup(self):
+        """Dedup short-circuits before the metric emission point."""
+        store = _make_store(existing_hash=True)
+        trace = _make_trace()
+        metrics = MagicMock()
+        pipe = ArtifactIngestPipeline(store, MagicMock(), _make_llm(), trace, _make_config(), metrics=metrics)
+        inp = _make_input()
+        await pipe.run(inp)
+        metrics.inc_pipeline.assert_not_called()
+
+    async def test_inc_pipeline_error_on_run_exception(self):
+        """Gap #13: inc_pipeline('artifact_ingest', 'error') fires when run() raises."""
+        store = _make_store()
+        trace = _make_trace()
+        trace.append_event = AsyncMock(side_effect=RuntimeError("trace exploded"))
+        metrics = MagicMock()
+        pipe = ArtifactIngestPipeline(store, MagicMock(), _make_llm(), trace, _make_config(), metrics=metrics)
+        inp = _make_input()
+        with pytest.raises(RuntimeError, match="trace exploded"):
+            await pipe.run(inp)
+        metrics.inc_pipeline.assert_called_once_with("artifact_ingest", "error")

@@ -54,6 +54,7 @@ export class ElephantBrokerClient {
   private agentId = "";
   private agentKey = "";
   private actorId = "";  // Phase 8: for admin API authorization
+  private profileName = "";  // C1.2b: enables eb_facts_stored_total{profile_name} attribution on /memory/store
 
   constructor(baseUrl: string = "http://localhost:8420", gatewayId?: string, gatewayShortName?: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -588,6 +589,14 @@ export class ElephantBrokerClient {
 
   setActorId(actorId: string): void {
     this.actorId = actorId;
+  }
+
+  setProfileName(profileName: string): void {
+    this.profileName = profileName;
+  }
+
+  getProfileName(): string {
+    return this.profileName;
   }
 
   // --- Phase 8: Admin API methods ---

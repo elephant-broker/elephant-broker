@@ -17,7 +17,16 @@ class TestTierCapabilities:
 
     def test_full_tier_enables_all_modules(self):
         matrix = TierCapabilityMatrix.for_tier(BusinessTier.FULL)
-        assert len(matrix.enabled_modules) == 17
+        # TODO-8-R1-017: assert known modules are present, not the count.
+        # The previous `len == 18` brittle check has been removed — adding
+        # a new module (e.g. C2.2 added IContextLifecycle, taking 17 → 18)
+        # produced a confusing arithmetic failure instead of pointing at
+        # the actual semantic regression. The set-equality test
+        # `test_full_tier_is_union_plus_consolidation` below pins the
+        # exact membership, which is the contract that matters.
+        assert matrix.is_enabled("IMemoryStoreFacade")
+        assert matrix.is_enabled("IContextLifecycle")
+        assert matrix.is_enabled("IConsolidationEngine")
 
     def test_context_only_has_working_set(self):
         matrix = TierCapabilityMatrix.for_tier(BusinessTier.CONTEXT_ONLY)
@@ -35,9 +44,14 @@ class TestTierCapabilities:
         assert restored.tier == BusinessTier.FULL
 
     def test_memory_only_has_exactly_10_modules(self):
-        """MEMORY_ONLY tier has exactly 10 modules, enumerated by interface name."""
+        """MEMORY_ONLY tier has the enumerated set of modules.
+
+        TODO-8-R1-017: redundant ``len == 10`` removed — set-equality below
+        is the actual contract; the count assertion produced a confusing
+        arithmetic failure on module addition without pointing at which
+        module went missing.
+        """
         m = TierCapabilityMatrix.for_tier(BusinessTier.MEMORY_ONLY)
-        assert len(m.enabled_modules) == 10
         assert m.enabled_modules == {
             "IActorRegistry",
             "IGoalManager",
@@ -51,16 +65,22 @@ class TestTierCapabilities:
             "IProcedureEngine",
         }
 
-    def test_context_only_has_exactly_10_modules(self):
-        """CONTEXT_ONLY tier has exactly 10 modules, enumerated by interface name."""
+    def test_context_only_has_exactly_11_modules(self):
+        """CONTEXT_ONLY tier has the enumerated set of modules.
+
+        TODO-8-R1-017: redundant ``len == 11`` removed — set-equality below
+        is the actual contract. C2.2 added IContextLifecycle; the count
+        assertion would fail on module addition without pointing at the
+        affected interface.
+        """
         m = TierCapabilityMatrix.for_tier(BusinessTier.CONTEXT_ONLY)
-        assert len(m.enabled_modules) == 10
         assert m.enabled_modules == {
             "IActorRegistry",
             "IGoalManager",
             "IWorkingSetManager",
             "IContextAssembler",
             "ICompactionEngine",
+            "IContextLifecycle",
             "IRedLineGuardEngine",
             "IStatsAndTelemetryEngine",
             "ITraceLedger",
@@ -111,7 +131,10 @@ class TestTierCapabilities:
         }
 
     def test_context_only_unique_modules(self):
-        """The 6 modules unique to CONTEXT_ONLY: working-set/assembler/compaction/guard/stats/tuner."""
+        """The 7 modules unique to CONTEXT_ONLY: working-set/assembler/compaction/lifecycle/guard/stats/tuner.
+
+        C2.2: IContextLifecycle was added to CONTEXT_ONLY (and FULL) — set count 6 → 7.
+        """
         unique = (
             TIER_CAPABILITIES[BusinessTier.CONTEXT_ONLY]
             - TIER_CAPABILITIES[BusinessTier.MEMORY_ONLY]
@@ -120,6 +143,7 @@ class TestTierCapabilities:
             "IWorkingSetManager",
             "IContextAssembler",
             "ICompactionEngine",
+            "IContextLifecycle",
             "IRedLineGuardEngine",
             "IStatsAndTelemetryEngine",
             "IScoringTuner",

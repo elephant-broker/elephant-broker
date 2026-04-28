@@ -6,6 +6,7 @@ import logging
 
 from elephantbroker.runtime.adapters.cognee.tasks.summarize_artifact import summarize_artifact
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
+from elephantbroker.runtime.metrics import inc_pipeline
 from elephantbroker.runtime.observability import traced
 from elephantbroker.schemas.artifact import ArtifactHash, ToolArtifact
 from elephantbroker.schemas.pipeline import ArtifactIngestResult, ArtifactInput
@@ -14,12 +15,19 @@ from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 logger = logging.getLogger("elephantbroker.pipelines.artifact_ingest")
 
 
+# TODO-8-R1-010 — dual-metric pattern acknowledgment. See the matching
+# block at the top of ``elephantbroker/pipelines/turn_ingest/pipeline.py``
+# for the full rationale. Production always sets ``self._metrics`` via
+# the container; the free-function fallback path exists for unit-test
+# isolation and is unreachable in production.
+
+
 class ArtifactIngestPipeline:
     """Stores tool artifacts with deduplication, summarization, and tracing."""
 
     def __init__(
         self, artifact_store, memory_facade, llm_client, trace_ledger: ITraceLedger,
-        config=None, gateway_id: str = "",
+        config=None, gateway_id: str = "", metrics=None,
     ):
         self._store = artifact_store
         self._facade = memory_facade
@@ -27,60 +35,73 @@ class ArtifactIngestPipeline:
         self._trace = trace_ledger
         self._config = config
         self._gateway_id = gateway_id
+        self._metrics = metrics
         self._seen_hashes: set[str] = set()
 
     @traced
     async def run(self, input: ArtifactInput) -> ArtifactIngestResult:
         """Run the artifact ingest pipeline."""
-        # Hash includes tool_name + sorted args + output per plan §4.3
-        hash_input = input.tool_name + str(sorted(input.tool_args.items())) + input.tool_output
-        content_hash = hashlib.sha256(hash_input.encode()).hexdigest()
-
-        # Dedup by hash (in-memory + database)
-        if content_hash in self._seen_hashes:
-            return ArtifactIngestResult(is_duplicate=True)
         try:
-            artifact_hash = ArtifactHash(value=content_hash)
-            existing = await self._store.get_by_hash(artifact_hash)
-            if existing:
-                self._seen_hashes.add(content_hash)
+            # Hash includes tool_name + sorted args + output per plan §4.3
+            hash_input = input.tool_name + str(sorted(input.tool_args.items())) + input.tool_output
+            content_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+            # Dedup by hash (in-memory + database)
+            if content_hash in self._seen_hashes:
                 return ArtifactIngestResult(is_duplicate=True)
-        except Exception as exc:
-            logger.debug("DB dedup check failed (will proceed): %s", exc)
-        self._seen_hashes.add(content_hash)
+            try:
+                artifact_hash = ArtifactHash(value=content_hash)
+                existing = await self._store.get_by_hash(artifact_hash)
+                if existing:
+                    self._seen_hashes.add(content_hash)
+                    return ArtifactIngestResult(is_duplicate=True)
+            except Exception as exc:
+                logger.debug("DB dedup check failed (will proceed): %s", exc)
+            self._seen_hashes.add(content_hash)
 
-        # Create artifact
-        gw = getattr(input, "gateway_id", "") or self._gateway_id
-        artifact = ToolArtifact(
-            tool_name=input.tool_name,
-            content=input.tool_output,
-            session_id=input.session_id,
-            actor_id=input.actor_id,
-            goal_id=input.goal_id,
-            gateway_id=gw,
-        )
+            # Create artifact
+            gw = getattr(input, "gateway_id", "") or self._gateway_id
+            artifact = ToolArtifact(
+                tool_name=input.tool_name,
+                content=input.tool_output,
+                session_id=input.session_id,
+                actor_id=input.actor_id,
+                goal_id=input.goal_id,
+                gateway_id=gw,
+            )
 
-        # Store raw
-        try:
-            await self._store.store_artifact(artifact)
-        except Exception as exc:
-            logger.warning("Failed to store artifact: %s", exc)
+            # Store raw
+            try:
+                await self._store.store_artifact(artifact)
+            except Exception as exc:
+                logger.warning("Failed to store artifact: %s", exc)
 
-        # Summarize
-        summary = await summarize_artifact(artifact, self._llm, self._config)
+            # Summarize
+            summary = await summarize_artifact(artifact, self._llm, self._config)
 
-        trace_event = TraceEvent(
-            event_type=TraceEventType.ARTIFACT_CREATED,
-            payload={
-                "artifact_id": str(artifact.artifact_id),
-                "tool_name": input.tool_name,
-            },
-        )
-        await self._trace.append_event(trace_event)
+            trace_event = TraceEvent(
+                event_type=TraceEventType.ARTIFACT_CREATED,
+                payload={
+                    "artifact_id": str(artifact.artifact_id),
+                    "tool_name": input.tool_name,
+                },
+            )
+            await self._trace.append_event(trace_event)
 
-        return ArtifactIngestResult(
-            artifact=artifact,
-            summary=summary,
-            is_duplicate=False,
-            trace_event_id=trace_event.id,
-        )
+            if self._metrics:
+                self._metrics.inc_pipeline("artifact_ingest", "success")
+            else:
+                inc_pipeline("artifact_ingest", "success")
+
+            return ArtifactIngestResult(
+                artifact=artifact,
+                summary=summary,
+                is_duplicate=False,
+                trace_event_id=trace_event.id,
+            )
+        except Exception:
+            if self._metrics:
+                self._metrics.inc_pipeline("artifact_ingest", "error")
+            else:
+                inc_pipeline("artifact_ingest", "error")
+            raise

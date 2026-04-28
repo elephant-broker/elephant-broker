@@ -44,6 +44,11 @@ KNOWN_EMBEDDING_DIMS: dict[str, int] = {
 # Pydantic discover the field for env-binding application.
 from elephantbroker.schemas.consolidation import ConsolidationConfig
 
+# C2.1: tier selection moved into the config object so EB_TIER flows through
+# the standard ENV_OVERRIDE_BINDINGS path. tiers.py imports nothing from this
+# file (only StrEnum + Pydantic primitives), so the top-level import is safe.
+from elephantbroker.schemas.tiers import BusinessTier
+
 
 class _StrictBase(BaseModel):
     """Base class for every config submodel.
@@ -498,6 +503,11 @@ ENV_OVERRIDE_BINDINGS: list[tuple[str, str, str]] = [
     ("EB_TEAM_ID", "gateway.team_id", "str_or_none"),
     ("EB_AGENT_AUTHORITY_LEVEL", "gateway.agent_authority_level", "int"),
     ("EB_DEFAULT_PROFILE", "default_profile", "str"),
+    # C2.1: tier ("memory_only"|"context_only"|"full"). Pydantic coerces the
+    # string into BusinessTier at model_validate() time; an unknown value
+    # raises ValidationError and fails `elephantbroker config validate`,
+    # so a bad EB_TIER never silently falls through to FULL.
+    ("EB_TIER", "tier", "str"),
 
     # --- Cognee (Neo4j + Qdrant + Embedding) ---
     ("EB_NEO4J_URI", "cognee.neo4j_uri", "str"),
@@ -703,6 +713,11 @@ class ElephantBrokerConfig(_StrictBase):
     reranker: RerankerConfig = Field(default_factory=RerankerConfig)
     infra: InfraConfig = Field(default_factory=InfraConfig)
     default_profile: str = "coding"
+    # C2.1: business tier selection. Default is FULL (memory + context engine).
+    # Override via EB_TIER env var ("memory_only" | "context_only" | "full")
+    # or `tier:` key in YAML. RuntimeContainer.from_config() reads this to
+    # gate which interfaces are wired (see TIER_CAPABILITIES in schemas/tiers.py).
+    tier: BusinessTier = BusinessTier.FULL
     enable_trace_ledger: bool = True
     max_concurrent_sessions: int = Field(default=100, ge=1)
     # Phase 5 config sections

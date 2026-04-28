@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -82,6 +82,54 @@ class TestComplete:
                 await client.complete("sys", "usr")
 
 
+class TestLLMClientRetryBehavior:
+    """TF-04-015 #1457: pin the actual retry policy in
+    ``LLMClient._post_with_retry`` (client.py:38-67).
+
+    The flow doc historically claimed a generic "retries on transient
+    failures" policy. The implementation only retries on HTTP 429
+    (Too Many Requests) with backoffs ``[1.0, 2.0, 4.0]s``; every other
+    non-2xx status raises immediately via ``response.raise_for_status()``
+    at line 44. These two tests pin both branches so a future widening
+    or narrowing of the retry policy is caught.
+    """
+
+    async def test_llm_retry_behavior_429_then_200_succeeds(self, client, monkeypatch):
+        """429 retries: a 429 followed by a 200 succeeds, with two POSTs."""
+        # Patch out the backoff sleep so the test does not actually wait
+        # 1.0s between attempts. The real sleep call is inside
+        # ``_post_with_retry`` via ``asyncio.sleep``.
+        async def _no_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(
+            "elephantbroker.runtime.adapters.llm.client.asyncio.sleep", _no_sleep,
+        )
+        responses = [
+            httpx.Response(
+                429, json={"error": "rate limited"},
+                request=httpx.Request("POST", "http://test"),
+            ),
+            _make_response("Hello after retry!"),
+        ]
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = responses
+            result = await client.complete("sys", "usr")
+        assert result == "Hello after retry!"
+        assert mock_post.call_count == 2
+
+    async def test_llm_retry_behavior_502_raises_immediately(self, client):
+        """502 does NOT retry: a single POST raises HTTPStatusError."""
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                502, json={"error": "bad gateway"},
+                request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete("sys", "usr")
+        assert mock_post.call_count == 1
+
+
 class TestCompleteJson:
     async def test_with_schema(self, client):
         schema = {"type": "object", "properties": {"facts": {"type": "array"}}}
@@ -157,6 +205,88 @@ class TestCompleteJson:
             await client.complete_json("sys", "usr")
             payload = mock_post.call_args.kwargs["json"]
             assert payload["temperature"] == 0.0
+
+
+class TestLLMClientMetrics:
+    """Gap #4: inc_llm_call must fire on complete/complete_json success + error paths."""
+
+    async def test_complete_success_emits_metric(self, config):
+        """inc_llm_call('complete', 'success', model) fires on successful complete()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response("Hello!")
+            await client.complete("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete", "success", client._model)
+
+    async def test_complete_error_emits_metric(self, config):
+        """inc_llm_call('complete', 'error', model) fires on failed complete()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                500, json={"error": "fail"}, request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete", "error", client._model)
+
+    async def test_complete_json_success_emits_metric(self, config):
+        """inc_llm_call('complete_json', 'success', model) fires on successful complete_json()."""
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response('{"count": 42}')
+            await client.complete_json("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with("complete_json", "success", client._model)
+
+    async def test_complete_json_parse_failure_emits_distinct_metric(self, config):
+        """TODO-8-R1-003 — JSON parse failure emits ``status="json_parse_error"``.
+
+        The HTTP call succeeded (proxy returned 200 OK) but the body was
+        not parseable JSON — operationally distinct from a 5xx / network
+        / auth failure. Pre-fix this surfaced as ``"error"`` (same label
+        as HTTP failure), making it impossible to alert on "Gemini fences
+        regression" vs "LLM proxy is down" without log inspection. The
+        architecture-reviewer flagged the conflation; the feature-reviewer
+        flagged the double-fire risk on a naive split. The new shape is
+        single-fire per call with the status label cleanly separating
+        the failure modes.
+        """
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _make_response("not-json")
+            with pytest.raises(json.JSONDecodeError):
+                await client.complete_json("sys", "usr")
+        metrics.inc_llm_call.assert_called_once_with(
+            "complete_json", "json_parse_error", client._model,
+        )
+
+    async def test_complete_json_http_failure_emits_error_metric(self, config):
+        """TODO-8-R1-003 — HTTP-layer failure emits ``status="error"``.
+
+        Companion to ``test_complete_json_parse_failure_emits_distinct_metric``:
+        when the LLM proxy returns 5xx / 4xx / network error (the HTTP
+        call itself fails), the metric label is ``"error"`` — the same
+        label ``complete()`` uses for HTTP failures. JSON parsing never
+        runs because there was no parseable response. Single fire per
+        call (no fall-through that would also emit ``json_parse_error``).
+        """
+        metrics = MagicMock()
+        client = LLMClient(config, metrics=metrics)
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = httpx.Response(
+                500, json={"error": "fail"},
+                request=httpx.Request("POST", "http://test"),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.complete_json("sys", "usr")
+        # Single inc_llm_call invocation; status="error" distinguishes
+        # from the json_parse_error path.
+        metrics.inc_llm_call.assert_called_once_with(
+            "complete_json", "error", client._model,
+        )
 
 
 class TestClose:

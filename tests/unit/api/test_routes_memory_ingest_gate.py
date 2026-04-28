@@ -58,8 +58,53 @@ class TestIngestGate:
         assert r.status_code == 202
         container.metrics_ctx.inc_ingest_gate_skip.assert_called_once_with("full_mode")
 
-    async def test_ingest_gate_trace_event_includes_session_id(self, client, container):
-        """TODO-11-006: INGEST_BUFFER_FLUSH trace event includes session_id."""
+    async def test_ingest_gate_does_not_increment_buffer_flush_metric(self, client, container):
+        """TODO-8-R1-012 — gate-skip path is NOT a buffer flush.
+
+        4-reviewer R1 consensus (LT + interop + BS + BL): the gate-skip
+        path used to fire ``inc_buffer_flush("gate_skip_full_mode")``,
+        polluting the buffer-flush metric with non-flush events. The
+        gate-skip is captured by ``inc_ingest_gate_skip("full_mode")``
+        on its own metric (``eb_ingest_gate_skips_total``) — that's the
+        correct surface. This test pins the post-fix contract: the
+        gate-skip path must NOT touch ``inc_buffer_flush``.
+        """
+        container.metrics_ctx.inc_buffer_flush = MagicMock()
+
+        r = await client.post(
+            "/memory/ingest-messages",
+            json={
+                "session_key": "agent:main:main",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert r.status_code == 202
+        # Pre-fix this asserted ``inc_buffer_flush.assert_called_once_with(
+        # "gate_skip_full_mode")``. Post-fix the gate-skip path emits
+        # ONLY ``inc_ingest_gate_skip``; ``inc_buffer_flush`` must not
+        # fire (the buffer is not flushed in this branch).
+        container.metrics_ctx.inc_buffer_flush.assert_not_called()
+
+    async def test_ingest_gate_does_not_emit_buffer_flush_trace(self, client, container):
+        """TODO-8-600 — R2 carry-over (LT): gate-skip path must NOT emit
+        ``INGEST_BUFFER_FLUSH``.
+
+        Pre-R2 this path emitted ``INGEST_BUFFER_FLUSH`` with payload
+        ``action=gate_skip_full_mode`` (the prior ``test_ingest_gate_trace_event_includes_session_id``
+        pinned that behaviour as TODO-11-006). The R1 fix removed the
+        matching ``inc_buffer_flush`` metric (TODO-8-R1-012); R2 carries
+        the trace-event removal. Reason: gate skip is NOT a buffer flush
+        — emitting INGEST_BUFFER_FLUSH here poisons
+        ``/trace?event_type=INGEST_BUFFER_FLUSH`` queries with non-flush
+        events and confuses session-timeline rendering. The gate skip is
+        captured by ``eb_ingest_gate_skips_total`` on the metric side
+        (no equivalent trace surface today; if one is needed later, a
+        dedicated ``INGEST_GATE_SKIPPED`` enum value is the right path,
+        not overloading INGEST_BUFFER_FLUSH).
+
+        This test pins the post-R2 contract: zero INGEST_BUFFER_FLUSH
+        events on the gate-skip path.
+        """
         container.trace_ledger.append_event = AsyncMock(side_effect=lambda e: e)
 
         r = await client.post(
@@ -72,14 +117,15 @@ class TestIngestGate:
         )
         assert r.status_code == 202
 
-        # Find INGEST_BUFFER_FLUSH among captured append_event calls
+        # Post-R2: NO INGEST_BUFFER_FLUSH on gate-skip path.
         flush_calls = [
             c[0][0] for c in container.trace_ledger.append_event.call_args_list
             if c[0][0].event_type == TraceEventType.INGEST_BUFFER_FLUSH
         ]
-        assert len(flush_calls) >= 1
-        assert str(flush_calls[0].session_id) == "00000000-0000-0000-0000-000000000001"
-        assert flush_calls[0].session_key == "agent:main:main"
+        assert flush_calls == [], (
+            f"gate-skip path must NOT emit INGEST_BUFFER_FLUSH; "
+            f"observed {len(flush_calls)} event(s)"
+        )
 
     async def test_ingest_gate_no_metrics_ctx(self, client, container):
         """Gate still works when metrics_ctx is None — no metric emitted, no crash."""
@@ -315,6 +361,29 @@ class TestIngestMessagesProfileWireThrough:
             f"expected exactly one warning log on the transient-fallback branch, got {len(warning_records)}"
         )
         assert "coding" in warning_records[0].getMessage()
+
+    async def test_batch_flush_increments_buffer_flush_metric(self, client, container):
+        """Gap #1: inc_buffer_flush('batch_size') emitted when buffer flush triggered."""
+        from unittest.mock import AsyncMock
+
+        from elephantbroker.schemas.pipeline import TurnIngestResult
+
+        mock_buffer, mock_pipeline = self._arrange_memory_only(container)
+        # Make buffer report batch_ready=True to trigger the flush branch
+        mock_buffer.add_messages = AsyncMock(return_value=True)
+        mock_buffer.flush = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+        mock_pipeline.run = AsyncMock(return_value=TurnIngestResult(facts_stored=1))
+        container.metrics_ctx = MagicMock()
+
+        r = await client.post(
+            "/memory/ingest-messages",
+            json={
+                "session_key": "agent:main:main",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert r.status_code == 200
+        container.metrics_ctx.inc_buffer_flush.assert_called_once_with("batch_size")
 
     async def test_org_override_wires_through_org_id_to_resolve_profile(
         self, client, container,

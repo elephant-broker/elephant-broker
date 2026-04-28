@@ -93,6 +93,25 @@ class TestMemoryRoutes:
         r = await client.get(f"/memory/{uuid.uuid4()}")
         assert r.status_code == 404
 
+    async def test_get_by_id_null_freshness_score(self, client, container):
+        """TF-04-015 #1492: ``GET /memory/{id}`` does not compute a
+        freshness score on the read path — the field is only populated
+        by ``facade.search()`` (facade.py:336-340). A direct fetch by
+        id therefore returns ``freshness_score=None``, and the JSON
+        response carries it as the literal ``null`` rather than dropping
+        the key. Pin both behaviors so a future addition of a
+        freshness recompute on the read path doesn't silently shift the
+        contract.
+        """
+        fact = FactAssertion(text="freshness probe")
+        assert fact.freshness_score is None  # default from the schema
+        container.memory_store.get_by_id = AsyncMock(return_value=fact)
+        r = await client.get(f"/memory/{fact.id}")
+        assert r.status_code == 200
+        data = r.json()
+        assert "freshness_score" in data
+        assert data["freshness_score"] is None
+
     async def test_delete_returns_204(self, client, container):
         container.memory_store.delete = AsyncMock(return_value=None)
         r = await client.delete(f"/memory/{uuid.uuid4()}")

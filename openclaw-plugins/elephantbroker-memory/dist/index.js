@@ -21,6 +21,8 @@ var ElephantBrokerClient = class {
   agentKey = "";
   actorId = "";
   // Phase 8: for admin API authorization
+  profileName = "";
+  // C1.2b: enables eb_facts_stored_total{profile_name} attribution on /memory/store
   constructor(baseUrl = "http://localhost:8420", gatewayId, gatewayShortName) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.gatewayId = gatewayId || process.env.EB_GATEWAY_ID || "";
@@ -489,6 +491,12 @@ var ElephantBrokerClient = class {
   setActorId(actorId) {
     this.actorId = actorId;
   }
+  setProfileName(profileName) {
+    this.profileName = profileName;
+  }
+  getProfileName() {
+    return this.profileName;
+  }
   // --- Phase 8: Admin API methods ---
   async createPersistentGoal(request) {
     return tracer.startActiveSpan("admin.createPersistentGoal", { kind: SpanKind.CLIENT }, async (span) => {
@@ -694,6 +702,7 @@ function createMemoryStoreTool(client) {
     },
     async execute(toolCallId, params, signal) {
       const sid = client.getSessionId();
+      const profile = client.getProfileName();
       const result = await client.store({
         fact: {
           text: params.text,
@@ -702,7 +711,8 @@ function createMemoryStoreTool(client) {
           confidence: params.confidence
         },
         session_key: client.getSessionKey(),
-        ...sid ? { session_id: sid } : {}
+        ...sid ? { session_id: sid } : {},
+        ...profile ? { profile_name: profile } : {}
       });
       if (result === null) {
         return {
@@ -1498,6 +1508,7 @@ function register(api) {
   const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
   const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
   const client = new ElephantBrokerClient(baseUrl, gatewayId, gatewayShortName);
+  client.setProfileName(profileName);
   const configActorId = cfg.actorId || process.env.EB_ACTOR_ID;
   if (configActorId) {
     client.setActorId(configActorId);

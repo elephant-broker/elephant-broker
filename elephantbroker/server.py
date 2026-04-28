@@ -34,7 +34,7 @@ def serve(host: str, port: int, log_level: str, config: str | None) -> None:
 
     async def _build_and_run() -> None:
         eb_config = ElephantBrokerConfig.load(config)
-        container = await RuntimeContainer.from_config(eb_config)
+        container = await RuntimeContainer.from_config(eb_config, tier=eb_config.tier)
 
         from elephantbroker.api.app import create_app
         app = create_app(container)

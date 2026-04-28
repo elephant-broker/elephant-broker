@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -143,6 +144,57 @@ class TestTurnIngestPipeline:
         # Extra field preserved through normalization: the user fact's source_actor_id
         # should resolve to the AgentMessage's actor_id (TD-28 precondition check).
         assert result.facts_extracted[0].source_actor_id == uuid.UUID(actor_id)
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_per_message_attribution_assistant_vs_user(self, mock_cognee):
+        """C4.1 / GAP-6: per-message attribution — facts originating from a
+        user turn carry the user's actor_id; facts from assistant/tool turns
+        carry the deterministic agent UUID derived from agent_key.
+
+        Pins pipeline.py:233-246: when `agent_key` is supplied, each fact's
+        source_actor_id is resolved by looking up `messages[source_turns[0]].role`
+        and routing user→actor_id, assistant/tool→deterministic_uuid_from(agent_key).
+        Without this branching, both facts would inherit `source_actor_id`
+        (the fallback first-user actor_id at pipeline.py:110-114), losing the
+        provenance distinction GAP-6 was created to restore.
+        """
+        from elephantbroker.runtime.identity import deterministic_uuid_from
+
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+
+        user_actor_id = str(uuid.uuid4())
+        agent_key = "test-gw:main"
+        expected_agent_actor_id = deterministic_uuid_from(agent_key)
+
+        # LLM returns two facts attributing one to each turn.
+        llm = _make_llm(facts=[
+            {"text": "User prefers Python", "category": "preference",
+             "source_turns": [0], "supersedes_index": -1},
+            {"text": "Assistant suggested using uv for dependency management",
+             "category": "decision", "source_turns": [1], "supersedes_index": -1},
+        ])
+        pipe = _make_pipeline(llm=llm)
+
+        messages = [
+            {"role": "user", "content": "What package manager should I use?",
+             "actor_id": user_actor_id},
+            {"role": "assistant", "content": "Try uv — it's fast and replaces pip+venv."},
+        ]
+        result = await pipe.run("session:test", messages, agent_key=agent_key)
+
+        assert len(result.facts_extracted) == 2
+        # Order in facts_extracted matches the LLM's order, which matches
+        # source_turns order here. Identify by source_turn provenance string.
+        by_turn = {
+            f.provenance_refs[0].split(":turn:")[-1]: f
+            for f in result.facts_extracted
+        }
+        # Turn 0 (user with actor_id) → user's UUID, NOT the agent's.
+        assert by_turn["0"].source_actor_id == uuid.UUID(user_actor_id)
+        # Turn 1 (assistant) → deterministic agent UUID, NOT the user's.
+        assert by_turn["1"].source_actor_id == expected_agent_actor_id
+        assert by_turn["1"].source_actor_id != uuid.UUID(user_actor_id)
 
     async def test_empty_messages_returns_zero(self):
         pipe = _make_pipeline()
@@ -603,6 +655,23 @@ class TestIngestBuffer:
         flushed2 = await buf.flush("s1")
         assert flushed2 == []
 
+    async def test_flush_sets_last_flush_timestamp(self):
+        """flush() must update _last_flush[sk] so check_timeout_flush() reads
+        a real elapsed-since-flush window. Regression guard against future
+        refactors that drop the bookkeeping."""
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=10)
+        buf = IngestBuffer(redis, config)
+        # Pre-flush: session_key absent from the bookkeeping dict.
+        assert "s1" not in buf._last_flush
+        await buf.add_messages("s1", [{"role": "user", "content": "m"}])
+        before = time.time()
+        await buf.flush("s1")
+        after = time.time()
+        assert "s1" in buf._last_flush
+        # Stamp must fall in the window we observed around the flush call.
+        assert before <= buf._last_flush["s1"] <= after
+
     async def test_load_recent_facts_empty(self):
         redis = _FakeRedis()
         config = self._make_config()
@@ -627,6 +696,31 @@ class TestIngestBuffer:
         await buf.update_recent_facts("s1", facts, max_count=5)
         loaded = await buf.load_recent_facts("s1")
         assert len(loaded) == 5
+
+    async def test_recent_facts_stored_as_json_string(self):
+        """update_recent_facts() must store a JSON STRING (not a Python list)
+        so load_recent_facts()'s json.loads() round-trip stays valid. Also
+        pin that the trimmed contents are the LAST N (not the first N) —
+        the slice contract that load_recent_facts callers depend on for
+        recency ordering."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        facts = [{"id": str(i), "text": f"fact {i}"} for i in range(30)]
+        await buf.update_recent_facts("s1", facts, max_count=5)
+
+        # The buffer stores via redis.set(...) which the _FakeRedis routes to
+        # the _kv map. There is exactly one matching key.
+        assert len(redis._kv) == 1
+        stored_value = next(iter(redis._kv.values()))
+        # Type contract: serialized JSON string, not a Python list/dict.
+        assert isinstance(stored_value, str)
+
+        # JSON round-trip yields exactly the LAST 5 (facts[25:30]).
+        parsed = json.loads(stored_value)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 5
+        assert [f["id"] for f in parsed] == ["25", "26", "27", "28", "29"]
 
     async def test_check_timeout_flush(self):
         redis = _FakeRedis()
@@ -1072,3 +1166,97 @@ class TestDecisionDomainExtraction:
         if facade.store.called:
             stored_fact = facade.store.call_args[0][0]
             assert stored_fact.decision_domain == "financial"
+
+
+class TestTurnIngestTraceIdentity:
+    """TODO-8-R1-001 — C1.1 regression coverage.
+
+    C1.1 added ``session_id`` to the ``MEMORY_CLASS_ASSIGNED`` and
+    ``FACT_SUPERSEDED`` trace events but landed without test coverage.
+    Without these tests, a regression could silently drop the field again
+    and the only signal would be missing rows in
+    ``/trace/session/<id>/timeline`` — a hard-to-spot symptom that R1
+    almost shipped. Both tests pin the conversion shape (string in →
+    UUID on the TraceEvent) used at pipeline.py:287 and pipeline.py:334.
+    """
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_memory_class_assigned_carries_session_id(self, mock_cognee):
+        """MEMORY_CLASS_ASSIGNED trace event includes session_id (UUID)."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        trace = _make_trace()
+        pipe = _make_pipeline(trace=trace)
+        sid = uuid.uuid4()
+        messages = [{"role": "user", "content": "I prefer Python for all projects"}]
+        await pipe.run("session:test", messages, session_id=str(sid))
+
+        mc_events = [
+            call.args[0]
+            for call in trace.append_event.call_args_list
+            if call.args and call.args[0].event_type == TraceEventType.MEMORY_CLASS_ASSIGNED
+        ]
+        assert len(mc_events) >= 1, "MEMORY_CLASS_ASSIGNED event must be emitted when classes are assigned"
+        for ev in mc_events:
+            assert ev.session_id == sid, (
+                f"MEMORY_CLASS_ASSIGNED missing session_id (expected {sid}, got {ev.session_id})"
+            )
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_fact_superseded_carries_session_id(self, mock_cognee):
+        """FACT_SUPERSEDED trace event includes session_id (UUID)."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+
+        # Existing recent_fact in buffer that the new fact will supersede.
+        old_fact_id = str(uuid.uuid4())
+        recent_facts = [{"id": old_fact_id, "text": "Old preference", "category": "preference"}]
+        buffer = _make_buffer(recent_facts=recent_facts)
+
+        # LLM returns a fact that supersedes index 0.
+        llm = _make_llm(facts=[{
+            "text": "User prefers TypeScript over Python",
+            "category": "preference",
+            "source_turns": [0],
+            "supersedes_index": 0,
+        }])
+
+        trace = _make_trace()
+        pipe = _make_pipeline(llm=llm, trace=trace, buffer=buffer)
+        sid = uuid.uuid4()
+        messages = [{"role": "user", "content": "Switching from Python to TypeScript"}]
+        await pipe.run("session:test", messages, session_id=str(sid))
+
+        fs_events = [
+            call.args[0]
+            for call in trace.append_event.call_args_list
+            if call.args and call.args[0].event_type == TraceEventType.FACT_SUPERSEDED
+        ]
+        assert len(fs_events) >= 1, "FACT_SUPERSEDED event must be emitted when supersession occurs"
+        for ev in fs_events:
+            assert ev.session_id == sid, (
+                f"FACT_SUPERSEDED missing session_id (expected {sid}, got {ev.session_id})"
+            )
+
+
+class TestTurnIngestPipelineErrorMetric:
+    """Gap #13: inc_pipeline('turn_ingest', 'error') must fire when run() raises."""
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.extract_facts")
+    async def test_inc_pipeline_error_on_run_exception(self, mock_extract, mock_cognee):
+        """inc_pipeline('turn_ingest', 'error') fires and exception re-raises."""
+        mock_extract.side_effect = RuntimeError("LLM extraction exploded")
+        metrics = MagicMock()
+        pipe = TurnIngestPipeline(
+            memory_facade=_make_facade(),
+            actor_registry=MagicMock(),
+            embedding_service=_make_embeddings(),
+            llm_client=_make_llm(),
+            trace_ledger=_make_trace(),
+            config=_make_config(),
+            metrics=metrics,
+        )
+        with pytest.raises(RuntimeError, match="LLM extraction exploded"):
+            await pipe.run("sk", [{"role": "user", "content": "hello"}])
+        metrics.inc_pipeline.assert_called_once_with("turn_ingest", "error")

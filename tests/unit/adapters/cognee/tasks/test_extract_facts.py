@@ -243,6 +243,46 @@ class TestExtractFacts:
         assert "Prioritize user privacy" in system_prompt
         assert "GOAL STATUS HINTS" in system_prompt
 
+    async def test_include_persistent_goals_flag_ignored(self):
+        """TF-05-014 #1212: ``GoalInjectionConfig.include_persistent_goals``
+        is declared on the schema but NEVER read by the extract_facts
+        task — setting it to ``False`` does not prevent persistent goals
+        from being injected.
+
+        Pins the dead-config gap at ``extract_facts.py:266-273``: the
+        only attributes consulted are ``enabled``, ``max_session_goals``,
+        and ``max_persistent_goals``. ``include_persistent_goals`` is a
+        no-op today. Operators flipping the flag expecting persistent
+        goals to drop out of the prompt would see no behavioral change
+        — silent gap.
+
+        Test approach: pass a ``GoalInjectionConfig`` with
+        ``include_persistent_goals=False`` AND a non-empty
+        ``persistent_goals`` list, then assert the persistent goal title
+        STILL appears in the prompt. When the gap is closed (the
+        extract_facts code is updated to honor the flag), this test
+        will fail and should be inverted (assert NOT in prompt) along
+        with deleting this docstring.
+        """
+        from elephantbroker.schemas.config import GoalInjectionConfig
+
+        llm = _make_llm()
+        config = _make_config()
+        # Flag set to False — would suppress persistent goals if honored.
+        injection_cfg = GoalInjectionConfig(include_persistent_goals=False)
+        assert injection_cfg.include_persistent_goals is False
+        messages = [{"role": "user", "content": "Working on the migration"}]
+        await extract_facts(
+            messages, [], llm, config,
+            active_session_goals=[{"title": "Migrate to PostgreSQL 16"}],
+            persistent_goals=[{"title": "Prioritize user privacy"}],
+            goal_injection_config=injection_cfg,
+        )
+        system_prompt = llm.complete_json.call_args[0][0]
+        # Gap pin: persistent goals appear despite the flag being False.
+        assert "PERSISTENT GOALS" in system_prompt
+        assert "Prioritize user privacy" in system_prompt
+
     async def test_hint_types_enumerated_in_prompt(self):
         """TD-39 Issue A: prompt must name all 6 hint types with per-type guidance,
         not just the 3-type summary (completed/blocked/progressed) that starved the

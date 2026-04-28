@@ -773,3 +773,34 @@ class TestMissingEbId:
         assert len(goal_items) == 1
         parsed = uuid.UUID(goal_items[0].id)
         assert parsed.version == 4
+
+
+# ---------------------------------------------------------------------------
+# Gap #12: inc_procedure_qualified fires for each qualified procedure
+# ---------------------------------------------------------------------------
+
+
+class TestProcedureQualifiedMetric:
+    async def test_inc_procedure_qualified_fires_per_procedure(self):
+        """Gap #12: inc_procedure_qualified() count matches qualified procedures.
+
+        TODO-8-R1-018 / TODO-8-R1-021: post-fix, the per-item loop is
+        batched into a single call with ``count=N``. The contract Gap
+        #12 pinned ("the metric reflects N qualifications when N
+        procedures qualify") is preserved at the Prometheus level
+        (``Counter.inc(N)`` is equivalent to N calls to ``inc(1)``);
+        only the in-process call shape changes from N invocations to
+        one ``inc_procedure_qualified(count=N)``.
+        """
+        graph = AsyncMock()
+        graph.query_cypher = AsyncMock(return_value=[
+            {"props": {"eb_id": str(uuid.uuid4()), "name": "proc-a", "description": "A"}},
+            {"props": {"eb_id": str(uuid.uuid4()), "name": "proc-b", "description": "B"}},
+        ])
+        metrics = MagicMock()
+        gen = _make_generator(graph=graph)
+        gen._metrics = metrics
+        _, direct_items = await gen.generate(**_session_args())
+        proc_items = [i for i in direct_items if i.source_type == "procedure"]
+        assert len(proc_items) == 2
+        metrics.inc_procedure_qualified.assert_called_once_with(count=2)

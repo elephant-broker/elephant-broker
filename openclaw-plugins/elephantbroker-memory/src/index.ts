@@ -43,6 +43,7 @@ export function register(api: PluginAPI) {
   const gatewayId = cfg.gatewayId || process.env.EB_GATEWAY_ID;
   const gatewayShortName = cfg.gatewayShortName || process.env.EB_GATEWAY_SHORT_NAME;
   const client = new ElephantBrokerClient(baseUrl, gatewayId, gatewayShortName);
+  client.setProfileName(profileName);
 
   // GF-06: populate actor ID from config/env as fallback
   const configActorId = cfg.actorId || process.env.EB_ACTOR_ID;

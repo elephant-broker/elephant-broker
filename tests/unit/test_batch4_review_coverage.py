@@ -241,6 +241,7 @@ class TestPostWithRetry429:
         client._model = "test-model"
         client._endpoint = "http://localhost:8080"
         client._config = config
+        client._metrics = None
         client._max_retries = 3
         client._retry_backoffs = [0.0, 0.0, 0.0]  # no actual delays in tests
         client._client = AsyncMock()
