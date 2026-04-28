@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -603,6 +604,23 @@ class TestIngestBuffer:
         flushed2 = await buf.flush("s1")
         assert flushed2 == []
 
+    async def test_flush_sets_last_flush_timestamp(self):
+        """flush() must update _last_flush[sk] so check_timeout_flush() reads
+        a real elapsed-since-flush window. Regression guard against future
+        refactors that drop the bookkeeping."""
+        redis = _FakeRedis()
+        config = self._make_config(ingest_batch_size=10)
+        buf = IngestBuffer(redis, config)
+        # Pre-flush: session_key absent from the bookkeeping dict.
+        assert "s1" not in buf._last_flush
+        await buf.add_messages("s1", [{"role": "user", "content": "m"}])
+        before = time.time()
+        await buf.flush("s1")
+        after = time.time()
+        assert "s1" in buf._last_flush
+        # Stamp must fall in the window we observed around the flush call.
+        assert before <= buf._last_flush["s1"] <= after
+
     async def test_load_recent_facts_empty(self):
         redis = _FakeRedis()
         config = self._make_config()
@@ -627,6 +645,31 @@ class TestIngestBuffer:
         await buf.update_recent_facts("s1", facts, max_count=5)
         loaded = await buf.load_recent_facts("s1")
         assert len(loaded) == 5
+
+    async def test_recent_facts_stored_as_json_string(self):
+        """update_recent_facts() must store a JSON STRING (not a Python list)
+        so load_recent_facts()'s json.loads() round-trip stays valid. Also
+        pin that the trimmed contents are the LAST N (not the first N) —
+        the slice contract that load_recent_facts callers depend on for
+        recency ordering."""
+        redis = _FakeRedis()
+        config = self._make_config()
+        buf = IngestBuffer(redis, config)
+        facts = [{"id": str(i), "text": f"fact {i}"} for i in range(30)]
+        await buf.update_recent_facts("s1", facts, max_count=5)
+
+        # The buffer stores via redis.set(...) which the _FakeRedis routes to
+        # the _kv map. There is exactly one matching key.
+        assert len(redis._kv) == 1
+        stored_value = next(iter(redis._kv.values()))
+        # Type contract: serialized JSON string, not a Python list/dict.
+        assert isinstance(stored_value, str)
+
+        # JSON round-trip yields exactly the LAST 5 (facts[25:30]).
+        parsed = json.loads(stored_value)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 5
+        assert [f["id"] for f in parsed] == ["25", "26", "27", "28", "29"]
 
     async def test_check_timeout_flush(self):
         redis = _FakeRedis()
