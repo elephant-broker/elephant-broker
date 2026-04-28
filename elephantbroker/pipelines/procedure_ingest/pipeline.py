@@ -36,7 +36,22 @@ class ProcedureIngestPipeline:
             if not procedure.name:
                 raise ValueError("Procedure name is required")
 
-            # Check existing
+            # Check existing.
+            #
+            # C3.1: previous code reconstructed `ProcedureDataPoint(**existing_props)`
+            # on raw Neo4j properties without `clean_graph_props()`. Reconstruction
+            # raised a Pydantic ValidationError on the Cognee-injected `_metadata` /
+            # `_id` keys, which the bare `except Exception: pass` silently swallowed —
+            # so version detection always fell through to `is_new=True, version=1`
+            # even when an older version of the same procedure existed.
+            #
+            # We only need `dp_version` (to increment) and `eb_id` (for the
+            # SUPERSEDES edge below, which already reads existing_props["eb_id"]
+            # directly without any reconstruction). Reading both via dict lookups
+            # avoids the broken reconstruction path entirely. The `except` is
+            # narrowed to `(KeyError, TypeError)` so graph backend exceptions
+            # (network, neo4j down) propagate to the outer error handler at
+            # line 111 instead of silently degrading to is_new=True.
             previous_version = None
             is_new = True
             existing_props = None
@@ -52,11 +67,10 @@ class ProcedureIngestPipeline:
                 )
                 if records:
                     existing_props = records[0]["props"]
-                    existing = ProcedureDataPoint(**existing_props)
-                    previous_version = existing.dp_version
+                    previous_version = existing_props.get("dp_version", 1)
                     procedure.version = previous_version + 1
                     is_new = False
-            except Exception:
+            except (KeyError, TypeError):
                 pass
 
             # Stamp gateway and store via Cognee add_data_points
