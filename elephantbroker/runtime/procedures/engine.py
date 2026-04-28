@@ -250,6 +250,8 @@ class ProcedureEngine(IProcedureEngine):
                     procedure_ids=[execution.procedure_id],
                     payload={"action": "completed", "execution_id": str(execution.execution_id)},
                 ))
+                if self._metrics:
+                    self._metrics.inc_procedure_completed()
             return result
 
         # Fallback: no evidence engine
