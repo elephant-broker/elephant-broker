@@ -419,24 +419,25 @@ async def ingest_messages(body: IngestMessagesRequest, request: Request):
     # to prevent double-extraction.
     container = get_container(request)
     if container.context_lifecycle is not None:
-        # TODO-8-R1-012 — 4-reviewer consensus (LT + interop + BS + BL):
+        # TODO-8-R1-012 — 4-reviewer R1 consensus (LT + interop + BS + BL):
         # ``inc_buffer_flush("gate_skip_full_mode")`` was semantic noise on
         # a NON-flush path. ``eb_ingest_gate_skips_total`` already captures
         # this exact event with its own ``reason`` label; firing
         # ``eb_ingest_buffer_flushes_total`` here distorted flush-rate
         # dashboards by counting gate skips as flushes. Removed.
+        #
+        # TODO-8-600 — R2 carry-over (LT): the matching
+        # ``INGEST_BUFFER_FLUSH`` trace event on the same gate-skip path
+        # was left behind in R1. Same reasoning: this is NOT a buffer
+        # flush — it is a gate skip. Emitting INGEST_BUFFER_FLUSH here
+        # poisons /trace?event_type=INGEST_BUFFER_FLUSH queries with
+        # non-flush events and confuses session-timeline rendering. The
+        # gate skip is fully captured by ``eb_ingest_gate_skips_total``;
+        # if a future need arises for a per-skip trace event, the right
+        # answer is to add a dedicated ``INGEST_GATE_SKIPPED`` enum
+        # value, not to overload INGEST_BUFFER_FLUSH.
         if container.metrics_ctx:
             container.metrics_ctx.inc_ingest_gate_skip("full_mode")
-        if container.trace_ledger:
-            from elephantbroker.schemas.trace import TraceEvent, TraceEventType
-            await container.trace_ledger.append_event(TraceEvent(
-                event_type=TraceEventType.INGEST_BUFFER_FLUSH,
-                session_key=body.session_key,
-                session_id=body.session_id,
-                gateway_id=getattr(request.state, "gateway_id", ""),
-                payload={"action": "gate_skip_full_mode", "session_key": body.session_key,
-                         "message_count": len(body.messages)},
-            ))
         logger.debug("ingest-messages: FULL mode, skipping buffer (lifecycle active) session_key=%s", body.session_key)
         return JSONResponse(
             status_code=202,

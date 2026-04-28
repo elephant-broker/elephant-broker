@@ -85,8 +85,26 @@ class TestIngestGate:
         # fire (the buffer is not flushed in this branch).
         container.metrics_ctx.inc_buffer_flush.assert_not_called()
 
-    async def test_ingest_gate_trace_event_includes_session_id(self, client, container):
-        """TODO-11-006: INGEST_BUFFER_FLUSH trace event includes session_id."""
+    async def test_ingest_gate_does_not_emit_buffer_flush_trace(self, client, container):
+        """TODO-8-600 — R2 carry-over (LT): gate-skip path must NOT emit
+        ``INGEST_BUFFER_FLUSH``.
+
+        Pre-R2 this path emitted ``INGEST_BUFFER_FLUSH`` with payload
+        ``action=gate_skip_full_mode`` (the prior ``test_ingest_gate_trace_event_includes_session_id``
+        pinned that behaviour as TODO-11-006). The R1 fix removed the
+        matching ``inc_buffer_flush`` metric (TODO-8-R1-012); R2 carries
+        the trace-event removal. Reason: gate skip is NOT a buffer flush
+        — emitting INGEST_BUFFER_FLUSH here poisons
+        ``/trace?event_type=INGEST_BUFFER_FLUSH`` queries with non-flush
+        events and confuses session-timeline rendering. The gate skip is
+        captured by ``eb_ingest_gate_skips_total`` on the metric side
+        (no equivalent trace surface today; if one is needed later, a
+        dedicated ``INGEST_GATE_SKIPPED`` enum value is the right path,
+        not overloading INGEST_BUFFER_FLUSH).
+
+        This test pins the post-R2 contract: zero INGEST_BUFFER_FLUSH
+        events on the gate-skip path.
+        """
         container.trace_ledger.append_event = AsyncMock(side_effect=lambda e: e)
 
         r = await client.post(
@@ -99,14 +117,15 @@ class TestIngestGate:
         )
         assert r.status_code == 202
 
-        # Find INGEST_BUFFER_FLUSH among captured append_event calls
+        # Post-R2: NO INGEST_BUFFER_FLUSH on gate-skip path.
         flush_calls = [
             c[0][0] for c in container.trace_ledger.append_event.call_args_list
             if c[0][0].event_type == TraceEventType.INGEST_BUFFER_FLUSH
         ]
-        assert len(flush_calls) >= 1
-        assert str(flush_calls[0].session_id) == "00000000-0000-0000-0000-000000000001"
-        assert flush_calls[0].session_key == "agent:main:main"
+        assert flush_calls == [], (
+            f"gate-skip path must NOT emit INGEST_BUFFER_FLUSH; "
+            f"observed {len(flush_calls)} event(s)"
+        )
 
     async def test_ingest_gate_no_metrics_ctx(self, client, container):
         """Gate still works when metrics_ctx is None — no metric emitted, no crash."""
