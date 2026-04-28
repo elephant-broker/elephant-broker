@@ -276,6 +276,11 @@ class TurnIngestPipeline:
                                 fact_source = uuid.UUID(messages[turn_idx]["actor_id"])
                                 if self._metrics:
                                     self._metrics.inc_fact_attribution(role)
+                            # User messages without a resolvable actor_id intentionally
+                            # do NOT increment eb_fact_attribution_total — fact_source
+                            # silently falls back to the request-level source_actor_id,
+                            # so no attribution actually happened. Counting the
+                            # fall-through would inflate the metric with non-events.
 
                 fact = FactAssertion(
                     text=rf["text"],

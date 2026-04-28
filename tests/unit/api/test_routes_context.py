@@ -1,4 +1,5 @@
 """Tests for context routes."""
+import logging
 import uuid
 from unittest.mock import AsyncMock
 
@@ -194,8 +195,6 @@ class TestContextRoutes:
         backward compatibility only (GF-15) — TS plugins should call
         /sessions/end instead. The route logs a DEPRECATED message at
         INFO level on every invocation. Pins context.py:172-176."""
-        import logging
-
         body = {"session_key": "agent:main:main", "session_id": "sid-1"}
         with caplog.at_level(logging.INFO, logger="elephantbroker.api.routes.context"):
             r = await client.post("/context/dispose", json=body)
@@ -360,6 +359,8 @@ class TestContextRoutes:
         from the parent's session_children SET — the child is left orphaned in
         the SET until the per-key TTL elapses. Pins context.py:152-162 documented
         intentional scope (rollback is best-effort cleanup of the forward edge)."""
+        # TODO: rollback should clean children SET entry — tracked as known gap
+        # (TTL-based expiry is current workaround)
         from unittest.mock import AsyncMock
 
         redis = AsyncMock()

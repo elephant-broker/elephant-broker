@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1684,8 +1685,6 @@ class TestSubagentLifecycle:
         overwrites the prior session_parent mapping. Pins lifecycle.py:1104-1109
         — existing parent_A is detected, a warning is logged, and the new
         parent_B is written via setex (no abort, no exception)."""
-        import logging
-
         redis = AsyncMock()
         # First spawn sees no existing parent; second sees parent_A
         redis.get = AsyncMock(side_effect=[None, "agent:parentA:main"])
@@ -1735,8 +1734,14 @@ class TestSubagentLifecycle:
             child_session_key="agent:child:sub1", reason="completed",
         ))
 
-        # Trace fired
+        # Trace fired with the SUBAGENT_ENDED event type (TODO-9-002: pin the
+        # event_type explicitly — `assert_called_once()` alone would still
+        # pass if the trace path swapped to a different TraceEventType).
         trace.append_event.assert_called_once()
+        event = trace.append_event.call_args[0][0]
+        assert event.event_type == TraceEventType.SUBAGENT_ENDED, (
+            f"on_subagent_ended must emit SUBAGENT_ENDED; got {event.event_type}"
+        )
         # No Redis cleanup whatsoever
         redis.delete.assert_not_called()
         redis.srem.assert_not_called()
@@ -2849,6 +2854,43 @@ class TestReplaceOldToolOutputs:
         metrics.inc_tool_replacement.assert_not_called()
         metrics.inc_tool_tokens_saved.assert_not_called()
 
+    async def test_no_tokens_saved_metric_when_replacement_is_no_shorter(self):
+        """TODO-9-500: zero-savings edge — when the placeholder template is
+        the same length as (or longer than) the original tool output, the
+        ``if tokens_saved:`` guard at lifecycle.py:~1351 skips
+        inc_tool_tokens_saved while still firing inc_tool_replacement (the
+        intentional asymmetry documented at the call site).
+
+        Setup: short original (just above the 100-token min so it qualifies
+        for replacement) plus a long artifact summary that pushes the
+        rendered placeholder above the original char count → tokens_saved
+        rounds to 0 and the metric must NOT increment."""
+        # Original: 500 chars (125 tokens) — clears the default 100-tok min gate.
+        # Artifact summary: 500 chars; renders into a placeholder of ~600 chars
+        # (≥ original) so original_tokens (125) ≤ replacement_tokens (≥125)
+        # and `tokens_saved = max(0, …)` collapses to 0.
+        long_summary = "y" * 500
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 500, summary=long_summary,
+        )
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(session_artifact_store=artifact_store, metrics=metrics)
+        policy = make_profile_policy().assembly_placement
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 500, name="bash"),  # old → replaced
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="z" * 500, name="bash"),  # recent → kept
+        ]
+        await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # Replacement still fires (the message WAS swapped for a placeholder)…
+        metrics.inc_tool_replacement.assert_called_once_with("bash")
+        # …but no positive savings → eb_tool_tokens_saved_total stays put.
+        metrics.inc_tool_tokens_saved.assert_not_called()
+
     async def test_disabled_returns_messages_unchanged(self):
         """TF-06-010 V1: `replace_tool_outputs=False` is a hard kill switch.
         The function returns the input list unchanged without touching the
@@ -2865,9 +2907,12 @@ class TestReplaceOldToolOutputs:
         ]
         result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
 
-        # Returned list is the input list (or equivalent): no replacements,
-        # no artifact-store interaction at all.
-        assert result is msgs or result == msgs
+        # Returned reference is the SAME list object — the early-return at
+        # lifecycle.py:1320-1321 does `return messages` without copying,
+        # which the `is` identity check pins (TODO-9-504: previously was
+        # `is or ==`, which would have allowed a defensive list-copy
+        # regression to slip past the test).
+        assert result is msgs
         artifact_store.get_by_hash.assert_not_called()
 
     async def test_keep_last_n_zero_preserves_all_tool_outputs(self):
@@ -2904,7 +2949,9 @@ class TestReplaceOldToolOutputs:
         are eligible for placeholder replacement. Pins the slice math at
         lifecycle.py:1322-1324 against multi-keep configurations."""
         from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact_id = uuid.uuid4()
         artifact = SessionArtifact(
+            artifact_id=artifact_id,
             tool_name="bash", content="x" * 2000, summary="output summary",
         )
         artifact_store = AsyncMock()
@@ -2920,10 +2967,22 @@ class TestReplaceOldToolOutputs:
         ]
         result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
 
-        # First tool replaced, last two intact
-        assert "artifact_search" in result[0].content
+        # First tool replaced — pin the full placeholder template (TODO-9-505:
+        # tighter than `"artifact_search" in content`, which would still pass
+        # if the surrounding template prose drifted out of contract). The
+        # template lives at lifecycle.py:1337-1340.
+        expected_placeholder = (
+            f'[Captured output: bash — output summary\n'
+            f' → artifact_search("{artifact_id}") for full output]'
+        )
+        assert result[0].content == expected_placeholder
+        assert result[0].metadata.get("eb_replaced") == "true"
+        assert result[0].metadata.get("eb_artifact_id") == str(artifact_id)
+        # Last two tool messages preserved verbatim (no replacement)
         assert result[2].content == "y" * 2000
+        assert result[2].metadata.get("eb_replaced") is None
         assert result[3].content == "z" * 2000
+        assert result[3].metadata.get("eb_replaced") is None
 
 
 class TestDeduplicateConversation:

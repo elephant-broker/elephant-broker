@@ -329,7 +329,12 @@ class TestDisabledEngine:
         engine._metrics = MagicMock()  # spy
 
         result = await engine.preflight_check(SID, [_msg("anything")])
-        await asyncio.sleep(0.05)  # allow any background create_task to settle
+        # Defensive yield: the current disabled-path is synchronous (engine.py:109-110
+        # returns before any create_task), so the assertions below are already
+        # deterministic. Sleep is kept so that a future regression where someone
+        # schedules background work on the disabled path (e.g. telemetry) cannot
+        # silently pass this test by racing the assertions before the task runs.
+        await asyncio.sleep(0.05)
 
         assert result.outcome == GuardOutcome.PASS
         trace.append_event.assert_not_called()
@@ -583,18 +588,45 @@ class TestFinalization:
         )
 
         await engine.preflight_check(SID, [_msg("harmless test message")])
+        # _finalize emits the trace via asyncio.create_task (engine.py:954-958),
+        # so we yield to the loop to let the scheduled task run before
+        # asserting on the mock. asyncio.sleep(0) would suffice in CPython 3.11+
+        # but 0.05s matches the convention used by the sibling _finalize tests
+        # (test_trace_event_guard_passed / _triggered) and tolerates slow CI.
         await asyncio.sleep(0.05)
 
-        emitted = [
-            c.args[0].event_type for c in trace.append_event.call_args_list
-            if c.args
-        ]
+        emitted_calls = [c for c in trace.append_event.call_args_list if c.args]
+        emitted = [c.args[0].event_type for c in emitted_calls]
         assert TraceEventType.GUARD_NEAR_MISS in emitted, (
             f"WARN outcome must emit GUARD_NEAR_MISS via _finalize; got {emitted}"
         )
         # Mutually exclusive with the other two terminal trace types from _finalize
         assert TraceEventType.GUARD_TRIGGERED not in emitted
         assert TraceEventType.GUARD_PASSED not in emitted
+
+        # TODO-9-001: Phase 9 analytics consumes decision_domain + rules from
+        # the GUARD_NEAR_MISS payload (engine.py:954-958 emits both alongside
+        # `outcome`). Pin both fields against accidental removal.
+        near_miss_event = next(
+            c.args[0] for c in emitted_calls
+            if c.args[0].event_type == TraceEventType.GUARD_NEAR_MISS
+        )
+        assert "decision_domain" in near_miss_event.payload, (
+            f"GUARD_NEAR_MISS payload must carry decision_domain (Phase 9 input); "
+            f"got keys={list(near_miss_event.payload.keys())}"
+        )
+        assert "rules" in near_miss_event.payload, (
+            f"GUARD_NEAR_MISS payload must carry rules (Phase 9 input); "
+            f"got keys={list(near_miss_event.payload.keys())}"
+        )
+        # decision_domain is a non-empty string from AutonomyClassifier
+        # (engine.py:889 — "uncategorized" when no classification fires); rules
+        # is a list (possibly empty when only Layer 5 LLM produced the WARN).
+        assert isinstance(near_miss_event.payload["decision_domain"], str)
+        assert near_miss_event.payload["decision_domain"], (
+            "decision_domain must be a non-empty string"
+        )
+        assert isinstance(near_miss_event.payload["rules"], list)
 
 
 class TestLoadSessionRulesExtended:

@@ -201,8 +201,21 @@ class TestTurnIngestPipeline:
     async def test_emits_fact_attribution_metric_per_role(self, mock_cognee):
         """GAP-B8-2: when per-message attribution determines a fact's source
         from `messages[source_turns[0]].role`, emit `eb_fact_attribution_total`
-        with the role label. Three label values are valid: "assistant", "tool",
-        "user". Falls through silently when no source_turns or out-of-range."""
+        with the role label.
+
+        Label semantics (TODO-9-200 — clarification of earlier doc imprecision):
+        - "assistant" / "tool" — fire on every fact whose source turn is an
+          agent message (these branches at pipeline.py:271-274 do not gate
+          on additional fields).
+        - "user" — fires ONLY when the source `user` message carries an
+          `actor_id` (pipeline.py:275-278 elif). User messages without an
+          actor_id silently fall through with NO metric increment so that
+          `eb_fact_attribution_total{role="user"}` counts ACTUAL attributions,
+          not non-events. The negative path is covered by
+          ``test_no_fact_attribution_metric_for_user_without_actor_id`` below.
+
+        Falls through silently in two other cases too: no source_turns array,
+        or source_turns[0] is out-of-range relative to messages."""
         mock_cognee.add = AsyncMock()
         mock_cognee.cognify = AsyncMock()
 
@@ -247,6 +260,35 @@ class TestTurnIngestPipeline:
         await pipe.run(
             "session:test",
             [{"role": "user", "content": "x", "actor_id": str(uuid.uuid4())}],
+        )
+
+        metrics.inc_fact_attribution.assert_not_called()
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_no_fact_attribution_metric_for_user_without_actor_id(self, mock_cognee):
+        """TODO-9-200: GAP-B8-2 negative case for the `user`-role branch —
+        when the source-turn is a user message that carries NO ``actor_id``,
+        attribution silently falls back to the request-level
+        ``source_actor_id`` and inc_fact_attribution is NOT emitted.
+        Pins pipeline.py:275 elif gate (`role == "user" and …get("actor_id")`)
+        — without the gate, every user-sourced fact would inflate
+        ``eb_fact_attribution_total{role="user"}`` with non-attributions."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        metrics = MagicMock()
+        llm = _make_llm(facts=[
+            {"text": "fact from anonymous user msg", "category": "event",
+             "source_turns": [0], "supersedes_index": -1},
+        ])
+        pipe = _make_pipeline(llm=llm, metrics=metrics)
+
+        # agent_key IS provided → the per-message attribution branch IS entered;
+        # the user message intentionally omits `actor_id` → the elif at
+        # pipeline.py:275 does not match → metric is NOT emitted.
+        await pipe.run(
+            "session:test",
+            [{"role": "user", "content": "hello"}],  # no actor_id key
+            agent_key="test-gw:main",
         )
 
         metrics.inc_fact_attribution.assert_not_called()
