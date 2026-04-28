@@ -309,6 +309,68 @@ class TestLimits:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_max_subgoals_counts_across_session(self):
+        """TF-05-008 #513: ``max_subgoals_per_session`` counts ALL subgoals
+        across every parent, not per-parent.
+
+        Pins ``goal_refinement.py:304`` —
+        ``subgoal_count = sum(1 for g in session_goals if g.parent_goal_id is not None)``
+        — which scans every goal in the session, not just children of the
+        active parent. Sibling test ``test_subgoal_limit_enforced`` covers
+        the per-parent case (2 children of the same parent at a limit of
+        2); this one covers the cross-parent case (1 child each under two
+        different parents — total 2 children — also blocks at limit 2).
+        A future regression that reverts to per-parent counting (e.g.
+        ``g.parent_goal_id == parent.id``) would let the third sibling
+        through here while still passing the per-parent test.
+        """
+        config = GoalRefinementConfig(max_subgoals_per_session=2)
+        task = _make_task(config=config)
+        parent_a = make_goal_state(title="Parent A")
+        parent_b = make_goal_state(title="Parent B")
+        # One child under each of two different parents — total 2 subgoals,
+        # at the per-session limit of 2.
+        child_a = make_goal_state(parent_goal_id=parent_a.id, title="Child of A")
+        child_b = make_goal_state(parent_goal_id=parent_b.id, title="Child of B")
+        all_goals = [parent_a, parent_b, child_a, child_b]
+        # Try to add a third child under parent_a — would succeed if
+        # counting were per-parent, must fail because counting is global.
+        result = await task.process_hint(
+            parent_a, "new_subgoal", "one more under A",
+            session_goals=all_goals,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_subgoal_without_llm_graceful_degradation(self):
+        """TF-05-008 #514: ``new_subgoal`` without any LLM client falls
+        through to a simple ``GoalState(title=evidence[:100], ...)``.
+
+        Pins ``goal_refinement.py:309-319``: when both ``self._cheap_client``
+        and ``self._llm`` are unset (legacy callers / tests that build
+        ``GoalRefinementTask`` without an LLM), the path must not raise —
+        it constructs a subgoal whose title is the first 100 chars of the
+        evidence text. Sibling test ``test_new_subgoal_without_llm_uses_evidence``
+        covers the short-evidence happy path (16-char input round-trips
+        unchanged); this one specifically pins the ``[:100]`` slice for
+        long evidence, which a future refactor that drops the slice (e.g.
+        ``title=evidence`` or ``title=evidence[:80]``) would silently
+        widen or narrow.
+        """
+        task = _make_task(llm=None)
+        parent = make_goal_state()
+        # 150-char evidence — must be truncated to exactly 100 chars.
+        long_evidence = "a" * 150
+        result = await task.process_hint(
+            parent, "new_subgoal", long_evidence,
+            session_goals=[parent],
+        )
+        assert result is not None
+        assert result.title == "a" * 100
+        assert len(result.title) == 100
+        assert result.parent_goal_id == parent.id
+
+    @pytest.mark.asyncio
     async def test_disabled_hints_return_none(self):
         config = GoalRefinementConfig(hints_enabled=False)
         task = _make_task(config=config)
@@ -395,6 +457,42 @@ class TestHierarchyConfidence:
         assert result.confidence == pytest.approx(0.5)
         assert parent.confidence == pytest.approx(0.8)
 
+    @pytest.mark.asyncio
+    async def test_completed_hint_parent_confidence_never_decreases(self):
+        """TF-05-008 #517: completed-child hint uses
+        ``max(parent.confidence, ratio)`` — parent confidence cannot be
+        regressed by a low completion ratio.
+
+        Pins ``goal_refinement.py:168``:
+        ``parent.confidence = max(parent.confidence, completed_ratio)``.
+        A future regression that drops the ``max(...)`` (e.g. plain
+        assignment ``parent.confidence = completed_ratio``) would
+        silently demote a high-confidence parent when only a small
+        fraction of its children are complete. We set parent.confidence
+        to 0.9 with three children where only one is COMPLETED before
+        the hint fires (ratio = 1/3 ≈ 0.333, well below 0.9), then
+        complete one of the ACTIVE ones — final ratio jumps to 2/3 ≈
+        0.667, still below 0.9. parent.confidence must remain at 0.9.
+        """
+        task = _make_task()
+        parent = make_goal_state(confidence=0.9)
+        already_completed = make_goal_state(
+            parent_goal_id=parent.id, status=GoalStatus.COMPLETED,
+        )
+        target = make_goal_state(
+            parent_goal_id=parent.id, status=GoalStatus.ACTIVE,
+        )
+        still_active = make_goal_state(
+            parent_goal_id=parent.id, status=GoalStatus.ACTIVE,
+        )
+        all_goals = [parent, already_completed, target, still_active]
+        result = await task.process_hint(
+            target, "completed", "done", session_goals=all_goals,
+        )
+        assert result.status == GoalStatus.COMPLETED
+        # ratio = 2/3 ≈ 0.667 < 0.9 → max(0.9, 0.667) = 0.9 — no decrease.
+        assert parent.confidence == pytest.approx(0.9)
+
 
 # ===========================================================================
 # Dedup: Jaccard similarity
@@ -427,6 +525,39 @@ class TestDedup:
             parent.id, "deploy database migrations",
             [existing],
         )
+        assert result is True
+
+    def test_jaccard_dedup_same_parent_only(self):
+        """TF-05-008 #515: Jaccard dedup only compares siblings of the
+        same parent — a near-identical title under a DIFFERENT parent
+        does not block creation.
+
+        Pins ``goal_refinement.py:417-418``:
+        ``for g in session_goals: if g.parent_goal_id == parent_id: ...``
+        — the parent_id check is the load-bearing line. A future
+        regression that drops the filter (e.g. ``for g in session_goals:
+        existing_tokens = ...``) would block legitimate cross-parent
+        siblings. The test pairs a high-Jaccard title under a different
+        parent with an unrelated title under the active parent: the
+        existing ``test_duplicate_rejected`` would still pass under
+        broken (unfiltered) dedup, so this case is the discriminator.
+        """
+        task = _make_task()
+        parent_a = make_goal_state(title="Parent A")
+        parent_b = make_goal_state(title="Parent B")
+        # Existing subgoal under parent_b — its title would be a near-
+        # duplicate of the candidate, but it belongs to a different
+        # parent so dedup must ignore it.
+        existing_under_b = make_goal_state(
+            title="implement user authentication",
+            parent_goal_id=parent_b.id,
+        )
+        # Candidate under parent_a — same words as the existing one.
+        result = task._should_create_subgoal(
+            parent_a.id, "implement user authentication system",
+            [existing_under_b],
+        )
+        # No same-parent siblings → dedup is a no-op → must accept.
         assert result is True
 
 
