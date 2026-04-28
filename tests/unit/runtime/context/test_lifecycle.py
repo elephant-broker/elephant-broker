@@ -1639,6 +1639,70 @@ class TestSubagentLifecycle:
         assert event.payload["reason"] == "completed"
         assert event.payload["child_session_key"] == "agent:child:sub1"
 
+    async def test_prepare_subagent_spawn_overwrites_existing_parent_with_warning(self, caplog):
+        """TF-06-007 V1: re-spawning the same child under a different parent
+        overwrites the prior session_parent mapping. Pins lifecycle.py:1104-1109
+        — existing parent_A is detected, a warning is logged, and the new
+        parent_B is written via setex (no abort, no exception)."""
+        import logging
+
+        redis = AsyncMock()
+        # First spawn sees no existing parent; second sees parent_A
+        redis.get = AsyncMock(side_effect=[None, "agent:parentA:main"])
+        lc = _make_lifecycle(redis=redis)
+
+        # Spawn 1: no prior parent, no warning
+        result1 = await lc.prepare_subagent_spawn(SubagentSpawnParams(
+            parent_session_key="agent:parentA:main",
+            child_session_key="agent:child:sub1",
+        ))
+        assert result1.parent_mapping_stored is True
+
+        # Spawn 2: same child re-spawned under parent_B → warning + overwrite
+        with caplog.at_level(
+            logging.WARNING, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            result2 = await lc.prepare_subagent_spawn(SubagentSpawnParams(
+                parent_session_key="agent:parentB:main",
+                child_session_key="agent:child:sub1",
+            ))
+
+        assert result2.parent_mapping_stored is True
+        # Two setex calls (one per spawn); the second writes parent_B
+        assert redis.setex.call_count == 2
+        # setex call signature: (key, ttl, value) — value is positional arg index 2
+        assert redis.setex.call_args_list[-1].args[2] == "agent:parentB:main"
+        # Warning logged on second spawn (existing != new parent)
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "already has parent" in r.getMessage()
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly one overwrite warning; got {len(warnings)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    async def test_on_subagent_ended_does_not_delete_redis_keys(self):
+        """TF-06-007 V2: on_subagent_ended is trace-only — it does NOT delete
+        the session_parent mapping or remove the child from session_children.
+        Confirms the documented intentional behavior (lifecycle.py:1145-1152).
+        Cleanup, when needed, must go through subagent_rollback or session_end."""
+        redis = AsyncMock()
+        trace = AsyncMock()
+        lc = _make_lifecycle(redis=redis, trace_ledger=trace)
+
+        await lc.on_subagent_ended(SubagentEndedParams(
+            child_session_key="agent:child:sub1", reason="completed",
+        ))
+
+        # Trace fired
+        trace.append_event.assert_called_once()
+        # No Redis cleanup whatsoever
+        redis.delete.assert_not_called()
+        redis.srem.assert_not_called()
+        redis.expire.assert_not_called()
+        redis.setex.assert_not_called()
+
 
 # ======================================================================
 # 31  dispose

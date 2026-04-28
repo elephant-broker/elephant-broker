@@ -114,6 +114,23 @@ class TestSubagentEndedParams:
         p = SubagentEndedParams(child_session_key="c")
         assert p.reason == "completed"
 
+    def test_ignores_unknown_parent_session_key(self):
+        """TF-06-007 V4: SubagentEndedParams has NO `parent_session_key` field.
+        Unknown fields are silently ignored (Pydantic v2 default `extra='ignore'`).
+        Confirms the schema does not require, accept, or expose the parent key —
+        it lives only in Redis under the child's `session_parent` mapping."""
+        # 1. Field is not declared on the model
+        assert "parent_session_key" not in SubagentEndedParams.model_fields
+        # 2. Construction with an extraneous parent_session_key still succeeds…
+        p = SubagentEndedParams(
+            child_session_key="c",
+            reason="completed",
+            parent_session_key="agent:parent:main",  # type: ignore[call-arg]
+        )
+        # …but the value is dropped — not stored, not exposed in dump.
+        assert not hasattr(p, "parent_session_key")
+        assert "parent_session_key" not in p.model_dump()
+
 
 class TestSubagentSpawnResult:
     def test_defaults(self):

@@ -331,6 +331,35 @@ class TestContextRoutes:
         r = await client.post("/context/subagent/rollback", json=body)
         assert r.status_code == 200
 
+    async def test_subagent_rollback_orphans_children_set_entry(self, client, container):
+        """TF-06-007 V3 / known gap: POST /context/subagent/rollback only deletes
+        the session_parent mapping (rollback_key). It does NOT remove the child
+        from the parent's session_children SET — the child is left orphaned in
+        the SET until the per-key TTL elapses. Pins context.py:152-162 documented
+        intentional scope (rollback is best-effort cleanup of the forward edge)."""
+        from unittest.mock import AsyncMock
+
+        redis = AsyncMock()
+        container.redis = redis  # default conftest leaves it None
+        body = {
+            "parent_session_key": "agent:parent:main",
+            "child_session_key": "agent:child:sub1",
+            "rollback_key": "eb:test:session_parent:agent:child:sub1",
+        }
+        r = await client.post("/context/subagent/rollback", json=body)
+        assert r.status_code == 200
+        assert r.json() == {"rolled_back": True}
+
+        # Forward edge deleted (the parent mapping)
+        redis.delete.assert_called_once_with(body["rollback_key"])
+        # Reverse edge NOT touched — child remains in parent's session_children SET
+        redis.srem.assert_not_called()
+        # No write of any kind to the children SET key
+        for call in redis.mock_calls:
+            assert "session_children" not in str(call), (
+                f"rollback must not touch session_children; got call: {call}"
+            )
+
 
 class TestContextGatewayIsolation:
     """Gateway-ID enforcement tests for context routes."""
