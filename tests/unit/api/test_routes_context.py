@@ -189,6 +189,29 @@ class TestContextRoutes:
         r = await client.post("/context/dispose", json=body)
         assert r.status_code == 200
 
+    async def test_dispose_logs_deprecation_message(self, client, caplog):
+        """TF-06-012 V-deprecation: the /context/dispose route is kept for
+        backward compatibility only (GF-15) — TS plugins should call
+        /sessions/end instead. The route logs a DEPRECATED message at
+        INFO level on every invocation. Pins context.py:172-176."""
+        import logging
+
+        body = {"session_key": "agent:main:main", "session_id": "sid-1"}
+        with caplog.at_level(logging.INFO, logger="elephantbroker.api.routes.context"):
+            r = await client.post("/context/dispose", json=body)
+        assert r.status_code == 200
+
+        deprecation_logs = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and "DEPRECATED" in rec.getMessage()
+            and "/context/dispose" in rec.getMessage()
+        ]
+        assert len(deprecation_logs) == 1, (
+            f"expected exactly one deprecation log; got {len(deprecation_logs)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
     async def test_get_config(self, client):
         r = await client.get("/context/config")
         assert r.status_code == 200
