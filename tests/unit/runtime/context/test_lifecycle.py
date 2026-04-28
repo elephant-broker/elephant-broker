@@ -385,6 +385,46 @@ class TestIngestBatchTouchKeys:
         result = await lc.ingest_batch(params)
         assert result.ingested_count == 1  # Still succeeds
 
+    async def test_ingest_batch_emits_session_ttl_touch_metrics(self):
+        """TF-06-009 V3: on a successful TTL touch, lifecycle increments
+        eb_session_ttl_touch_total and observes eb_session_ttl_touch_keys
+        with the count of refreshed keys. Pins lifecycle.py:424-426."""
+        # Pipeline returns 7 hits out of 10 keys (3 didn't exist) → touched=7
+        pipe = MagicMock()
+        pipe.expire = MagicMock()
+        pipe.execute = AsyncMock(return_value=[1, 1, 0, 1, 1, 0, 1, 1, 0, 1])
+        redis = _make_redis_mock()
+        redis.pipeline = MagicMock(return_value=pipe)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(redis=redis, metrics=metrics)
+
+        params = IngestBatchParams(
+            session_key=SK, session_id=SID,
+            messages=[AgentMessage(role="user", content="hi")],
+        )
+        await lc.ingest_batch(params)
+
+        metrics.inc_session_ttl_touch.assert_called_once_with()
+        metrics.observe_session_ttl_touch_keys.assert_called_once_with(7)
+
+    async def test_ingest_batch_skips_ttl_touch_metrics_on_failure(self):
+        """TF-06-009 V3 negative: when the TTL pipeline raises, no touch
+        metrics are emitted (the except branch logs at DEBUG and exits).
+        Counterpart to test_ingest_batch_touch_failure_does_not_block."""
+        redis = _make_redis_mock()
+        redis.pipeline = MagicMock(side_effect=Exception("pipeline error"))
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(redis=redis, metrics=metrics)
+
+        params = IngestBatchParams(
+            session_key=SK, session_id=SID,
+            messages=[AgentMessage(role="user", content="hi")],
+        )
+        result = await lc.ingest_batch(params)
+        assert result.ingested_count == 1  # ingest still succeeds
+        metrics.inc_session_ttl_touch.assert_not_called()
+        metrics.observe_session_ttl_touch_keys.assert_not_called()
+
     async def test_ingest_batch_passes_profile_to_artifact_store(self):
         """BUG-4 caller: artifact store must receive session profile."""
         artifact_store = AsyncMock()
