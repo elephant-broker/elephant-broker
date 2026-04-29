@@ -36,6 +36,7 @@ class OpenClawClient:
         self._device_token = device_token
         self._ws = None
         self._pending: dict[str, asyncio.Future] = {}
+        self._deferred_chat_events: dict[str, dict] = {}
         self._listener_task: asyncio.Task | None = None
 
     @staticmethod
@@ -158,8 +159,11 @@ class OpenClawClient:
                     payload = msg.get("payload", {})
                     run_id = payload.get("runId")
                     state = payload.get("state")
-                    if state in ("final", "error") and run_id in self._pending:
-                        self._pending[run_id].set_result(payload)
+                    if state in ("final", "error"):
+                        if run_id and run_id in self._pending:
+                            self._pending[run_id].set_result(payload)
+                        elif run_id:
+                            self._deferred_chat_events[run_id] = payload
         except websockets.ConnectionClosed:
             pass
 
@@ -216,11 +220,24 @@ class OpenClawClient:
             params["thinking"] = thinking
         send_result = await self._rpc("sessions.send", params)
         run_id = send_result.get("runId")
+
         if not run_id:
-            return send_result
+            print(f"[DIAG] send_and_wait: no runId in initial response, retrying...")
+            for attempt in range(3):
+                await asyncio.sleep(2)
+                send_result = await self._rpc("sessions.send", params)
+                run_id = send_result.get("runId")
+                print(f"[DIAG] send_and_wait: retry {attempt+1}/3, runId={run_id}")
+                if run_id:
+                    break
+            if not run_id:
+                print("[DIAG] send_and_wait: giving up after 3 retries, no runId")
+                return send_result
 
         future = asyncio.get_running_loop().create_future()
         self._pending[run_id] = future
+        if run_id in self._deferred_chat_events:
+            future.set_result(self._deferred_chat_events.pop(run_id))
         try:
             result = await asyncio.wait_for(future, self.timeout)
         finally:
