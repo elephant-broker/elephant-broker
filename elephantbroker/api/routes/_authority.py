@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from elephantbroker.runtime.interfaces.actor_registry import IActorRegistry
 from elephantbroker.runtime.profiles.authority_store import AuthorityRuleStore
 from elephantbroker.schemas.actor import ActorRef, ActorType
+from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 # Actions allowed during bootstrap mode (empty actor graph).
 # R2-P7: add ``add_team_member`` / ``remove_team_member`` so the
@@ -87,6 +88,12 @@ async def check_authority(
     if actor.authority_level < min_level:
         if metrics:
             metrics.inc_authority_check(action, "denied")
+        if trace_ledger:
+            await trace_ledger.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                actor_ids=[aid],
+                payload={"action": action, "required_level": min_level, "actor_level": actor.authority_level},
+            ))
         raise HTTPException(
             status_code=403,
             detail=f"Requires authority_level >= {min_level} for action '{action}' "
@@ -106,6 +113,12 @@ async def check_authority(
         if actor_org != target_org_id:
             if metrics:
                 metrics.inc_authority_check(action, "denied")
+            if trace_ledger:
+                await trace_ledger.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    actor_ids=[aid],
+                    payload={"action": action, "reason": "org_mismatch", "actor_org": actor_org, "target_org": target_org_id},
+                ))
             raise HTTPException(
                 status_code=403,
                 detail=f"Actor not in target org: actor_org={actor_org}, target={target_org_id}",
@@ -117,6 +130,12 @@ async def check_authority(
         if target_team_id not in actor_team_ids:
             if metrics:
                 metrics.inc_authority_check(action, "denied")
+            if trace_ledger:
+                await trace_ledger.append_event(TraceEvent(
+                    event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                    actor_ids=[aid],
+                    payload={"action": action, "reason": "team_mismatch", "actor_teams": actor_team_ids, "target_team": target_team_id},
+                ))
             raise HTTPException(
                 status_code=403,
                 detail=f"Actor not on target team: actor_teams={actor_team_ids}, target={target_team_id}",
