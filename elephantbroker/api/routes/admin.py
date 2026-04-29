@@ -437,6 +437,8 @@ async def resolve_actor_by_handle(request: Request, handle: str = Query(...)):
 @router.post("/actors")
 async def register_actor(request: Request):
     body = await request.json()
+    if not body.get("display_name"):
+        raise HTTPException(status_code=422, detail="display_name is required and must be non-empty")
     await _auth(request, "register_actor")
     container = request.app.state.container
     from elephantbroker.schemas.actor import ActorRef, ActorType
