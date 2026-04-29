@@ -295,22 +295,9 @@ async def add_team_member(team_id: str, body: AddMemberRequest, request: Request
     try:
         actor_entity = await container.graph.get_entity(body.actor_id)
         if actor_entity:
-            current_ids = list(actor_entity.get("team_ids", []) or [])
-            if team_id not in current_ids:
-                current_ids.append(team_id)
-                dp = ActorDataPoint(
-                    id=uuid.UUID(body.actor_id),
-                    display_name=actor_entity.get("display_name", ""),
-                    actor_type=actor_entity.get("actor_type", "worker_agent"),
-                    authority_level=actor_entity.get("authority_level", 0),
-                    handles=list(actor_entity.get("handles", []) or []),
-                    org_id=actor_entity.get("org_id"),
-                    team_ids=current_ids,
-                    trust_level=actor_entity.get("trust_level", 0.5),
-                    tags=list(actor_entity.get("tags", []) or []),
-                    eb_id=body.actor_id,
-                    gateway_id=actor_entity.get("gateway_id", ""),
-                )
+            dp = ActorDataPoint.from_entity_dict(actor_entity)
+            if team_id not in dp.team_ids:
+                dp.team_ids = list(dp.team_ids) + [team_id]
                 await add_data_points([dp])
     except Exception as exc:
         logger.warning(
@@ -374,22 +361,9 @@ async def remove_team_member(team_id: str, actor_id: str, request: Request):
     try:
         actor_entity = await container.graph.get_entity(actor_id)
         if actor_entity:
-            current_ids = list(actor_entity.get("team_ids", []) or [])
-            if team_id in current_ids:
-                current_ids.remove(team_id)
-                dp = ActorDataPoint(
-                    id=uuid.UUID(actor_id),
-                    display_name=actor_entity.get("display_name", ""),
-                    actor_type=actor_entity.get("actor_type", "worker_agent"),
-                    authority_level=actor_entity.get("authority_level", 0),
-                    handles=list(actor_entity.get("handles", []) or []),
-                    org_id=actor_entity.get("org_id"),
-                    team_ids=current_ids,
-                    trust_level=actor_entity.get("trust_level", 0.5),
-                    tags=list(actor_entity.get("tags", []) or []),
-                    eb_id=actor_id,
-                    gateway_id=actor_entity.get("gateway_id", ""),
-                )
+            dp = ActorDataPoint.from_entity_dict(actor_entity)
+            if team_id in dp.team_ids:
+                dp.team_ids = [t for t in dp.team_ids if t != team_id]
                 await add_data_points([dp])
     except Exception as exc:
         logger.warning(

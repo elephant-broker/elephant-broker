@@ -225,20 +225,24 @@ class OpenClawClient:
         run_id = send_result.get("runId")
 
         if not run_id:
-            # Retry trade-off (TD documented): a missed runId means we re-send
-            # the full message, which is acceptable for our test infra (idempotent
-            # at the gateway layer) but not safe for production agents.
-            logger.debug("send_and_wait: no runId in initial response, retrying...")
-            for attempt in range(3):
-                await asyncio.sleep(2)
-                send_result = await self._rpc("sessions.send", params)
-                run_id = send_result.get("runId")
-                logger.debug("send_and_wait: retry %d/3, runId=%s", attempt + 1, run_id)
-                if run_id:
-                    break
-            if not run_id:
-                logger.debug("send_and_wait: giving up after 3 retries, no runId")
-                return send_result
+            # The RPC response omitted runId, but the gateway may still emit
+            # the chat-event over the WebSocket — the listener buffers events
+            # without a known pending future in ``_deferred_chat_events``.
+            # Wait briefly for that buffer to fill rather than re-issuing
+            # ``sessions.send`` (a resend would deliver the user message twice).
+            # Test-infra only: assumes a single in-flight send so any buffered
+            # entry must be ours.
+            logger.debug("send_and_wait: no runId in initial response, waiting for deferred chat event...")
+            for attempt in range(2):
+                await asyncio.sleep(3)
+                if self._deferred_chat_events:
+                    run_id, deferred_payload = next(iter(self._deferred_chat_events.items()))
+                    self._deferred_chat_events.pop(run_id)
+                    logger.debug("send_and_wait: consumed deferred event for runId=%s", run_id)
+                    return deferred_payload
+                logger.debug("send_and_wait: wait %d/2 — buffer still empty", attempt + 1)
+            logger.debug("send_and_wait: no deferred event after 2 waits, returning original response")
+            return send_result
 
         future = asyncio.get_running_loop().create_future()
         self._pending[run_id] = future

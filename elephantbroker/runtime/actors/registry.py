@@ -11,7 +11,7 @@ from elephantbroker.runtime.adapters.cognee.graph import GraphAdapter
 from elephantbroker.runtime.identity_utils import assert_same_gateway
 from elephantbroker.runtime.interfaces.actor_registry import IActorRegistry
 from elephantbroker.runtime.interfaces.trace_ledger import ITraceLedger
-from elephantbroker.schemas.actor import ActorRef, ActorRelationship, ActorType, RelationshipType
+from elephantbroker.schemas.actor import ActorRef, ActorRelationship, RelationshipType
 from elephantbroker.schemas.trace import TraceEvent, TraceEventType
 
 
@@ -87,43 +87,13 @@ class ActorRegistry(IActorRegistry):
                 payload={"handle": handle, "result": "found", "actor": entity.get("display_name", "")},
             )
         )
-        raw_team_ids = entity.get("team_ids", [])
-        if not raw_team_ids and entity.get("team_id"):
-            raw_team_ids = [entity["team_id"]]
-        return ActorRef(
-            id=uuid.UUID(entity["eb_id"]),
-            type=ActorType(entity["actor_type"]),
-            display_name=entity["display_name"],
-            authority_level=entity.get("authority_level", 0),
-            handles=entity.get("handles", []),
-            org_id=uuid.UUID(entity["org_id"]) if entity.get("org_id") else None,
-            team_ids=[uuid.UUID(t) if not isinstance(t, uuid.UUID) else t for t in raw_team_ids],
-            trust_level=entity.get("trust_level", 0.5),
-            tags=entity.get("tags", []),
-            gateway_id=entity.get("gateway_id", ""),
-        )
+        return ActorDataPoint.from_entity_dict(entity).to_schema()
 
     async def resolve_actor(self, actor_id: uuid.UUID) -> ActorRef | None:
         entity = await self._graph.get_entity(str(actor_id))
         if entity is None:
             return None
-        # Reconstruct ActorRef from graph properties
-        # Backward compat: old Neo4j nodes have "team_id" (string), new have "team_ids" (list)
-        raw_team_ids = entity.get("team_ids", [])
-        if not raw_team_ids and entity.get("team_id"):
-            raw_team_ids = [entity["team_id"]]
-        return ActorRef(
-            id=uuid.UUID(entity["eb_id"]),
-            type=ActorType(entity["actor_type"]),
-            display_name=entity["display_name"],
-            authority_level=entity.get("authority_level", 0),
-            handles=entity.get("handles", []),
-            org_id=uuid.UUID(entity["org_id"]) if entity.get("org_id") else None,
-            team_ids=[uuid.UUID(t) if not isinstance(t, uuid.UUID) else t for t in raw_team_ids],
-            trust_level=entity.get("trust_level", 0.5),
-            tags=entity.get("tags", []),
-            gateway_id=entity.get("gateway_id", ""),
-        )
+        return ActorDataPoint.from_entity_dict(entity).to_schema()
 
     async def get_authority_chain(self, actor_id: uuid.UUID) -> list[ActorRef]:
         # Traverse SUPERVISES/REPORTS_TO edges upward
@@ -134,25 +104,10 @@ class ActorRegistry(IActorRegistry):
             "ORDER BY length(path)"
         )
         records = await self._graph.query_cypher(cypher, {"actor_id": str(actor_id), "gateway_id": self._gateway_id})
-        chain: list[ActorRef] = []
-        for rec in records:
-            props = rec["props"]
-            raw_tids = props.get("team_ids", [])
-            if not raw_tids and props.get("team_id"):
-                raw_tids = [props["team_id"]]
-            chain.append(ActorRef(
-                id=uuid.UUID(props["eb_id"]),
-                type=ActorType(props["actor_type"]),
-                display_name=props["display_name"],
-                authority_level=props.get("authority_level", 0),
-                handles=props.get("handles", []),
-                org_id=uuid.UUID(props["org_id"]) if props.get("org_id") else None,
-                team_ids=[uuid.UUID(t) if not isinstance(t, uuid.UUID) else t for t in raw_tids],
-                trust_level=props.get("trust_level", 0.5),
-                tags=props.get("tags", []),
-                gateway_id=props.get("gateway_id", ""),
-            ))
-        return chain
+        return [
+            ActorDataPoint.from_entity_dict(rec["props"]).to_schema()
+            for rec in records
+        ]
 
     async def get_relationships(self, actor_id: uuid.UUID) -> list[ActorRelationship]:
         cypher = (
