@@ -472,7 +472,7 @@ async def resolve_actor_by_handle(request: Request, handle: str = Query(...)):
 async def register_actor(request: Request):
     body = await request.json()
     await _auth(request, "register_actor")
-    if not (body.get("display_name") or "").strip():
+    if not str(body.get("display_name") or "").strip():
         raise HTTPException(status_code=422, detail="display_name is required and must be non-empty")
     container = request.app.state.container
     from elephantbroker.schemas.actor import ActorRef, ActorType

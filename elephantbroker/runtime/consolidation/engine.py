@@ -223,7 +223,7 @@ class ConsolidationEngine(IConsolidationEngine):
 
         Scoped to (org_id, gateway_id) pair. Protected by Redis distributed lock.
         """
-        resolved_profile_id = profile_id or getattr(self._config, "default_profile", "coding")
+        resolved_profile_id = profile_id or getattr(self._config, "default_profile", "coding") or "coding"
         report = ConsolidationReport(
             org_id=org_id, gateway_id=gateway_id, profile_id=resolved_profile_id,
         )
