@@ -9,7 +9,7 @@ import logging
 import uuid
 
 from cognee.tasks.storage import add_data_points
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from elephantbroker.api.routes._authority import check_authority
@@ -422,6 +422,16 @@ async def list_actors(request: Request, org_id: str | None = None):
     return [{"actor_id": r["props"].get("eb_id"), "display_name": r["props"].get("display_name"),
              "actor_type": r["props"].get("actor_type"), "authority_level": r["props"].get("authority_level", 0)}
             for r in records]
+
+
+@router.get("/actors/resolve")
+async def resolve_actor_by_handle(request: Request, handle: str = Query(...)):
+    await _auth(request, "register_actor")
+    container = request.app.state.container
+    actor = await container.actor_registry.resolve_by_handle(handle)
+    if actor is None:
+        raise HTTPException(status_code=404, detail=f"No actor found for handle: {handle}")
+    return actor.model_dump(mode="json")
 
 
 @router.post("/actors")
