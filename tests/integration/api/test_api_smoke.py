@@ -46,7 +46,7 @@ class TestAPISmokeTests:
     async def test_ready_endpoint(self, live_client):
         # Neo4j may accept TCP before auth is fully initialized; retry.
         last_data = None
-        for attempt in range(15):
+        for attempt in range(30):  # Neo4j may need 20+ seconds after TCP accept
             r = await live_client.get("/health/ready")
             assert r.status_code == 200
             data = r.json()
