@@ -8,7 +8,7 @@ from elephantbroker.runtime.profiles.presets import (
     RESEARCH_PROFILE,
     WORKER_PROFILE,
 )
-from elephantbroker.schemas.profile import GraphMode, IsolationLevel
+from elephantbroker.schemas.profile import GraphMode, IsolationLevel, IsolationScope
 
 
 class TestProfilePresets:
@@ -130,6 +130,98 @@ class TestProfilePresets:
                 f"{name}.autonomy.code_change drifted: "
                 f"expected {code}, got {autonomy.domain_levels.get('code_change')}"
             )
+
+    def test_per_profile_session_data_ttl_exact_values(self):
+        expected = {
+            "coding": 86400,
+            "research": 259200,
+            "managerial": 172800,
+            "worker": 86400,
+            "personal_assistant": 604800,
+        }
+        for name, want in expected.items():
+            got = PROFILE_PRESETS[name].session_data_ttl_seconds
+            assert got == want, f"{name}: expected {want}, got {got}"
+
+    def test_managerial_assembly_cadence_always(self):
+        assert PROFILE_PRESETS["managerial"].assembly_placement.goal_injection_cadence == "always"
+
+    def test_research_retrieval_vector_weights(self):
+        r = RESEARCH_PROFILE.retrieval
+        assert r.vector_weight == 0.5
+        assert r.vector_fetch_k == 25
+        assert RESEARCH_PROFILE.autorecall.retrieval.artifact_fetch_k == 15
+
+    def test_coding_retrieval_policy_values(self):
+        r = CODING_PROFILE.retrieval
+        assert r.graph_expansion_enabled is True
+        assert r.graph_expansion_weight == 0.1
+        assert r.graph_max_depth == 1
+        assert r.isolation_scope == IsolationScope.SESSION_KEY
+
+    def test_per_profile_autorecall_extraction_focus(self):
+        expected = {
+            "coding": ["code decisions", "architecture choices", "technical preferences", "tool configs", "error patterns"],
+            "research": ["findings", "hypotheses", "methodology", "data sources", "citations"],
+            "managerial": ["decisions", "delegations", "deadlines", "blockers", "team dynamics"],
+            "worker": ["task instructions", "tool outputs", "progress updates", "blockers"],
+            "personal_assistant": ["preferences", "habits", "schedules", "relationships", "reminders"],
+        }
+        for name, want in expected.items():
+            got = PROFILE_PRESETS[name].autorecall.extraction_focus
+            assert got == want, f"{name}: expected {want}, got {got}"
+
+    def test_worker_autorecall_superseded_confidence_factor(self):
+        assert WORKER_PROFILE.autorecall.superseded_confidence_factor == 0.2
+
+    def test_per_profile_guard_full_9_domain_levels(self):
+        from elephantbroker.schemas.guards import AutonomyLevel
+
+        AL = AutonomyLevel
+        expected = {
+            "coding": {
+                "financial": AL.HARD_STOP, "data_access": AL.APPROVE_FIRST,
+                "communication": AL.INFORM, "code_change": AL.AUTONOMOUS,
+                "scope_change": AL.INFORM, "resource": AL.AUTONOMOUS,
+                "info_share": AL.INFORM, "delegation": AL.AUTONOMOUS,
+                "record_mutation": AL.AUTONOMOUS,
+            },
+            "research": {
+                "financial": AL.APPROVE_FIRST, "data_access": AL.APPROVE_FIRST,
+                "communication": AL.INFORM, "code_change": AL.INFORM,
+                "scope_change": AL.INFORM, "resource": AL.AUTONOMOUS,
+                "info_share": AL.INFORM, "delegation": AL.INFORM,
+                "record_mutation": AL.INFORM,
+            },
+            "managerial": {
+                "financial": AL.APPROVE_FIRST, "data_access": AL.APPROVE_FIRST,
+                "communication": AL.APPROVE_FIRST, "code_change": AL.HARD_STOP,
+                "scope_change": AL.AUTONOMOUS, "resource": AL.INFORM,
+                "info_share": AL.APPROVE_FIRST, "delegation": AL.AUTONOMOUS,
+                "record_mutation": AL.INFORM,
+            },
+            "worker": {
+                "financial": AL.HARD_STOP, "data_access": AL.APPROVE_FIRST,
+                "communication": AL.INFORM, "code_change": AL.AUTONOMOUS,
+                "scope_change": AL.APPROVE_FIRST, "resource": AL.AUTONOMOUS,
+                "info_share": AL.INFORM, "delegation": AL.INFORM,
+                "record_mutation": AL.AUTONOMOUS,
+            },
+            "personal_assistant": {
+                "financial": AL.HARD_STOP, "data_access": AL.HARD_STOP,
+                "communication": AL.APPROVE_FIRST, "code_change": AL.APPROVE_FIRST,
+                "scope_change": AL.INFORM, "resource": AL.INFORM,
+                "info_share": AL.APPROVE_FIRST, "delegation": AL.INFORM,
+                "record_mutation": AL.INFORM,
+            },
+        }
+        for name, domains in expected.items():
+            autonomy = PROFILE_PRESETS[name].guards.autonomy
+            for domain, want in domains.items():
+                got = autonomy.domain_levels.get(domain)
+                assert got == want, (
+                    f"{name}.{domain}: expected {want}, got {got}"
+                )
 
     def test_per_profile_goal_reminder_interval_values(self):
         """TF-06-011 V-profiles: pin the per-profile goal_reminder_interval
