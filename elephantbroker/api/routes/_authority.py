@@ -78,6 +78,14 @@ async def check_authority(
     aid = uuid.UUID(str(actor_id)) if not isinstance(actor_id, uuid.UUID) else actor_id
     actor = await actor_registry.resolve_actor(aid)
     if actor is None:
+        if metrics:
+            metrics.inc_authority_check(action, "denied")
+        if trace_ledger:
+            await trace_ledger.append_event(TraceEvent(
+                event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
+                actor_ids=[aid],
+                payload={"action": action, "reason": "actor_not_found"},
+            ))
         raise HTTPException(status_code=404, detail=f"Actor not found: {actor_id}")
 
     # Load rule
@@ -92,7 +100,7 @@ async def check_authority(
             await trace_ledger.append_event(TraceEvent(
                 event_type=TraceEventType.AUTHORITY_CHECK_FAILED,
                 actor_ids=[aid],
-                payload={"action": action, "required_level": min_level, "actor_level": actor.authority_level},
+                payload={"action": action, "reason": "insufficient_level", "required_level": min_level, "actor_level": actor.authority_level},
             ))
         raise HTTPException(
             status_code=403,

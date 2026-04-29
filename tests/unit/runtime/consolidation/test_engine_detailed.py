@@ -154,6 +154,39 @@ class TestEngineGetReport:
         store.get_report.assert_called_once_with("report-1")
 
 
+class TestEngineDefaultProfileResolution:
+    """BUG-B9-4 regression — ensure profile_id=None resolves to the configured
+    default rather than skipping resolution entirely. Pre-fix, the engine ran
+    with ``profile=None`` and Stage 9 fell back to a hardcoded "coding" key,
+    diverging from any operator override.
+    """
+
+    async def test_profile_id_none_resolves_default(self):
+        registry = AsyncMock()
+        registry.resolve_profile = AsyncMock(return_value=None)
+        engine = _make_engine()
+        engine._profiles = registry
+        report = await engine.run_consolidation("org", "gw", profile_id=None)
+        registry.resolve_profile.assert_called_once()
+        call_args = registry.resolve_profile.call_args
+        # First positional arg is the resolved profile name
+        assert call_args.args[0] == "coding"
+        # Resolved id is reflected on the report and downstream context
+        assert report.profile_id == "coding"
+        # Report completed without crashing
+        assert report.completed_at is not None
+
+    async def test_profile_id_explicit_overrides_default(self):
+        registry = AsyncMock()
+        registry.resolve_profile = AsyncMock(return_value=None)
+        engine = _make_engine()
+        engine._profiles = registry
+        report = await engine.run_consolidation("org", "gw", profile_id="research")
+        registry.resolve_profile.assert_called_once()
+        assert registry.resolve_profile.call_args.args[0] == "research"
+        assert report.profile_id == "research"
+
+
 class TestApplyFactUpsertsPreservesCascadePointer:
     """TODO-5-008 — Site 6 of cascade-pointer-wipe cluster.
 

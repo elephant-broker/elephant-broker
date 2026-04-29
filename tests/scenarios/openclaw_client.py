@@ -5,11 +5,14 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import time
 import uuid
 from typing import AsyncIterator
 
 import websockets
+
+logger = logging.getLogger(__name__)
 
 
 class OpenClawClient:
@@ -222,16 +225,19 @@ class OpenClawClient:
         run_id = send_result.get("runId")
 
         if not run_id:
-            print(f"[DIAG] send_and_wait: no runId in initial response, retrying...")
+            # Retry trade-off (TD documented): a missed runId means we re-send
+            # the full message, which is acceptable for our test infra (idempotent
+            # at the gateway layer) but not safe for production agents.
+            logger.debug("send_and_wait: no runId in initial response, retrying...")
             for attempt in range(3):
                 await asyncio.sleep(2)
                 send_result = await self._rpc("sessions.send", params)
                 run_id = send_result.get("runId")
-                print(f"[DIAG] send_and_wait: retry {attempt+1}/3, runId={run_id}")
+                logger.debug("send_and_wait: retry %d/3, runId=%s", attempt + 1, run_id)
                 if run_id:
                     break
             if not run_id:
-                print("[DIAG] send_and_wait: giving up after 3 retries, no runId")
+                logger.debug("send_and_wait: giving up after 3 retries, no runId")
                 return send_result
 
         future = asyncio.get_running_loop().create_future()

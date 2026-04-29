@@ -137,3 +137,91 @@ class TestAuthorityChecks:
         reg = _mock_registry(actor)
         result = await check_authority(reg, auth_store, actor.id, "create_org")
         assert result.authority_level == 50
+
+
+class TestAuthorityTraceEvents:
+    """Verify AUTHORITY_CHECK_FAILED trace events on every deny path."""
+
+    async def test_level_denial_emits_trace(self, auth_store):
+        from elephantbroker.runtime.trace.ledger import TraceLedger
+        from elephantbroker.schemas.trace import TraceEventType
+        from fastapi import HTTPException
+
+        actor = _actor(authority=10)
+        reg = _mock_registry(actor)
+        ledger = TraceLedger()
+        with pytest.raises(HTTPException) as exc_info:
+            await check_authority(reg, auth_store, actor.id, "register_actor", trace_ledger=ledger)
+        assert exc_info.value.status_code == 403
+        events = [e for e in ledger._events if e.event_type == TraceEventType.AUTHORITY_CHECK_FAILED]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["action"] == "register_actor"
+        assert payload["reason"] == "insufficient_level"
+        assert payload["actor_level"] == 10
+        assert "required_level" in payload
+
+    async def test_org_mismatch_emits_trace(self, auth_store):
+        from elephantbroker.runtime.trace.ledger import TraceLedger
+        from elephantbroker.schemas.trace import TraceEventType
+        from fastapi import HTTPException
+
+        actor_org = str(uuid.uuid4())
+        target_org = str(uuid.uuid4())
+        actor = _actor(authority=70, org_id=actor_org)
+        reg = _mock_registry(actor)
+        ledger = TraceLedger()
+        with pytest.raises(HTTPException) as exc_info:
+            await check_authority(
+                reg, auth_store, actor.id, "create_org_goal",
+                target_org_id=target_org, trace_ledger=ledger,
+            )
+        assert exc_info.value.status_code == 403
+        events = [e for e in ledger._events if e.event_type == TraceEventType.AUTHORITY_CHECK_FAILED]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["action"] == "create_org_goal"
+        assert payload["reason"] == "org_mismatch"
+        assert payload["actor_org"] == actor_org
+        assert payload["target_org"] == target_org
+
+    async def test_team_mismatch_emits_trace(self, auth_store):
+        from elephantbroker.runtime.trace.ledger import TraceLedger
+        from elephantbroker.schemas.trace import TraceEventType
+        from fastapi import HTTPException
+
+        actor_team = str(uuid.uuid4())
+        target_team = str(uuid.uuid4())
+        actor = _actor(authority=50, team_ids=[actor_team])
+        reg = _mock_registry(actor)
+        ledger = TraceLedger()
+        with pytest.raises(HTTPException) as exc_info:
+            await check_authority(
+                reg, auth_store, actor.id, "create_team_goal",
+                target_team_id=target_team, trace_ledger=ledger,
+            )
+        assert exc_info.value.status_code == 403
+        events = [e for e in ledger._events if e.event_type == TraceEventType.AUTHORITY_CHECK_FAILED]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["action"] == "create_team_goal"
+        assert payload["reason"] == "team_mismatch"
+        assert payload["target_team"] == target_team
+        assert actor_team in payload["actor_teams"]
+
+    async def test_actor_not_found_emits_trace(self, auth_store):
+        from elephantbroker.runtime.trace.ledger import TraceLedger
+        from elephantbroker.schemas.trace import TraceEventType
+        from fastapi import HTTPException
+
+        reg = _mock_registry(None)
+        ledger = TraceLedger()
+        unknown_id = uuid.uuid4()
+        with pytest.raises(HTTPException) as exc_info:
+            await check_authority(reg, auth_store, unknown_id, "create_org", trace_ledger=ledger)
+        assert exc_info.value.status_code == 404
+        events = [e for e in ledger._events if e.event_type == TraceEventType.AUTHORITY_CHECK_FAILED]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["action"] == "create_org"
+        assert payload["reason"] == "actor_not_found"

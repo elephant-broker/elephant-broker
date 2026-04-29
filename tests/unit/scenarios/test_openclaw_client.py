@@ -304,12 +304,42 @@ class TestOpenClawClientMessaging:
         })
 
     @pytest.mark.asyncio
-    async def test_send_and_wait_no_run_id(self):
-        """If sessions.send returns no runId, return immediately."""
+    async def test_send_and_wait_no_run_id_retries_then_gives_up(self, monkeypatch):
+        """If sessions.send returns no runId, retry 3 more times then give up.
+
+        Pre-fix the client returned immediately on a missing runId and tests
+        sometimes silently passed against a half-set-up gateway. Retrying gives
+        the gateway a chance to settle without requiring the test to wait the
+        real 6 second sleep.
+        """
+        # Mock sleep to avoid the 3 × 2s real wait
+        async def fake_sleep(_):
+            return None
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
         client = OpenClawClient("ws://test", token="t")
-        client._rpc = AsyncMock(return_value={"text": "instant response"})
+        client._rpc = AsyncMock(return_value={"text": "no runId here"})
         result = await client.send_and_wait("key:1", "hello")
-        assert result["text"] == "instant response"
+        # 1 initial call + 3 retries
+        assert client._rpc.call_count == 4
+        assert result["text"] == "no runId here"
+
+    @pytest.mark.asyncio
+    async def test_send_and_wait_consumes_deferred_chat_event(self):
+        """When a chat-event arrives BEFORE the pending future is registered
+        (TF-09 deferred-event race), the event payload is buffered in
+        ``_deferred_chat_events`` and consumed on the next ``send_and_wait``."""
+        client = OpenClawClient("ws://test", token="t")
+        # Pre-seed a deferred event for run-42 — simulates a final/error event
+        # arriving before send_and_wait's future was registered.
+        deferred_payload = {"runId": "run-42", "state": "final", "text": "early bird"}
+        client._deferred_chat_events["run-42"] = deferred_payload
+
+        client._rpc = AsyncMock(return_value={"runId": "run-42"})
+        result = await client.send_and_wait("key:1", "hello")
+        assert result == deferred_payload
+        # Buffer drained
+        assert "run-42" not in client._deferred_chat_events
 
 
 class TestOpenClawClientLifecycle:

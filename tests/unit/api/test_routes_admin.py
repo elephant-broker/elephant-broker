@@ -217,3 +217,162 @@ class TestAuthorityEnforcement:
             headers=_admin_headers(),
         )
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Actor handle resolution — GET /admin/actors/resolve (TF-08-007)
+# ---------------------------------------------------------------------------
+
+class TestResolveActorByHandle:
+    async def test_resolve_handle_found_returns_actor(self, client, container):
+        _enable_bootstrap(container)
+        target = ActorRef(
+            type=ActorType.HUMAN_COORDINATOR,
+            display_name="Alice",
+            authority_level=70,
+            handles=["email:alice@example.com"],
+        )
+        container.actor_registry.resolve_by_handle = AsyncMock(return_value=target)
+
+        r = await client.get(
+            "/admin/actors/resolve",
+            params={"handle": "email:alice@example.com"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["display_name"] == "Alice"
+        assert "email:alice@example.com" in data["handles"]
+        container.actor_registry.resolve_by_handle.assert_called_once_with("email:alice@example.com")
+
+    async def test_resolve_handle_not_found_returns_404(self, client, container):
+        _enable_bootstrap(container)
+        container.actor_registry.resolve_by_handle = AsyncMock(return_value=None)
+
+        r = await client.get(
+            "/admin/actors/resolve",
+            params={"handle": "email:ghost@example.com"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 404
+        assert "ghost@example.com" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Actor registration — display_name validation (TF-08-014)
+# ---------------------------------------------------------------------------
+
+class TestRegisterActorValidation:
+    async def test_register_actor_empty_display_name_returns_422(self, client, container):
+        _enable_bootstrap(container)
+        r = await client.post(
+            "/admin/actors",
+            json={"display_name": "", "type": "worker_agent"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 422
+        assert "display_name" in r.json()["detail"]
+
+    async def test_register_actor_whitespace_display_name_returns_422(self, client, container):
+        _enable_bootstrap(container)
+        r = await client.post(
+            "/admin/actors",
+            json={"display_name": "   ", "type": "worker_agent"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Team member dual-write regression (TF-08-005)
+# ---------------------------------------------------------------------------
+
+class TestTeamMemberDualWrite:
+    """Verify that add/remove team member updates both the MEMBER_OF edge AND
+    the team_ids node property — the dual-write that lets authority checks
+    against ``actor_entity["team_ids"]`` stay consistent with edge state.
+    """
+
+    async def test_add_member_dual_writes_team_ids(self, client, container, mock_graph, monkeypatch):
+        _enable_bootstrap(container)
+        actor_id = str(uuid.uuid4())
+        team_id = str(uuid.uuid4())
+
+        # get_entity returns a populated actor with no current teams
+        mock_graph.get_entity = AsyncMock(return_value={
+            "eb_id": actor_id,
+            "display_name": "Bob",
+            "actor_type": "worker_agent",
+            "authority_level": 0,
+            "handles": [],
+            "org_id": None,
+            "team_ids": [],
+            "trust_level": 0.5,
+            "tags": [],
+            "gateway_id": "test",
+        })
+
+        recorded = []
+
+        async def fake_add(data_points, context=None, custom_edges=None, embed_triplets=False):
+            recorded.extend(list(data_points))
+            return list(data_points)
+
+        monkeypatch.setattr(
+            "elephantbroker.api.routes.admin.add_data_points", fake_add,
+        )
+
+        r = await client.post(
+            f"/admin/teams/{team_id}/members",
+            json={"actor_id": actor_id},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        # Edge mutation
+        mock_graph.add_relation.assert_called_once()
+        # Property mutation: team_id appended to team_ids
+        assert len(recorded) == 1
+        dp = recorded[0]
+        assert team_id in dp.team_ids
+        assert dp.eb_id == actor_id
+
+    async def test_remove_member_dual_writes_team_ids(self, client, container, mock_graph, monkeypatch):
+        _enable_bootstrap(container)
+        actor_id = str(uuid.uuid4())
+        team_id = str(uuid.uuid4())
+        other_team = str(uuid.uuid4())
+
+        mock_graph.get_entity = AsyncMock(return_value={
+            "eb_id": actor_id,
+            "display_name": "Bob",
+            "actor_type": "worker_agent",
+            "authority_level": 0,
+            "handles": [],
+            "org_id": None,
+            "team_ids": [team_id, other_team],
+            "trust_level": 0.5,
+            "tags": [],
+            "gateway_id": "test",
+        })
+        # delete_relation exists on the mock
+        mock_graph.delete_relation = AsyncMock()
+
+        recorded = []
+
+        async def fake_add(data_points, context=None, custom_edges=None, embed_triplets=False):
+            recorded.extend(list(data_points))
+            return list(data_points)
+
+        monkeypatch.setattr(
+            "elephantbroker.api.routes.admin.add_data_points", fake_add,
+        )
+
+        r = await client.delete(
+            f"/admin/teams/{team_id}/members/{actor_id}",
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+        assert len(recorded) == 1
+        dp = recorded[0]
+        assert team_id not in dp.team_ids
+        assert other_team in dp.team_ids
