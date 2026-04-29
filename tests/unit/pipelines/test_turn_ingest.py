@@ -86,7 +86,7 @@ def _make_buffer(recent_facts=None):
 
 def _make_pipeline(
     llm=None, facade=None, trace=None, embeddings=None, config=None,
-    profile=None, buffer=None, graph=None,
+    profile=None, buffer=None, graph=None, metrics=None,
 ):
     return TurnIngestPipeline(
         memory_facade=facade or _make_facade(),
@@ -98,6 +98,7 @@ def _make_pipeline(
         profile_policy=profile,
         buffer=buffer,
         graph=graph,
+        metrics=metrics,
     )
 
 
@@ -195,6 +196,102 @@ class TestTurnIngestPipeline:
         # Turn 1 (assistant) → deterministic agent UUID, NOT the user's.
         assert by_turn["1"].source_actor_id == expected_agent_actor_id
         assert by_turn["1"].source_actor_id != uuid.UUID(user_actor_id)
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_emits_fact_attribution_metric_per_role(self, mock_cognee):
+        """GAP-B8-2: when per-message attribution determines a fact's source
+        from `messages[source_turns[0]].role`, emit `eb_fact_attribution_total`
+        with the role label.
+
+        Label semantics (TODO-9-200 — clarification of earlier doc imprecision):
+        - "assistant" / "tool" — fire on every fact whose source turn is an
+          agent message (these branches at pipeline.py:271-274 do not gate
+          on additional fields).
+        - "user" — fires ONLY when the source `user` message carries an
+          `actor_id` (pipeline.py:275-278 elif). User messages without an
+          actor_id silently fall through with NO metric increment so that
+          `eb_fact_attribution_total{role="user"}` counts ACTUAL attributions,
+          not non-events. The negative path is covered by
+          ``test_no_fact_attribution_metric_for_user_without_actor_id`` below.
+
+        Falls through silently in two other cases too: no source_turns array,
+        or source_turns[0] is out-of-range relative to messages."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+
+        user_actor_id = str(uuid.uuid4())
+        agent_key = "test-gw:main"
+        metrics = MagicMock()
+
+        llm = _make_llm(facts=[
+            {"text": "User prefers Python", "category": "preference",
+             "source_turns": [0], "supersedes_index": -1},
+            {"text": "Assistant suggested uv", "category": "decision",
+             "source_turns": [1], "supersedes_index": -1},
+            {"text": "Tool returned exit 0", "category": "event",
+             "source_turns": [2], "supersedes_index": -1},
+        ])
+        pipe = _make_pipeline(llm=llm, metrics=metrics)
+        messages = [
+            {"role": "user", "content": "What pkg manager?", "actor_id": user_actor_id},
+            {"role": "assistant", "content": "Try uv."},
+            {"role": "tool", "content": "exit 0", "name": "bash"},
+        ]
+        await pipe.run("session:test", messages, agent_key=agent_key)
+
+        # Three calls — one per attributed fact, with the source-message role
+        roles_emitted = [c.args[0] for c in metrics.inc_fact_attribution.call_args_list]
+        assert roles_emitted.count("user") == 1
+        assert roles_emitted.count("assistant") == 1
+        assert roles_emitted.count("tool") == 1
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_no_fact_attribution_metric_without_agent_key(self, mock_cognee):
+        """GAP-B8-2 negative case: no agent_key → no per-message attribution
+        branch entered → no inc_fact_attribution call."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        metrics = MagicMock()
+        llm = _make_llm(facts=[
+            {"text": "fact", "category": "event",
+             "source_turns": [0], "supersedes_index": -1},
+        ])
+        pipe = _make_pipeline(llm=llm, metrics=metrics)
+        await pipe.run(
+            "session:test",
+            [{"role": "user", "content": "x", "actor_id": str(uuid.uuid4())}],
+        )
+
+        metrics.inc_fact_attribution.assert_not_called()
+
+    @patch("elephantbroker.pipelines.turn_ingest.pipeline.cognee")
+    async def test_no_fact_attribution_metric_for_user_without_actor_id(self, mock_cognee):
+        """TODO-9-200: GAP-B8-2 negative case for the `user`-role branch —
+        when the source-turn is a user message that carries NO ``actor_id``,
+        attribution silently falls back to the request-level
+        ``source_actor_id`` and inc_fact_attribution is NOT emitted.
+        Pins pipeline.py:275 elif gate (`role == "user" and …get("actor_id")`)
+        — without the gate, every user-sourced fact would inflate
+        ``eb_fact_attribution_total{role="user"}`` with non-attributions."""
+        mock_cognee.add = AsyncMock()
+        mock_cognee.cognify = AsyncMock()
+        metrics = MagicMock()
+        llm = _make_llm(facts=[
+            {"text": "fact from anonymous user msg", "category": "event",
+             "source_turns": [0], "supersedes_index": -1},
+        ])
+        pipe = _make_pipeline(llm=llm, metrics=metrics)
+
+        # agent_key IS provided → the per-message attribution branch IS entered;
+        # the user message intentionally omits `actor_id` → the elif at
+        # pipeline.py:275 does not match → metric is NOT emitted.
+        await pipe.run(
+            "session:test",
+            [{"role": "user", "content": "hello"}],  # no actor_id key
+            agent_key="test-gw:main",
+        )
+
+        metrics.inc_fact_attribution.assert_not_called()
 
     async def test_empty_messages_returns_zero(self):
         pipe = _make_pipeline()

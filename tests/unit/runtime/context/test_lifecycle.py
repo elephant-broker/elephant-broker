@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -279,6 +280,29 @@ class TestIngestBatch:
         artifact_store.get_by_hash.assert_called_once_with(SK, SID, content_hash)
         artifact_store.store.assert_not_called()
 
+    async def test_distinct_contents_stored_as_separate_artifacts(self):
+        """TF-06-006 V2b: two tool messages with DIFFERENT content in the same
+        ingest_batch produce 2 stored artifacts (no dedup collapse). Negative
+        counterpart to test_dedup_artifacts_by_hash. Pins lifecycle.py:434-446
+        SHA-256 content_hash branching: distinct hashes → 2 store() calls."""
+        artifact_store = AsyncMock()
+        # Both lookups return None — first store proceeds for each distinct content
+        artifact_store.get_by_hash = AsyncMock(return_value=None)
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+
+        msgs = [
+            AgentMessage(role="tool", content="alpha" * 80, name="grep"),
+            AgentMessage(role="tool", content="bravo" * 80, name="grep"),
+        ]
+        params = IngestBatchParams(session_id=SID, session_key=SK, messages=msgs)
+        await lc.ingest_batch(params)
+
+        assert artifact_store.store.call_count == 2
+        stored_contents = {c.args[2].content for c in artifact_store.store.call_args_list}
+        assert stored_contents == {"alpha" * 80, "bravo" * 80}
+        # Each content_hash is computed independently
+        assert artifact_store.get_by_hash.call_count == 2
+
     async def test_annotation_eb_turn(self):
         """#9: ingest_batch annotates messages with eb_turn metadata."""
         ctx = make_session_context(turn_count=5)
@@ -361,6 +385,46 @@ class TestIngestBatchTouchKeys:
         params = IngestBatchParams(session_key=SK, session_id=SID, messages=[AgentMessage(role="user", content="hello")])
         result = await lc.ingest_batch(params)
         assert result.ingested_count == 1  # Still succeeds
+
+    async def test_ingest_batch_emits_session_ttl_touch_metrics(self):
+        """TF-06-009 V3: on a successful TTL touch, lifecycle increments
+        eb_session_ttl_touch_total and observes eb_session_ttl_touch_keys
+        with the count of refreshed keys. Pins lifecycle.py:424-426."""
+        # Pipeline returns 7 hits out of 10 keys (3 didn't exist) → touched=7
+        pipe = MagicMock()
+        pipe.expire = MagicMock()
+        pipe.execute = AsyncMock(return_value=[1, 1, 0, 1, 1, 0, 1, 1, 0, 1])
+        redis = _make_redis_mock()
+        redis.pipeline = MagicMock(return_value=pipe)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(redis=redis, metrics=metrics)
+
+        params = IngestBatchParams(
+            session_key=SK, session_id=SID,
+            messages=[AgentMessage(role="user", content="hi")],
+        )
+        await lc.ingest_batch(params)
+
+        metrics.inc_session_ttl_touch.assert_called_once_with()
+        metrics.observe_session_ttl_touch_keys.assert_called_once_with(7)
+
+    async def test_ingest_batch_skips_ttl_touch_metrics_on_failure(self):
+        """TF-06-009 V3 negative: when the TTL pipeline raises, no touch
+        metrics are emitted (the except branch logs at DEBUG and exits).
+        Counterpart to test_ingest_batch_touch_failure_does_not_block."""
+        redis = _make_redis_mock()
+        redis.pipeline = MagicMock(side_effect=Exception("pipeline error"))
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(redis=redis, metrics=metrics)
+
+        params = IngestBatchParams(
+            session_key=SK, session_id=SID,
+            messages=[AgentMessage(role="user", content="hi")],
+        )
+        result = await lc.ingest_batch(params)
+        assert result.ingested_count == 1  # ingest still succeeds
+        metrics.inc_session_ttl_touch.assert_not_called()
+        metrics.observe_session_ttl_touch_keys.assert_not_called()
 
     async def test_ingest_batch_passes_profile_to_artifact_store(self):
         """BUG-4 caller: artifact store must receive session profile."""
@@ -1616,6 +1680,74 @@ class TestSubagentLifecycle:
         assert event.payload["reason"] == "completed"
         assert event.payload["child_session_key"] == "agent:child:sub1"
 
+    async def test_prepare_subagent_spawn_overwrites_existing_parent_with_warning(self, caplog):
+        """TF-06-007 V1: re-spawning the same child under a different parent
+        overwrites the prior session_parent mapping. Pins lifecycle.py:1104-1109
+        — existing parent_A is detected, a warning is logged, and the new
+        parent_B is written via setex (no abort, no exception)."""
+        redis = AsyncMock()
+        # First spawn sees no existing parent; second sees parent_A
+        redis.get = AsyncMock(side_effect=[None, "agent:parentA:main"])
+        lc = _make_lifecycle(redis=redis)
+
+        # Spawn 1: no prior parent, no warning
+        result1 = await lc.prepare_subagent_spawn(SubagentSpawnParams(
+            parent_session_key="agent:parentA:main",
+            child_session_key="agent:child:sub1",
+        ))
+        assert result1.parent_mapping_stored is True
+
+        # Spawn 2: same child re-spawned under parent_B → warning + overwrite
+        with caplog.at_level(
+            logging.WARNING, logger="elephantbroker.runtime.context.lifecycle",
+        ):
+            result2 = await lc.prepare_subagent_spawn(SubagentSpawnParams(
+                parent_session_key="agent:parentB:main",
+                child_session_key="agent:child:sub1",
+            ))
+
+        assert result2.parent_mapping_stored is True
+        # Two setex calls (one per spawn); the second writes parent_B
+        assert redis.setex.call_count == 2
+        # setex call signature: (key, ttl, value) — value is positional arg index 2
+        assert redis.setex.call_args_list[-1].args[2] == "agent:parentB:main"
+        # Warning logged on second spawn (existing != new parent)
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "already has parent" in r.getMessage()
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly one overwrite warning; got {len(warnings)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    async def test_on_subagent_ended_does_not_delete_redis_keys(self):
+        """TF-06-007 V2: on_subagent_ended is trace-only — it does NOT delete
+        the session_parent mapping or remove the child from session_children.
+        Confirms the documented intentional behavior (lifecycle.py:1145-1152).
+        Cleanup, when needed, must go through subagent_rollback or session_end."""
+        redis = AsyncMock()
+        trace = AsyncMock()
+        lc = _make_lifecycle(redis=redis, trace_ledger=trace)
+
+        await lc.on_subagent_ended(SubagentEndedParams(
+            child_session_key="agent:child:sub1", reason="completed",
+        ))
+
+        # Trace fired with the SUBAGENT_ENDED event type (TODO-9-002: pin the
+        # event_type explicitly — `assert_called_once()` alone would still
+        # pass if the trace path swapped to a different TraceEventType).
+        trace.append_event.assert_called_once()
+        event = trace.append_event.call_args[0][0]
+        assert event.event_type == TraceEventType.SUBAGENT_ENDED, (
+            f"on_subagent_ended must emit SUBAGENT_ENDED; got {event.event_type}"
+        )
+        # No Redis cleanup whatsoever
+        redis.delete.assert_not_called()
+        redis.srem.assert_not_called()
+        redis.expire.assert_not_called()
+        redis.setex.assert_not_called()
+
 
 # ======================================================================
 # 31  dispose
@@ -1987,6 +2119,25 @@ class TestShouldCaptureArtifact:
         lc = _make_lifecycle(config=config)
         msg = AgentMessage(role="tool", content="x" * 1000, name="grep")
         assert lc._should_capture_artifact(msg) is False
+
+    def test_skips_content_over_max_chars(self):
+        """TF-06-006 V1d: tool output exceeding ArtifactCaptureConfig.max_content_chars
+        (default 50000) is NOT captured. Lifecycle.py:1309-1310 guard."""
+        lc = _make_lifecycle()  # default config, max_content_chars=50000
+        msg = AgentMessage(role="tool", content="x" * 60000, name="grep")
+        assert lc._should_capture_artifact(msg) is False
+
+    def test_skips_tool_in_skip_tools(self):
+        """TF-06-006 V1e: tool whose name appears in ArtifactCaptureConfig.skip_tools
+        is NOT captured even when content exceeds min_content_chars. Lifecycle.py:1311-1312."""
+        config = ElephantBrokerConfig()
+        config.artifact_capture.skip_tools = ["secrets_get", "ls"]
+        lc = _make_lifecycle(config=config)
+        msg = AgentMessage(role="tool", content="x" * 1000, name="secrets_get")
+        assert lc._should_capture_artifact(msg) is False
+        # Sanity: a non-skipped tool with the same content is captured
+        ok = AgentMessage(role="tool", content="x" * 1000, name="grep")
+        assert lc._should_capture_artifact(ok) is True
 
 
 class TestDetectDirectQuote:
@@ -2662,6 +2813,177 @@ class TestReplaceOldToolOutputs:
         assert result[0].content == "OK"
         artifact_store.get_by_hash.assert_not_called()
 
+    async def test_emits_tool_tokens_saved_metric(self):
+        """GAP-B8-1: when an old tool output is replaced with a placeholder,
+        emit `eb_tool_tokens_saved_total` with the delta between the original
+        and replacement token count (estimated as len // 4)."""
+        artifact_store = AsyncMock()
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 2000, summary="output summary",
+        )
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(session_artifact_store=artifact_store, metrics=metrics)
+        policy = make_profile_policy().assembly_placement
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),  # old — replaced
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),  # recent — kept
+        ]
+        await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # inc_tool_replacement called once for the replaced message
+        metrics.inc_tool_replacement.assert_called_once_with("bash")
+        # inc_tool_tokens_saved called once with positive savings
+        metrics.inc_tool_tokens_saved.assert_called_once()
+        saved = metrics.inc_tool_tokens_saved.call_args[0][0]
+        # Original ~500 tokens (2000//4); replacement is short — savings must be positive
+        assert saved > 0, f"expected positive token savings, got {saved}"
+
+    async def test_no_tokens_saved_metric_when_nothing_replaced(self):
+        """GAP-B8-1 negative case: no replacement → no inc_tool_tokens_saved."""
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=None)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(session_artifact_store=artifact_store, metrics=metrics)
+        policy = make_profile_policy().assembly_placement
+        msgs = [AgentMessage(role="tool", content="x" * 2000, name="bash")]
+        await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        metrics.inc_tool_replacement.assert_not_called()
+        metrics.inc_tool_tokens_saved.assert_not_called()
+
+    async def test_no_tokens_saved_metric_when_replacement_is_no_shorter(self):
+        """TODO-9-500: zero-savings edge — when the placeholder template is
+        the same length as (or longer than) the original tool output, the
+        ``if tokens_saved:`` guard at lifecycle.py:~1351 skips
+        inc_tool_tokens_saved while still firing inc_tool_replacement (the
+        intentional asymmetry documented at the call site).
+
+        Setup: short original (just above the 100-token min so it qualifies
+        for replacement) plus a long artifact summary that pushes the
+        rendered placeholder above the original char count → tokens_saved
+        rounds to 0 and the metric must NOT increment."""
+        # Original: 500 chars (125 tokens) — clears the default 100-tok min gate.
+        # Artifact summary: 500 chars; renders into a placeholder of ~600 chars
+        # (≥ original) so original_tokens (125) ≤ replacement_tokens (≥125)
+        # and `tokens_saved = max(0, …)` collapses to 0.
+        long_summary = "y" * 500
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 500, summary=long_summary,
+        )
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        metrics = MagicMock(spec=MetricsContext)
+        lc = _make_lifecycle(session_artifact_store=artifact_store, metrics=metrics)
+        policy = make_profile_policy().assembly_placement
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 500, name="bash"),  # old → replaced
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="z" * 500, name="bash"),  # recent → kept
+        ]
+        await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # Replacement still fires (the message WAS swapped for a placeholder)…
+        metrics.inc_tool_replacement.assert_called_once_with("bash")
+        # …but no positive savings → eb_tool_tokens_saved_total stays put.
+        metrics.inc_tool_tokens_saved.assert_not_called()
+
+    async def test_disabled_returns_messages_unchanged(self):
+        """TF-06-010 V1: `replace_tool_outputs=False` is a hard kill switch.
+        The function returns the input list unchanged without touching the
+        artifact store. Pins lifecycle.py:1320-1321 early-return."""
+        from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact_store = AsyncMock()
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+        policy = AssemblyPlacementPolicy(replace_tool_outputs=False)
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),
+        ]
+        result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # Returned reference is the SAME list object — the early-return at
+        # lifecycle.py:1320-1321 does `return messages` without copying,
+        # which the `is` identity check pins (TODO-9-504: previously was
+        # `is or ==`, which would have allowed a defensive list-copy
+        # regression to slip past the test).
+        assert result is msgs
+        artifact_store.get_by_hash.assert_not_called()
+
+    async def test_keep_last_n_zero_preserves_all_tool_outputs(self):
+        """TF-06-010 V2a: `keep_last_n_tool_outputs=0` is the "keep ALL"
+        sentinel — see lifecycle.py:1323. With 0, every tool index lands in
+        keep_indices (regardless of how old) and nothing is replaced."""
+        from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact = SessionArtifact(
+            tool_name="bash", content="x" * 2000, summary="output summary",
+        )
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+        # research-style policy: keep ALL tool outputs intact
+        policy = AssemblyPlacementPolicy(keep_last_n_tool_outputs=0)
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),
+            AgentMessage(role="tool", content="z" * 2000, name="bash"),
+        ]
+        result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # All three tool outputs preserved verbatim
+        assert [m.content for m in result] == [
+            "x" * 2000, "y" * 2000, "z" * 2000,
+        ]
+        # No replacement attempts happened
+        artifact_store.get_by_hash.assert_not_called()
+
+    async def test_keep_last_n_two_keeps_last_two_tool_outputs(self):
+        """TF-06-010 V2b: with keep_last_n=2 (coding profile semantics),
+        the latest two tool messages stay verbatim and earlier tool messages
+        are eligible for placeholder replacement. Pins the slice math at
+        lifecycle.py:1322-1324 against multi-keep configurations."""
+        from elephantbroker.schemas.profile import AssemblyPlacementPolicy
+        artifact_id = uuid.uuid4()
+        artifact = SessionArtifact(
+            artifact_id=artifact_id,
+            tool_name="bash", content="x" * 2000, summary="output summary",
+        )
+        artifact_store = AsyncMock()
+        artifact_store.get_by_hash = AsyncMock(return_value=artifact)
+        lc = _make_lifecycle(session_artifact_store=artifact_store)
+        policy = AssemblyPlacementPolicy(keep_last_n_tool_outputs=2)
+
+        msgs = [
+            AgentMessage(role="tool", content="x" * 2000, name="bash"),  # OLD → replaced
+            AgentMessage(role="user", content="next"),
+            AgentMessage(role="tool", content="y" * 2000, name="bash"),  # KEPT (index -2)
+            AgentMessage(role="tool", content="z" * 2000, name="bash"),  # KEPT (index -1)
+        ]
+        result = await lc._replace_old_tool_outputs(msgs, "sk", "sid", policy)
+
+        # First tool replaced — pin the full placeholder template (TODO-9-505:
+        # tighter than `"artifact_search" in content`, which would still pass
+        # if the surrounding template prose drifted out of contract). The
+        # template lives at lifecycle.py:1337-1340.
+        expected_placeholder = (
+            f'[Captured output: bash — output summary\n'
+            f' → artifact_search("{artifact_id}") for full output]'
+        )
+        assert result[0].content == expected_placeholder
+        assert result[0].metadata.get("eb_replaced") == "true"
+        assert result[0].metadata.get("eb_artifact_id") == str(artifact_id)
+        # Last two tool messages preserved verbatim (no replacement)
+        assert result[2].content == "y" * 2000
+        assert result[2].metadata.get("eb_replaced") is None
+        assert result[3].content == "z" * 2000
+        assert result[3].metadata.get("eb_replaced") is None
+
 
 class TestDeduplicateConversation:
     def test_removes_covered_tool_messages(self):
@@ -2706,6 +3028,34 @@ class TestDeduplicateConversation:
         result, removed = lc._deduplicate_conversation(msgs, items, policy)
         assert removed == 0  # Should NOT remove already-replaced messages
         assert len(result) == 1
+
+    def test_uses_coverage_ratio_not_jaccard_index(self):
+        """TF-06-010 V4: dedup uses coverage ratio (|∩|/|msg_tokens|), NOT
+        true Jaccard (|∩|/|∪|). Pins lifecycle.py:1377 against silent metric
+        regression. Constructed scenario:
+          - msg_tokens = {alpha, beta, gamma}                  → 3 tokens
+          - block3_tokens = {alpha..kappa}                     → 10 tokens
+          - intersection = {alpha, beta, gamma}                → 3
+          - coverage = 3/3 = 1.0  (>0.7 → REMOVE)
+          - true Jaccard = 3/10 = 0.3 (<0.7 → would NOT remove)
+        Implementation removes the message → confirms coverage semantics."""
+        lc = _make_lifecycle()
+        policy = make_profile_policy().assembly_placement  # threshold=0.7
+        # Block 3 has 10 distinct content words, all >2 chars and not in STOP_WORDS.
+        items = [make_working_set_item(
+            text="alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        )]
+        # Tool message contains only the first 3 — fully covered but tiny vs. union.
+        msgs = [AgentMessage(role="tool", content="alpha beta gamma")]
+        result, removed = lc._deduplicate_conversation(msgs, items, policy)
+
+        # Removed under coverage semantics; would survive under true Jaccard.
+        assert removed == 1, (
+            f"expected 1 removal under coverage ratio (3/3=1.0 > 0.7); "
+            f"got {removed}. If 0, the implementation regressed to true "
+            f"Jaccard (3/10=0.3) or another metric."
+        )
+        assert all(m.role != "tool" for m in result)
 
 
 class TestInjectionTurnFiltering:

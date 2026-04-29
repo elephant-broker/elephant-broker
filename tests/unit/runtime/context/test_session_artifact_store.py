@@ -84,6 +84,38 @@ class TestSessionArtifactStore:
         assert len(results) == 1
         assert results[0].tool_name == "psql"
 
+    async def test_search_orders_results_by_descending_jaccard_score(self):
+        """TF-06-006 V4: search() returns artifacts ordered by Jaccard score
+        descending. Crafted so all three artifacts match the query, but each
+        with a different overlap → strict ordering must be preserved."""
+        store, redis = _make_store()
+        # Query: "postgres timescale compression"
+        # high overlap (3/3 query tokens present, low extra tokens)
+        a_high = make_session_artifact(
+            summary="postgres timescale compression", tool_name="psql",
+        )
+        # medium overlap (2/3 query tokens, more extra)
+        a_mid = make_session_artifact(
+            summary="postgres timescale tuning configuration values", tool_name="psql",
+        )
+        # low overlap (1/3 query tokens, lots of extra)
+        a_low = make_session_artifact(
+            summary="postgres notes for the team about indexing strategies",
+            tool_name="psql",
+        )
+        # Insert intentionally out-of-order in the HASH
+        redis.hgetall = AsyncMock(return_value={
+            "low": a_low.model_dump_json(),
+            "high": a_high.model_dump_json(),
+            "mid": a_mid.model_dump_json(),
+        })
+
+        results = await store.search("sk", "sid", "postgres timescale compression")
+        assert len(results) == 3
+        assert results[0].summary == a_high.summary
+        assert results[1].summary == a_mid.summary
+        assert results[2].summary == a_low.summary
+
     async def test_list_all(self):
         store, redis = _make_store()
         a1 = make_session_artifact()

@@ -1342,9 +1342,26 @@ class ContextLifecycle:
                         metadata={**msg.metadata, "eb_replaced": "true",
                                   "eb_artifact_id": str(artifact.artifact_id)},
                     )
+                    # `len // 4` matches the codebase's hot-path token estimate
+                    # convention (14+ sites in lifecycle / assembler / compaction);
+                    # distinct from elephantbroker.runtime.utils.estimate_tokens()
+                    # which guards with max(1, …) for non-empty content. The
+                    # `eb_tool_tokens_saved_total` Counter is summed in these
+                    # same char/4 units (not exact tokens). NOTE: content_as_text(msg)
+                    # is now called 3× in this block (1330/1331/below) — pre-existing
+                    # pattern; future cleanup could lift it into a single local.
+                    original_tokens = len(content_as_text(msg)) // 4
+                    replacement_tokens = len(content_as_text(replacement)) // 4
+                    tokens_saved = max(0, original_tokens - replacement_tokens)
                     result.append(replacement)
                     if self._metrics:
+                        # Asymmetric on purpose: inc_tool_replacement always fires
+                        # on a successful replacement; inc_tool_tokens_saved only
+                        # fires when tokens_saved > 0 (a no-op increment otherwise
+                        # when the placeholder is no shorter than the original).
                         self._metrics.inc_tool_replacement(tool_name)
+                        if tokens_saved:
+                            self._metrics.inc_tool_tokens_saved(tokens_saved)
                     continue
             result.append(msg)
         return result

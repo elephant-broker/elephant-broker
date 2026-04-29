@@ -1,4 +1,5 @@
 """Tests for context routes."""
+import logging
 import uuid
 from unittest.mock import AsyncMock
 
@@ -189,6 +190,27 @@ class TestContextRoutes:
         r = await client.post("/context/dispose", json=body)
         assert r.status_code == 200
 
+    async def test_dispose_logs_deprecation_message(self, client, caplog):
+        """TF-06-012 V-deprecation: the /context/dispose route is kept for
+        backward compatibility only (GF-15) — TS plugins should call
+        /sessions/end instead. The route logs a DEPRECATED message at
+        INFO level on every invocation. Pins context.py:172-176."""
+        body = {"session_key": "agent:main:main", "session_id": "sid-1"}
+        with caplog.at_level(logging.INFO, logger="elephantbroker.api.routes.context"):
+            r = await client.post("/context/dispose", json=body)
+        assert r.status_code == 200
+
+        deprecation_logs = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and "DEPRECATED" in rec.getMessage()
+            and "/context/dispose" in rec.getMessage()
+        ]
+        assert len(deprecation_logs) == 1, (
+            f"expected exactly one deprecation log; got {len(deprecation_logs)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
     async def test_get_config(self, client):
         r = await client.get("/context/config")
         assert r.status_code == 200
@@ -330,6 +352,38 @@ class TestContextRoutes:
         body = {"parent_session_key": "p", "child_session_key": "c", "rollback_key": "k"}
         r = await client.post("/context/subagent/rollback", json=body)
         assert r.status_code == 200
+
+    async def test_subagent_rollback_orphans_children_set_entry(self, client, container):
+        """TF-06-007 V3 / known gap: POST /context/subagent/rollback only deletes
+        the session_parent mapping (rollback_key). It does NOT remove the child
+        from the parent's session_children SET — the child is left orphaned in
+        the SET until the per-key TTL elapses. Pins context.py:152-162 documented
+        intentional scope (rollback is best-effort cleanup of the forward edge)."""
+        # TODO(TD-68): rollback should clean children SET entry — TTL-based
+        # expiry is current workaround (see TECHNICAL-DEBT.md TD-68 for the
+        # full asymmetry rationale and three fix directions).
+        from unittest.mock import AsyncMock
+
+        redis = AsyncMock()
+        container.redis = redis  # default conftest leaves it None
+        body = {
+            "parent_session_key": "agent:parent:main",
+            "child_session_key": "agent:child:sub1",
+            "rollback_key": "eb:test:session_parent:agent:child:sub1",
+        }
+        r = await client.post("/context/subagent/rollback", json=body)
+        assert r.status_code == 200
+        assert r.json() == {"rolled_back": True}
+
+        # Forward edge deleted (the parent mapping)
+        redis.delete.assert_called_once_with(body["rollback_key"])
+        # Reverse edge NOT touched — child remains in parent's session_children SET
+        redis.srem.assert_not_called()
+        # No write of any kind to the children SET key
+        for call in redis.mock_calls:
+            assert "session_children" not in str(call), (
+                f"rollback must not touch session_children; got call: {call}"
+            )
 
 
 class TestContextGatewayIsolation:
