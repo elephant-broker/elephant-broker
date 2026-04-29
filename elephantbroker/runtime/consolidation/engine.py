@@ -253,11 +253,12 @@ class ConsolidationEngine(IConsolidationEngine):
 
             # 4. Resolve profile
             profile = None
-            if self._profiles and profile_id:
+            resolved_profile_id = profile_id or getattr(self._config, "default_profile", None) or "coding"
+            if self._profiles:
                 try:
-                    profile = await self._profiles.resolve_profile(profile_id, org_id=org_id)
+                    profile = await self._profiles.resolve_profile(resolved_profile_id, org_id=org_id)
                 except Exception:
-                    self._log.warning("Profile resolution failed for %s", profile_id)
+                    self._log.warning("Profile resolution failed for %s", resolved_profile_id)
 
             # 5. Load facts (paginated Cypher with AD-11 protection)
             facts = await self._load_facts(gateway_id)
