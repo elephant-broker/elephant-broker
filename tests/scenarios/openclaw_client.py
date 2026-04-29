@@ -5,11 +5,14 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import time
 import uuid
 from typing import AsyncIterator
 
 import websockets
+
+logger = logging.getLogger(__name__)
 
 
 class OpenClawClient:
@@ -36,6 +39,7 @@ class OpenClawClient:
         self._device_token = device_token
         self._ws = None
         self._pending: dict[str, asyncio.Future] = {}
+        self._deferred_chat_events: dict[str, dict] = {}
         self._listener_task: asyncio.Task | None = None
 
     @staticmethod
@@ -158,8 +162,11 @@ class OpenClawClient:
                     payload = msg.get("payload", {})
                     run_id = payload.get("runId")
                     state = payload.get("state")
-                    if state in ("final", "error") and run_id in self._pending:
-                        self._pending[run_id].set_result(payload)
+                    if state in ("final", "error"):
+                        if run_id and run_id in self._pending:
+                            self._pending[run_id].set_result(payload)
+                        elif run_id:
+                            self._deferred_chat_events[run_id] = payload
         except websockets.ConnectionClosed:
             pass
 
@@ -216,11 +223,31 @@ class OpenClawClient:
             params["thinking"] = thinking
         send_result = await self._rpc("sessions.send", params)
         run_id = send_result.get("runId")
+
         if not run_id:
+            # The RPC response omitted runId, but the gateway may still emit
+            # the chat-event over the WebSocket — the listener buffers events
+            # without a known pending future in ``_deferred_chat_events``.
+            # Wait briefly for that buffer to fill rather than re-issuing
+            # ``sessions.send`` (a resend would deliver the user message twice).
+            # Test-infra only: assumes a single in-flight send so any buffered
+            # entry must be ours.
+            logger.debug("send_and_wait: no runId in initial response, waiting for deferred chat event...")
+            for attempt in range(2):
+                await asyncio.sleep(3)
+                if self._deferred_chat_events:
+                    run_id, deferred_payload = next(iter(self._deferred_chat_events.items()))
+                    self._deferred_chat_events.pop(run_id)
+                    logger.debug("send_and_wait: consumed deferred event for runId=%s", run_id)
+                    return deferred_payload
+                logger.debug("send_and_wait: wait %d/2 — buffer still empty", attempt + 1)
+            logger.debug("send_and_wait: no deferred event after 2 waits, returning original response")
             return send_result
 
         future = asyncio.get_running_loop().create_future()
         self._pending[run_id] = future
+        if run_id in self._deferred_chat_events:
+            future.set_result(self._deferred_chat_events.pop(run_id))
         try:
             result = await asyncio.wait_for(future, self.timeout)
         finally:

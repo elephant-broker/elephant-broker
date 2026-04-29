@@ -130,6 +130,122 @@ class TestActorDataPoint:
         assert restored.tags == ["qa"]
 
 
+class TestActorDataPointFromEntityDict:
+    """TD-72 helper — reconstructs ActorDataPoint from a raw graph entity dict.
+
+    Replaces manual ``.get()`` reconstruction in admin dual-write routes and
+    ActorRegistry. Must:
+    1. Extract only declared fields (silently ignore Cognee-injected keys
+       like ``_metadata``, ``_id`` that would break ``ActorDataPoint(**entity)``).
+    2. Apply backward-compat for legacy ``team_id`` (single string) → ``team_ids`` (list).
+    3. Use sensible defaults for missing optional fields.
+    """
+
+    def test_minimal_entity(self):
+        eb_id = str(uuid.uuid4())
+        dp = ActorDataPoint.from_entity_dict({
+            "eb_id": eb_id,
+            "display_name": "Alice",
+            "actor_type": "human_coordinator",
+        })
+        assert dp.eb_id == eb_id
+        assert str(dp.id) == eb_id
+        assert dp.display_name == "Alice"
+        assert dp.actor_type == "human_coordinator"
+        # Defaults applied for missing optional fields
+        assert dp.authority_level == 0
+        assert dp.handles == []
+        assert dp.org_id is None
+        assert dp.team_ids == []
+        assert dp.trust_level == 0.5
+        assert dp.tags == []
+        assert dp.gateway_id == ""
+
+    def test_full_entity_round_trip(self):
+        eb_id = str(uuid.uuid4())
+        org_id = str(uuid.uuid4())
+        team_id = str(uuid.uuid4())
+        entity = {
+            "eb_id": eb_id,
+            "display_name": "Bob",
+            "actor_type": "manager_agent",
+            "authority_level": 70,
+            "handles": ["email:bob@example.com", "slack:bob"],
+            "org_id": org_id,
+            "team_ids": [team_id],
+            "trust_level": 0.9,
+            "tags": ["lead"],
+            "gateway_id": "gw-1",
+        }
+        dp = ActorDataPoint.from_entity_dict(entity)
+        assert dp.eb_id == eb_id
+        assert dp.authority_level == 70
+        assert dp.handles == ["email:bob@example.com", "slack:bob"]
+        assert dp.org_id == org_id
+        assert dp.team_ids == [team_id]
+        assert dp.trust_level == 0.9
+        assert dp.tags == ["lead"]
+        assert dp.gateway_id == "gw-1"
+
+    def test_legacy_team_id_string_promotes_to_team_ids_list(self):
+        """Backward-compat: nodes written before Phase 8 carry a single
+        ``team_id`` string; new code expects a ``team_ids`` list."""
+        eb_id = str(uuid.uuid4())
+        legacy_team = str(uuid.uuid4())
+        dp = ActorDataPoint.from_entity_dict({
+            "eb_id": eb_id,
+            "display_name": "Carol",
+            "actor_type": "worker_agent",
+            "team_id": legacy_team,  # legacy single string field
+        })
+        assert dp.team_ids == [legacy_team]
+
+    def test_team_ids_list_takes_precedence_over_legacy_team_id(self):
+        """When both are present, the canonical ``team_ids`` list wins."""
+        eb_id = str(uuid.uuid4())
+        legacy_team = str(uuid.uuid4())
+        modern_team = str(uuid.uuid4())
+        dp = ActorDataPoint.from_entity_dict({
+            "eb_id": eb_id,
+            "display_name": "Dave",
+            "actor_type": "worker_agent",
+            "team_id": legacy_team,
+            "team_ids": [modern_team],
+        })
+        assert dp.team_ids == [modern_team]
+
+    def test_ignores_cognee_injected_internal_fields(self):
+        """Cognee writes ``_metadata`` and other internal keys when reading
+        nodes back from Neo4j. ``ActorDataPoint(**entity)`` would crash on
+        these (extra='forbid' on Pydantic models). The helper must extract
+        only declared fields explicitly."""
+        eb_id = str(uuid.uuid4())
+        dp = ActorDataPoint.from_entity_dict({
+            "eb_id": eb_id,
+            "display_name": "Eve",
+            "actor_type": "worker_agent",
+            "_metadata": {"index_fields": ["display_name"]},
+            "_id": "internal-cognee-id",
+            "type": "ActorDataPoint",  # Cognee class tag
+        })
+        assert dp.eb_id == eb_id
+        assert dp.display_name == "Eve"
+
+    def test_handles_uuid_team_ids_via_str_coercion(self):
+        """Neo4j may return team_ids as UUID objects (depending on the driver
+        and stored representation). Helper coerces to str for the
+        ActorDataPoint.team_ids: list[str] contract."""
+        eb_id = str(uuid.uuid4())
+        team_uuid = uuid.uuid4()
+        dp = ActorDataPoint.from_entity_dict({
+            "eb_id": eb_id,
+            "display_name": "Frank",
+            "actor_type": "worker_agent",
+            "team_ids": [team_uuid],
+        })
+        assert dp.team_ids == [str(team_uuid)]
+
+
 # ---------------------------------------------------------------------------
 # GoalDataPoint
 # ---------------------------------------------------------------------------

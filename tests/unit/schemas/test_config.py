@@ -10,6 +10,7 @@ from elephantbroker.schemas.config import (
     InfraConfig,
     KNOWN_EMBEDDING_DIMS,
     LLMConfig,
+    ProfileCacheConfig,
     SuccessfulUseConfig,
 )
 
@@ -1181,6 +1182,10 @@ class TestStrictBaseInheritance:
             "update this test to whitelist it explicitly."
         )
 
+    def test_from_yaml_invalid_path_raises(self):
+        with pytest.raises(FileNotFoundError):
+            ElephantBrokerConfig.from_yaml("/nonexistent/path.yaml")
+
     def test_strict_base_forbids_extra_keys(self):
         """Sanity guard — confirm the contract _StrictBase encodes is actually
         wired (``extra="forbid"``). If someone flips the model_config, the
@@ -1194,3 +1199,23 @@ class TestStrictBaseInheritance:
             "The strictness contract was changed — every config submodel will "
             "now silently swallow unknown YAML keys. Restore extra='forbid'."
         )
+
+
+class TestProfileCacheConfig:
+    def test_ttl_minimum_rejects_9(self):
+        with pytest.raises(ValidationError):
+            ProfileCacheConfig(ttl_seconds=9)
+
+    def test_ttl_minimum_accepts_10(self):
+        c = ProfileCacheConfig(ttl_seconds=10)
+        assert c.ttl_seconds == 10
+
+
+class TestBaseProfileDefaults:
+    def test_base_profile_defaults_match_spec(self):
+        from elephantbroker.runtime.profiles.presets import BASE_PROFILE
+        from elephantbroker.schemas.profile import GraphMode
+
+        assert BASE_PROFILE.graph_mode == GraphMode.HYBRID
+        assert BASE_PROFILE.session_data_ttl_seconds == 86400
+        assert BASE_PROFILE.extends is None

@@ -186,6 +186,14 @@ def bootstrap(ctx: click.Context, org_name: str, org_label: str, team_name: str,
     _save_config({"actor_id": actor_id, "runtime_url": url})
     click.echo(f"Config saved: actor-id={actor_id}, runtime-url={url}")
 
+    click.echo(f"\n{'='*60}")
+    click.echo(f"ACTION REQUIRED: Set EB_ORG_ID in your environment")
+    click.echo(f"  EB_ORG_ID={org_id}")
+    click.echo(f"")
+    click.echo(f"  Add to /etc/elephantbroker/env (or default.yaml gateway.org_id)")
+    click.echo(f"  Then restart: sudo systemctl restart elephantbroker")
+    click.echo(f"{'='*60}\n")
+
 
 # ---------------------------------------------------------------------------
 # Org

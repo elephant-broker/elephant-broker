@@ -169,6 +169,37 @@ class ActorDataPoint(DataPoint):
             gateway_id=self.gateway_id,
         )
 
+    @classmethod
+    def from_entity_dict(cls, entity: dict) -> ActorDataPoint:
+        """Reconstruct from a raw graph entity dict (e.g. ``GraphAdapter.get_entity()``).
+
+        Used by both admin dual-write paths and ActorRegistry reconstruction.
+        Extracts only declared fields — Cognee-injected internal keys
+        (``_metadata``, ``_id``, ...) are silently ignored, avoiding the
+        ``ActorDataPoint(**entity)`` failure mode that motivated the
+        manual ``.get()`` reconstructions before TD-72 was resolved.
+
+        Applies the legacy ``team_id`` (single string) → ``team_ids`` (list)
+        backward-compat shim for nodes written before the Phase 8 migration.
+        """
+        raw_team_ids = entity.get("team_ids", []) or []
+        if not raw_team_ids and entity.get("team_id"):
+            raw_team_ids = [entity["team_id"]]
+        eb_id = entity.get("eb_id", "")
+        return cls(
+            id=uuid.UUID(eb_id) if eb_id else uuid.uuid4(),
+            display_name=entity.get("display_name", ""),
+            actor_type=entity.get("actor_type", "worker_agent"),
+            authority_level=entity.get("authority_level", 0),
+            handles=list(entity.get("handles", []) or []),
+            org_id=entity.get("org_id"),
+            team_ids=[str(t) for t in raw_team_ids],
+            trust_level=entity.get("trust_level", 0.5),
+            tags=list(entity.get("tags", []) or []),
+            eb_id=eb_id,
+            gateway_id=entity.get("gateway_id", ""),
+        )
+
 
 # ---------------------------------------------------------------------------
 # GoalDataPoint

@@ -223,8 +223,9 @@ class ConsolidationEngine(IConsolidationEngine):
 
         Scoped to (org_id, gateway_id) pair. Protected by Redis distributed lock.
         """
+        resolved_profile_id = profile_id or getattr(self._config, "default_profile", "coding") or "coding"
         report = ConsolidationReport(
-            org_id=org_id, gateway_id=gateway_id, profile_id=profile_id,
+            org_id=org_id, gateway_id=gateway_id, profile_id=resolved_profile_id,
         )
         t0 = time.monotonic()
         lock = None
@@ -248,16 +249,16 @@ class ConsolidationEngine(IConsolidationEngine):
             # 3. Emit CONSOLIDATION_STARTED
             await self._trace.append_event(TraceEvent(
                 event_type=TraceEventType.CONSOLIDATION_STARTED,
-                payload={"org_id": org_id, "gateway_id": gateway_id, "profile_id": profile_id},
+                payload={"org_id": org_id, "gateway_id": gateway_id, "profile_id": resolved_profile_id},
             ))
 
             # 4. Resolve profile
             profile = None
-            if self._profiles and profile_id:
+            if self._profiles:
                 try:
-                    profile = await self._profiles.resolve_profile(profile_id, org_id=org_id)
+                    profile = await self._profiles.resolve_profile(resolved_profile_id, org_id=org_id)
                 except Exception:
-                    self._log.warning("Profile resolution failed for %s", profile_id)
+                    self._log.warning("Profile resolution failed for %s", resolved_profile_id)
 
             # 5. Load facts (paginated Cypher with AD-11 protection)
             facts = await self._load_facts(gateway_id)
@@ -274,7 +275,7 @@ class ConsolidationEngine(IConsolidationEngine):
             context = ConsolidationContext(
                 org_id=org_id,
                 gateway_id=gateway_id,
-                profile_id=profile_id,
+                profile_id=resolved_profile_id,
                 resolved_profile=profile,
                 scoring_ledger_store=self._scoring_ledger,
                 facts=facts,

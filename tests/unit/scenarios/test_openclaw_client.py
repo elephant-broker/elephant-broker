@@ -304,12 +304,74 @@ class TestOpenClawClientMessaging:
         })
 
     @pytest.mark.asyncio
-    async def test_send_and_wait_no_run_id(self):
-        """If sessions.send returns no runId, return immediately."""
+    async def test_send_and_wait_no_run_id_waits_then_returns_original(self, monkeypatch):
+        """If sessions.send returns no runId AND the deferred buffer stays
+        empty across both wait windows, return the original send_result as
+        graceful degradation.
+
+        Critically, the client must NOT call ``_rpc`` a second time — re-sending
+        ``sessions.send`` would deliver the user message twice (TD-73).
+        """
+        sleep_calls: list[float] = []
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
         client = OpenClawClient("ws://test", token="t")
-        client._rpc = AsyncMock(return_value={"text": "instant response"})
+        client._rpc = AsyncMock(return_value={"text": "no runId here"})
         result = await client.send_and_wait("key:1", "hello")
-        assert result["text"] == "instant response"
+        # _rpc called exactly once — no resend
+        assert client._rpc.call_count == 1
+        # Two wait windows, each ≥ 3 seconds (sufficient delay)
+        assert len(sleep_calls) == 2
+        assert all(s >= 3 for s in sleep_calls)
+        # Returned the original send_result as graceful degradation
+        assert result["text"] == "no runId here"
+
+    @pytest.mark.asyncio
+    async def test_send_and_wait_no_run_id_consumes_deferred_event(self, monkeypatch):
+        """When the deferred buffer fills during the wait (the listener
+        receives a chat-event with runId before the wait elapses), consume
+        the buffered payload and return it without resending."""
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            # Simulate listener pushing the event between waits — fill the
+            # buffer after the first sleep so the second-iteration check finds
+            # it. Keying matches the gateway-assigned runId.
+            if len(sleep_calls) == 1:
+                client._deferred_chat_events["run-99"] = {
+                    "runId": "run-99", "state": "final", "text": "late bird",
+                }
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        client = OpenClawClient("ws://test", token="t")
+        client._rpc = AsyncMock(return_value={"text": "no runId here"})
+        result = await client.send_and_wait("key:1", "hello")
+        # _rpc called exactly once — no resend
+        assert client._rpc.call_count == 1
+        # Returned the deferred payload, not the original (no-runId) response
+        assert result["text"] == "late bird"
+        # Buffer drained
+        assert "run-99" not in client._deferred_chat_events
+
+    @pytest.mark.asyncio
+    async def test_send_and_wait_consumes_pre_seeded_deferred_chat_event(self):
+        """When a chat-event arrives BEFORE the pending future is registered
+        (TF-09 deferred-event race), the event payload is buffered in
+        ``_deferred_chat_events`` and consumed on the next ``send_and_wait``."""
+        client = OpenClawClient("ws://test", token="t")
+        # Pre-seed a deferred event for run-42 — simulates a final/error event
+        # arriving before send_and_wait's future was registered.
+        deferred_payload = {"runId": "run-42", "state": "final", "text": "early bird"}
+        client._deferred_chat_events["run-42"] = deferred_payload
+
+        client._rpc = AsyncMock(return_value={"runId": "run-42"})
+        result = await client.send_and_wait("key:1", "hello")
+        assert result == deferred_payload
+        # Buffer drained
+        assert "run-42" not in client._deferred_chat_events
 
 
 class TestOpenClawClientLifecycle:

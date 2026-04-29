@@ -90,6 +90,24 @@ wait_for_port() {
 echo "Waiting for services to initialize..."
 READY=0
 wait_for_port "$TEST_NEO4J_BOLT_PORT" "Neo4j" 30 || READY=1
+# Neo4j accepts TCP before bolt auth is ready — additionally probe the HTTP
+# API (which requires the bolt server + auth subsystem to be live) before
+# pytest starts. Without this, integration tests that hit /health/ready can
+# race with Neo4j's bolt initialization (~20s after TCP accept on first boot).
+echo -n "  Waiting for Neo4j bolt to accept queries..."
+NEO4J_WAITED=0
+NEO4J_MAX=30
+while ! curl -sf -o /dev/null -u neo4j:testpassword "http://localhost:${TEST_NEO4J_HTTP_PORT}/" 2>/dev/null; do
+    sleep 1
+    NEO4J_WAITED=$((NEO4J_WAITED + 1))
+    if [ $NEO4J_WAITED -ge $NEO4J_MAX ]; then
+        echo " TIMEOUT (${NEO4J_MAX}s)"
+        echo "ERROR: Neo4j HTTP API did not become ready."
+        READY=1
+        break
+    fi
+done
+[ $NEO4J_WAITED -lt $NEO4J_MAX ] && echo " ready (${NEO4J_WAITED}s)"
 wait_for_port "$TEST_QDRANT_PORT" "Qdrant" 20 || READY=1
 wait_for_port "$TEST_REDIS_PORT" "Redis" 10 || READY=1
 if [ $READY -ne 0 ]; then

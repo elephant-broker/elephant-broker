@@ -9,11 +9,12 @@ import logging
 import uuid
 
 from cognee.tasks.storage import add_data_points
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from elephantbroker.api.routes._authority import check_authority
 from elephantbroker.runtime.adapters.cognee.datapoints import (
+    ActorDataPoint,
     OrganizationDataPoint,
     TeamDataPoint,
 )
@@ -289,6 +290,30 @@ async def add_team_member(team_id: str, body: AddMemberRequest, request: Request
     await assert_same_gateway(container.graph, body.actor_id, gw_id)
     await assert_same_gateway(container.graph, team_id, gw_id)
     await container.graph.add_relation(body.actor_id, team_id, "MEMBER_OF")
+    # Sync team_ids node property (dual-write: edge + property).
+    # Edge mutation already succeeded; property sync failure is non-fatal.
+    try:
+        actor_entity = await container.graph.get_entity(body.actor_id)
+        if actor_entity:
+            dp = ActorDataPoint.from_entity_dict(actor_entity)
+            if team_id not in dp.team_ids:
+                dp.team_ids = list(dp.team_ids) + [team_id]
+                await add_data_points([dp])
+    except Exception as exc:
+        logger.warning(
+            "team_ids dual-write failed for actor=%s team=%s: %s",
+            body.actor_id, team_id, exc,
+        )
+        if container.trace_ledger:
+            await container.trace_ledger.append_event(TraceEvent(
+                event_type=TraceEventType.DEGRADED_OPERATION,
+                payload={
+                    "operation": "add_team_member_dual_write",
+                    "actor_id": body.actor_id,
+                    "team_id": team_id,
+                    "error": str(exc),
+                },
+            ))
     await container.trace_ledger.append_event(TraceEvent(
         event_type=TraceEventType.MEMBER_ADDED,
         payload={"actor_id": body.actor_id, "team_id": team_id},
@@ -331,6 +356,30 @@ async def remove_team_member(team_id: str, actor_id: str, request: Request):
             "MATCH (a {eb_id: $aid})-[r:MEMBER_OF]->(t {eb_id: $tid}) DELETE r",
             {"aid": actor_id, "tid": team_id},
         )
+    # Sync team_ids node property (dual-write: edge + property).
+    # Edge mutation already succeeded; property sync failure is non-fatal.
+    try:
+        actor_entity = await container.graph.get_entity(actor_id)
+        if actor_entity:
+            dp = ActorDataPoint.from_entity_dict(actor_entity)
+            if team_id in dp.team_ids:
+                dp.team_ids = [t for t in dp.team_ids if t != team_id]
+                await add_data_points([dp])
+    except Exception as exc:
+        logger.warning(
+            "team_ids dual-write failed for actor=%s team=%s: %s",
+            actor_id, team_id, exc,
+        )
+        if container.trace_ledger:
+            await container.trace_ledger.append_event(TraceEvent(
+                event_type=TraceEventType.DEGRADED_OPERATION,
+                payload={
+                    "operation": "remove_team_member_dual_write",
+                    "actor_id": actor_id,
+                    "team_id": team_id,
+                    "error": str(exc),
+                },
+            ))
     await container.trace_ledger.append_event(TraceEvent(
         event_type=TraceEventType.MEMBER_REMOVED,
         payload={"actor_id": actor_id, "team_id": team_id},
@@ -383,10 +432,22 @@ async def list_actors(request: Request, org_id: str | None = None):
             for r in records]
 
 
+@router.get("/actors/resolve")
+async def resolve_actor_by_handle(request: Request, handle: str = Query(...)):
+    await _auth(request, "register_actor")
+    container = request.app.state.container
+    actor = await container.actor_registry.resolve_by_handle(handle)
+    if actor is None:
+        raise HTTPException(status_code=404, detail=f"No actor found for handle: {handle}")
+    return actor.model_dump(mode="json")
+
+
 @router.post("/actors")
 async def register_actor(request: Request):
     body = await request.json()
     await _auth(request, "register_actor")
+    if not str(body.get("display_name") or "").strip():
+        raise HTTPException(status_code=422, detail="display_name is required and must be non-empty")
     container = request.app.state.container
     from elephantbroker.schemas.actor import ActorRef, ActorType
     actor = ActorRef(
