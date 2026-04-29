@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from elephantbroker.api.routes._authority import check_authority
 from elephantbroker.runtime.adapters.cognee.datapoints import (
+    ActorDataPoint,
     OrganizationDataPoint,
     TeamDataPoint,
 )
@@ -289,6 +290,26 @@ async def add_team_member(team_id: str, body: AddMemberRequest, request: Request
     await assert_same_gateway(container.graph, body.actor_id, gw_id)
     await assert_same_gateway(container.graph, team_id, gw_id)
     await container.graph.add_relation(body.actor_id, team_id, "MEMBER_OF")
+    # Sync team_ids node property (dual-write: edge + property)
+    actor_entity = await container.graph.get_entity(body.actor_id)
+    if actor_entity:
+        current_ids = list(actor_entity.get("team_ids", []) or [])
+        if team_id not in current_ids:
+            current_ids.append(team_id)
+            dp = ActorDataPoint(
+                id=uuid.UUID(body.actor_id),
+                display_name=actor_entity.get("display_name", ""),
+                actor_type=actor_entity.get("actor_type", "worker_agent"),
+                authority_level=actor_entity.get("authority_level", 0),
+                handles=list(actor_entity.get("handles", []) or []),
+                org_id=actor_entity.get("org_id"),
+                team_ids=current_ids,
+                trust_level=actor_entity.get("trust_level", 0.5),
+                tags=list(actor_entity.get("tags", []) or []),
+                eb_id=body.actor_id,
+                gateway_id=actor_entity.get("gateway_id", ""),
+            )
+            await add_data_points([dp])
     await container.trace_ledger.append_event(TraceEvent(
         event_type=TraceEventType.MEMBER_ADDED,
         payload={"actor_id": body.actor_id, "team_id": team_id},
@@ -331,6 +352,26 @@ async def remove_team_member(team_id: str, actor_id: str, request: Request):
             "MATCH (a {eb_id: $aid})-[r:MEMBER_OF]->(t {eb_id: $tid}) DELETE r",
             {"aid": actor_id, "tid": team_id},
         )
+    # Sync team_ids node property (dual-write: edge + property)
+    actor_entity = await container.graph.get_entity(actor_id)
+    if actor_entity:
+        current_ids = list(actor_entity.get("team_ids", []) or [])
+        if team_id in current_ids:
+            current_ids.remove(team_id)
+            dp = ActorDataPoint(
+                id=uuid.UUID(actor_id),
+                display_name=actor_entity.get("display_name", ""),
+                actor_type=actor_entity.get("actor_type", "worker_agent"),
+                authority_level=actor_entity.get("authority_level", 0),
+                handles=list(actor_entity.get("handles", []) or []),
+                org_id=actor_entity.get("org_id"),
+                team_ids=current_ids,
+                trust_level=actor_entity.get("trust_level", 0.5),
+                tags=list(actor_entity.get("tags", []) or []),
+                eb_id=actor_id,
+                gateway_id=actor_entity.get("gateway_id", ""),
+            )
+            await add_data_points([dp])
     await container.trace_ledger.append_event(TraceEvent(
         event_type=TraceEventType.MEMBER_REMOVED,
         payload={"actor_id": actor_id, "team_id": team_id},
