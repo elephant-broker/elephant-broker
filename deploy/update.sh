@@ -68,6 +68,16 @@ set -euo pipefail
 PREFIX="/opt/elephantbroker"
 SERVICE_USER="elephantbroker"
 SERVICE_GROUP="elephantbroker"
+# Systemd unit names. Override precedence: --service-name flag > EB_SERVICE_NAME
+# env > default ("elephantbroker"). HITL_SERVICE_NAME defaults to
+# "${SERVICE_NAME}-hitl" so `--service-name foo` automatically targets the
+# "foo-hitl" HITL unit unless --hitl-service-name (or EB_HITL_SERVICE_NAME)
+# explicitly overrides. The HITL name is left as a sentinel here and resolved
+# AFTER flag parsing so the auto-derive sees the flag-set SERVICE_NAME.
+# An operator who installed with custom names must pass the same flags here
+# (or set the same env vars) so the script targets the matching unit files.
+SERVICE_NAME="${EB_SERVICE_NAME:-elephantbroker}"
+HITL_SERVICE_NAME="${EB_HITL_SERVICE_NAME:-}"  # sentinel; resolved post-parse
 CONFIG_DIR="/etc/elephantbroker"
 UPGRADE_LOCK=0
 RESTART=1
@@ -80,12 +90,15 @@ while [[ $# -gt 0 ]]; do
         --no-restart) RESTART=0; shift ;;
         --skip-plugins) SKIP_PLUGINS=1; shift ;;
         --prefix) PREFIX="$2"; shift 2 ;;
+        --service-name) SERVICE_NAME="$2"; shift 2 ;;
+        --hitl-service-name) HITL_SERVICE_NAME="$2"; shift 2 ;;
         --help|-h)
             cat <<'HELP'
 ElephantBroker DB-VM updater
 
 Usage:
   sudo ./update.sh [--upgrade] [--no-restart] [--skip-plugins] [--prefix PATH]
+                   [--service-name NAME] [--hitl-service-name NAME]
 
 Flags:
   --upgrade        Regenerate uv.lock before syncing. Use when a new dependency
@@ -96,6 +109,13 @@ Flags:
   --skip-plugins   Skip the TypeScript plugin rebuild step. Escape hatch for
                    dedicated DB-VM runs or npm-broken recovery scenarios.
   --prefix PATH    Override install prefix (default: /opt/elephantbroker)
+  --service-name NAME
+                   Override the runtime systemd unit name (must match the name
+                   used at install time). Default: "elephantbroker"; env:
+                   EB_SERVICE_NAME.
+  --hitl-service-name NAME
+                   Override the HITL systemd unit name. Default:
+                   "<SERVICE_NAME>-hitl"; env: EB_HITL_SERVICE_NAME.
   --help, -h       Show this message
 
 Default behavior (no --upgrade):
@@ -128,6 +148,11 @@ HELP
             ;;
     esac
 done
+
+# Resolve HITL_SERVICE_NAME from the final SERVICE_NAME if neither
+# --hitl-service-name nor EB_HITL_SERVICE_NAME was specified. This is what
+# makes `--service-name foo` automatically target a "foo-hitl" HITL unit.
+[[ -z "$HITL_SERVICE_NAME" ]] && HITL_SERVICE_NAME="${SERVICE_NAME}-hitl"
 
 # --- Helpers ---
 log()  { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
@@ -386,7 +411,7 @@ for env_file in "$CONFIG_DIR/env" "$CONFIG_DIR/hitl.env"; do
         warn "      secret=\$(openssl rand -hex 32)"
         warn "      sudo sed -i \"s|^EB_HITL_CALLBACK_SECRET=\$|EB_HITL_CALLBACK_SECRET=\$secret|\" \\"
         warn "          $CONFIG_DIR/env $CONFIG_DIR/hitl.env"
-        warn "      sudo systemctl restart elephantbroker-hitl"
+        warn "      sudo systemctl restart $HITL_SERVICE_NAME"
     fi
 done
 log "  EB_HITL_CALLBACK_SECRET presence check complete"
@@ -501,31 +526,43 @@ log "Step 7/8: re-install systemd unit files"
 # unit back in behind their backs; mirroring the "is the unit registered"
 # guard in step 7 keeps the two paths symmetric.
 SYSTEMD_TOUCHED=0
-if systemctl list-unit-files elephantbroker.service &>/dev/null; then
+# Sed-transform mirrors install.sh Step 7: line-anchored patterns rewrite the
+# live SyslogIdentifier / After= / Wants= directives ONLY (comments referencing
+# the default names are left untouched). User=/Group= remain controlled by
+# SERVICE_USER / SERVICE_GROUP — separate concern, not rewritten here.
+if systemctl list-unit-files "${SERVICE_NAME}.service" &>/dev/null; then
     if [[ -f "$PREFIX/deploy/systemd/elephantbroker.service" ]]; then
-        install -o root -g root -m 644 \
+        sed \
+            -e "s|^SyslogIdentifier=elephantbroker$|SyslogIdentifier=$SERVICE_NAME|" \
             "$PREFIX/deploy/systemd/elephantbroker.service" \
-            /etc/systemd/system/elephantbroker.service
-        log "  re-installed /etc/systemd/system/elephantbroker.service"
+            > "/etc/systemd/system/${SERVICE_NAME}.service"
+        chmod 644 "/etc/systemd/system/${SERVICE_NAME}.service"
+        chown root:root "/etc/systemd/system/${SERVICE_NAME}.service"
+        log "  re-installed /etc/systemd/system/${SERVICE_NAME}.service"
         SYSTEMD_TOUCHED=1
     else
         warn "  $PREFIX/deploy/systemd/elephantbroker.service missing in repo"
     fi
 else
-    log "  elephantbroker.service not registered — skipping (--no-systemd install?)"
+    log "  ${SERVICE_NAME}.service not registered — skipping (--no-systemd install?)"
 fi
-if systemctl list-unit-files elephantbroker-hitl.service &>/dev/null; then
+if systemctl list-unit-files "${HITL_SERVICE_NAME}.service" &>/dev/null; then
     if [[ -f "$PREFIX/deploy/systemd/elephantbroker-hitl.service" ]]; then
-        install -o root -g root -m 644 \
+        sed \
+            -e "s|^SyslogIdentifier=elephantbroker-hitl$|SyslogIdentifier=$HITL_SERVICE_NAME|" \
+            -e "s|^After=elephantbroker\.service|After=${SERVICE_NAME}.service|" \
+            -e "s|^Wants=\(.*\)elephantbroker\.service|Wants=\1${SERVICE_NAME}.service|" \
             "$PREFIX/deploy/systemd/elephantbroker-hitl.service" \
-            /etc/systemd/system/elephantbroker-hitl.service
-        log "  re-installed /etc/systemd/system/elephantbroker-hitl.service"
+            > "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+        chmod 644 "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+        chown root:root "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+        log "  re-installed /etc/systemd/system/${HITL_SERVICE_NAME}.service"
         SYSTEMD_TOUCHED=1
     else
         warn "  $PREFIX/deploy/systemd/elephantbroker-hitl.service missing in repo"
     fi
 else
-    log "  elephantbroker-hitl.service not registered — skipping"
+    log "  ${HITL_SERVICE_NAME}.service not registered — skipping"
 fi
 if [[ "$SYSTEMD_TOUCHED" -eq 1 ]]; then
     systemctl daemon-reload
@@ -536,19 +573,19 @@ fi
 log "Step 8/8: restart services"
 # =============================================================================
 if [[ "$RESTART" -eq 0 ]]; then
-    log "  --no-restart flag set — skipping (run 'systemctl restart elephantbroker' manually)"
+    log "  --no-restart flag set — skipping (run 'systemctl restart $SERVICE_NAME' manually)"
 else
-    if systemctl list-unit-files elephantbroker.service &>/dev/null; then
-        systemctl restart elephantbroker
-        log "  restarted elephantbroker"
+    if systemctl list-unit-files "${SERVICE_NAME}.service" &>/dev/null; then
+        systemctl restart "$SERVICE_NAME"
+        log "  restarted $SERVICE_NAME"
     else
-        warn "  elephantbroker.service not installed — skipping"
+        warn "  ${SERVICE_NAME}.service not installed — skipping"
     fi
-    if systemctl list-unit-files elephantbroker-hitl.service &>/dev/null; then
-        systemctl restart elephantbroker-hitl
-        log "  restarted elephantbroker-hitl"
+    if systemctl list-unit-files "${HITL_SERVICE_NAME}.service" &>/dev/null; then
+        systemctl restart "$HITL_SERVICE_NAME"
+        log "  restarted $HITL_SERVICE_NAME"
     else
-        warn "  elephantbroker-hitl.service not installed — skipping"
+        warn "  ${HITL_SERVICE_NAME}.service not installed — skipping"
     fi
 fi
 
@@ -558,9 +595,9 @@ log "Update complete."
 cat <<EOF
 
 Verify:
-  systemctl status elephantbroker elephantbroker-hitl
+  systemctl status $SERVICE_NAME $HITL_SERVICE_NAME
   curl http://localhost:8420/health/    # note trailing slash
   curl http://localhost:8421/health
-  journalctl -u elephantbroker -n 50
+  journalctl -u $SERVICE_NAME -n 50
 
 EOF

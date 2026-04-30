@@ -72,6 +72,14 @@ INSTALL_SYSTEMD=1
 ALLOW_OOT=0
 SERVICE_USER="elephantbroker"
 SERVICE_GROUP="elephantbroker"
+# Systemd unit names. Override precedence: --service-name flag > EB_SERVICE_NAME
+# env > default ("elephantbroker"). HITL_SERVICE_NAME defaults to
+# "${SERVICE_NAME}-hitl" so `--service-name foo` automatically yields the
+# "foo-hitl" HITL unit unless --hitl-service-name (or EB_HITL_SERVICE_NAME)
+# explicitly overrides. The HITL name is left as a sentinel here and resolved
+# AFTER flag parsing so the auto-derive sees the flag-set SERVICE_NAME.
+SERVICE_NAME="${EB_SERVICE_NAME:-elephantbroker}"
+HITL_SERVICE_NAME="${EB_HITL_SERVICE_NAME:-}"  # sentinel; resolved post-parse
 CONFIG_DIR="/etc/elephantbroker"
 DATA_DIR="/var/lib/elephantbroker"
 # TODO-3-637: pycache prefix for the editable-source C3/H-R2 narrowing.
@@ -87,12 +95,15 @@ while [[ $# -gt 0 ]]; do
         --no-systemd) INSTALL_SYSTEMD=0; shift ;;
         --prefix) PREFIX="$2"; shift 2 ;;
         --allow-out-of-tree) ALLOW_OOT=1; shift ;;
+        --service-name) SERVICE_NAME="$2"; shift 2 ;;
+        --hitl-service-name) HITL_SERVICE_NAME="$2"; shift 2 ;;
         --help|-h)
             cat <<'HELP'
 ElephantBroker DB-VM installer
 
 Usage:
   sudo ./install.sh [--no-systemd] [--prefix PATH] [--allow-out-of-tree]
+                    [--service-name NAME] [--hitl-service-name NAME]
 
 Flags:
   --no-systemd            Skip installing systemd unit files
@@ -100,6 +111,14 @@ Flags:
   --allow-out-of-tree     Permit running install.sh from a directory other than
                           $PREFIX. WITHOUT this flag, the script refuses to run
                           unless the source repo IS the prefix. See note below.
+  --service-name NAME     Override the runtime systemd unit name (default:
+                          "elephantbroker"; env: EB_SERVICE_NAME). The unit is
+                          installed at /etc/systemd/system/<NAME>.service.
+  --hitl-service-name NAME
+                          Override the HITL systemd unit name (default:
+                          "<SERVICE_NAME>-hitl"; env: EB_HITL_SERVICE_NAME).
+                          Use this to run multiple co-tenant runtimes on one
+                          host without systemd unit-name collisions.
   --help, -h              Show this message
 
 Typical workflow:
@@ -129,6 +148,11 @@ HELP
             ;;
     esac
 done
+
+# Resolve HITL_SERVICE_NAME from the final SERVICE_NAME if neither
+# --hitl-service-name nor EB_HITL_SERVICE_NAME was specified. This is what
+# makes `--service-name foo` automatically install a "foo-hitl" HITL unit.
+[[ -z "$HITL_SERVICE_NAME" ]] && HITL_SERVICE_NAME="${SERVICE_NAME}-hitl"
 
 # --- Helpers ---
 log()  { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
@@ -597,13 +621,36 @@ log "Step 7/8: install systemd unit files"
 if [[ "$INSTALL_SYSTEMD" -eq 0 ]]; then
     log "  --no-systemd flag set — skipping"
 else
-    install -o root -g root -m 644 \
+    # Sed-transform the packaged unit templates so SERVICE_NAME / HITL_SERVICE_NAME
+    # land in the live SyslogIdentifier, After=, and Wants= directives. Patterns
+    # are line-anchored (^...) so comments mentioning the default names — e.g.
+    # the D5 comment block in elephantbroker-hitl.service that documents the
+    # `Wants=elephantbroker.service` directive — are NOT rewritten. The unit-file
+    # User=/Group= lines are intentionally left alone (controlled by SERVICE_USER
+    # / SERVICE_GROUP, separate concern).
+    sed \
+        -e "s|^SyslogIdentifier=elephantbroker$|SyslogIdentifier=$SERVICE_NAME|" \
         "$REPO_DIR/deploy/systemd/elephantbroker.service" \
-        /etc/systemd/system/elephantbroker.service
-    install -o root -g root -m 644 \
+        > "/etc/systemd/system/${SERVICE_NAME}.service"
+    chmod 644 "/etc/systemd/system/${SERVICE_NAME}.service"
+    chown root:root "/etc/systemd/system/${SERVICE_NAME}.service"
+
+    # The HITL unit also rewrites its cross-reference to the runtime unit on
+    # the After= and Wants= directives. The Wants= line carries TWO values
+    # ("network-online.target elephantbroker.service") so we capture the
+    # leading content via \(.*\) and only rewrite the elephantbroker.service
+    # tail.
+    sed \
+        -e "s|^SyslogIdentifier=elephantbroker-hitl$|SyslogIdentifier=$HITL_SERVICE_NAME|" \
+        -e "s|^After=elephantbroker\.service|After=${SERVICE_NAME}.service|" \
+        -e "s|^Wants=\(.*\)elephantbroker\.service|Wants=\1${SERVICE_NAME}.service|" \
         "$REPO_DIR/deploy/systemd/elephantbroker-hitl.service" \
-        /etc/systemd/system/elephantbroker-hitl.service
-    log "  installed /etc/systemd/system/elephantbroker{,-hitl}.service"
+        > "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+    chmod 644 "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+    chown root:root "/etc/systemd/system/${HITL_SERVICE_NAME}.service"
+
+    log "  installed /etc/systemd/system/${SERVICE_NAME}.service"
+    log "  installed /etc/systemd/system/${HITL_SERVICE_NAME}.service"
 
     systemctl daemon-reload
     log "  systemctl daemon-reload"
@@ -614,8 +661,8 @@ else
     # when a reboot doesn't come back up and they can't find elephantbroker
     # in `systemctl list-unit-files`. `set -euo pipefail` above will abort
     # the install on non-zero exit.
-    systemctl enable elephantbroker elephantbroker-hitl >/dev/null 2>&1
-    log "  systemctl enable elephantbroker elephantbroker-hitl"
+    systemctl enable "$SERVICE_NAME" "$HITL_SERVICE_NAME" >/dev/null 2>&1
+    log "  systemctl enable $SERVICE_NAME $HITL_SERVICE_NAME"
 fi
 
 # =============================================================================
@@ -690,12 +737,12 @@ Next steps:
         cd $REPO_DIR/infrastructure && docker compose up -d
 
   5. Start the services:
-        sudo systemctl start elephantbroker elephantbroker-hitl
+        sudo systemctl start $SERVICE_NAME $HITL_SERVICE_NAME
 
   6. Verify:
-        systemctl status elephantbroker elephantbroker-hitl
+        systemctl status $SERVICE_NAME $HITL_SERVICE_NAME
         curl http://localhost:8420/health/    # note trailing slash
         curl http://localhost:8421/health
-        journalctl -u elephantbroker -f
+        journalctl -u $SERVICE_NAME -f
 
 EOF
