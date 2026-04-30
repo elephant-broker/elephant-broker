@@ -186,8 +186,37 @@ Optional flags:
 ```bash
 sudo /opt/elephantbroker/deploy/install.sh --no-systemd   # skip installing unit files
 sudo /opt/elephantbroker/deploy/install.sh --prefix /custom/path
+sudo /opt/elephantbroker/deploy/install.sh --service-name eb-staging  # custom unit name
 sudo /opt/elephantbroker/deploy/install.sh --help
 ```
+
+#### Multi-instance deployments (custom service names)
+
+To run multiple ElephantBroker instances on the same host (e.g. staging + production),
+use `--service-name` and optionally `--hitl-service-name` to install separate
+systemd units:
+
+```bash
+# Instance 1: production
+sudo /opt/eb-prod/deploy/install.sh --prefix /opt/eb-prod --service-name eb-prod
+
+# Instance 2: staging
+sudo /opt/eb-staging/deploy/install.sh --prefix /opt/eb-staging --service-name eb-staging
+```
+
+This installs `eb-prod.service` / `eb-prod-hitl.service` and
+`eb-staging.service` / `eb-staging-hitl.service` respectively. The HITL
+service name defaults to `<SERVICE_NAME>-hitl` unless explicitly overridden
+via `--hitl-service-name`.
+
+The same flags (or env vars `EB_SERVICE_NAME` / `EB_HITL_SERVICE_NAME`) must be
+passed to `deploy/update.sh` so it targets the correct unit files:
+
+```bash
+sudo /opt/eb-prod/deploy/update.sh --service-name eb-prod
+```
+
+Each instance needs its own `--prefix`, config directory, and `EB_GATEWAY_ID`.
 
 ### 3. Edit secrets
 
@@ -545,6 +574,12 @@ on production hosts. If you intentionally want to upgrade dependencies, use
 
 ```bash
 sudo /opt/elephantbroker/deploy/update.sh --upgrade
+```
+
+If you installed with a custom `--service-name`, pass it to `update.sh` too:
+
+```bash
+sudo /opt/elephantbroker/deploy/update.sh --service-name eb-prod
 ```
 
 The updater refuses to run on a dirty git tree — commit or stash any local

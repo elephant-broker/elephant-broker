@@ -2107,6 +2107,12 @@ systemd hardening directives — see `deploy/systemd/elephantbroker.service`
 for the full list (`ProtectSystem=strict`, `NoNewPrivileges=true`,
 `PrivateTmp=true`, `PrivateDevices=true`, etc.).
 
+The service names default to `elephantbroker` and `elephantbroker-hitl`.
+Custom names can be set via `--service-name` / `--hitl-service-name` flags
+(or `EB_SERVICE_NAME` / `EB_HITL_SERVICE_NAME` env vars) on
+`deploy/install.sh` and `deploy/update.sh`. See
+[DEPLOYMENT.md § Multi-instance deployments](DEPLOYMENT.md) for details.
+
 **elephantbroker.service:**
 - `Type=simple`, `User=elephantbroker`, `Group=elephantbroker`
 - `WorkingDirectory=/var/lib/elephantbroker`
